@@ -111,6 +111,7 @@ stamp_compact=$(date -u +"%Y%m%dT%H%M%SZ")
 safe_name=$(printf '%s' "$name" | tr -cs 'A-Za-z0-9._-' '_')
 experiment_id="${stamp_compact}_${safe_name}"
 run_id="${RUN_ID:-$experiment_id}"
+venv_bin="$repo_root/.venv/bin"
 
 resolve_path() {
   case "$1" in
@@ -164,6 +165,9 @@ wallclock_start=$(wallclock_now)
 set +e
 (
   cd "$repo_root"
+  if [[ -d "$venv_bin" ]]; then
+    export PATH="$venv_bin:$PATH"
+  fi
   RUN_ID="$run_id" PYTHONUNBUFFERED=1 "$@"
 ) >"$log_path" 2>&1
 exit_code=$?
