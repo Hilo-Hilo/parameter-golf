@@ -636,3 +636,57 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x352 i600` as the new remote pivot.
 - Continue the width ladder one hypothesis at a time, with the next cheap probe likely `8x384` to determine whether the width gains persist past the first sign of flattening.
+
+## 2026-03-19 02:41 PDT — 8x384 beats 8x352 and shrinks the compressed artifact
+
+### Why this entry exists
+- `8x352` looked like the first hint that the width ladder might be flattening, so the next single-axis check was `8x384` at the same depth and training budget.
+- This entry records that follow-up because it invalidated the flattening concern on this budget and produced another new repo best.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `510.171901s`
+
+### Attempt and result
+1. `20260319T093220Z_dgx_cuda_nocompile_l8_d384_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.03403242`
+   - pre-quant `val_bpb`: `2.0324`
+   - final val loss: `3.43437854`
+   - bytes total: `5,596,614`
+   - bytes model: `5,548,740`
+   - wallclock: `510.171901s`
+   - command shape: `8` layers, `384` model dim, `4` heads, `2` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the width ladder is still clearly profitable; `8x384` beat `8x352` by `0.00799394` exact `val_bpb`, beat `8x320` by `0.01328204`, and beat the prior best local MLX `7x256 i600` score by `0.03802803`
+
+### Artifact and scaling notes
+- This run reversed the prior compression concern:
+  - `8x352` bytes total: `5,979,040`
+  - `8x384` bytes total: `5,596,614`
+- Despite the larger raw serialized model (`33,902,413` bytes), the compressed int8 artifact was `382,426` bytes smaller than `8x352`.
+- Wallclock rose by about `34.11s` versus `8x352`, which is a modest cost relative to the score gain.
+
+### Milestone reporting completed
+- Ran:
+  - `openclaw system event --text "Parameter Golf milestone: DGX 8x384 i600 reached new best exact val_bpb under 5.6MB total artifact" --mode now`
+
+### What changed in the search picture
+- The current best remote width ladder at `8` layers is now:
+  - `8x256 i600`: `2.07359205`
+  - `8x288 i600`: `2.06558493`
+  - `8x320 i600`: `2.04731446`
+  - `8x352 i600`: `2.04202636`
+  - `8x384 i600`: `2.03403242`
+- On the current one-shard DGX budget, width remains the dominant architecture branch tested so far, and the surprising compression behavior is still favorable.
+
+### Immediate next direction
+- Keep `8x384 i600` as the new remote pivot.
+- Continue the width ladder one hypothesis at a time, with the next cheap probe likely `8x416` to determine how long this favorable score-plus-compression trend persists.
