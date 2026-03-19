@@ -325,3 +325,115 @@ Why this mattered:
 
 ### Approach note
 - The repo-local worker is now live again under the updated prompt/spec/launcher metadata and can continue building from this remote-first stance until Hanson manually stops it.
+
+## 2026-03-19 01:01 PDT — DGX Spark remote CUDA lane repaired; first real remote baseline and depth win logged
+
+### Why this entry exists
+- The remote-first loop needed an actually usable CUDA lane before architecture search could continue.
+- DGX Spark was reachable, but the initial software stack was not usable for `train_gpt.py`.
+- This entry records the remote repair work, the failure modes encountered, the minimal trainer fallback added to keep the repo usable, and the first completed DGX Spark comparison runs.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote repo path created for this work: `~/parameter-golf`
+- Remote dataset/tokenizer state used for all scored runs in this entry:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Approximate elapsed time for this update: about 30 minutes end to end including remote setup, repair, smoke validation, and two scored architecture runs
+
+### Remote setup and infra findings
+- Confirmed SSH access to `dgx-spark` from the local machine.
+- Cloned `Hilo-Hilo/parameter-golf` onto DGX Spark and checked out branch `research/continuous-mar18`.
+- Downloaded the cheap comparable dataset subset with `python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 1`.
+- Found the DGX system Python environment had `torch 2.10.0+cpu`, so the first CUDA trainer launch failed immediately with `RuntimeError: CUDA is required`.
+- Created a clean remote venv `~/parameter-golf/.venv-cuda` and installed:
+  - `numpy`
+  - `sentencepiece`
+  - `torch==2.9.0+cu128`
+  - `torchvision==0.24.0`
+  - `torchaudio==2.9.0`
+- Verified the repaired venv saw the GPU:
+  - `torch.cuda.is_available() == True`
+  - device count `1`
+  - device name `NVIDIA GB10`
+- The next trainer launch then failed inside Triton / Inductor because the host lacked `Python.h`; `/usr/include/python3.12` existed but only contained Pillow imaging headers, not Python development headers, and passwordless `sudo` was not available.
+
+### Repo edit completed in this update
+- `train_gpt.py`
+  - added `DISABLE_COMPILE` env handling
+  - guarded both `torch.compile(zeropower_via_newtonschulz5)` and `torch.compile(base_model, ...)`
+  - logged `torch_compile:enabled|disabled` in the run log
+- Purpose of the edit:
+  - preserve the default compiled fast path for normal CUDA hosts
+  - provide a minimal remote fallback for GB10 / ARM hosts where Triton's native build path is blocked by missing system headers
+- Validation for the repo edit:
+  - `python3 -m py_compile train_gpt.py` passed locally
+  - copied the updated `train_gpt.py` to `~/parameter-golf/train_gpt.py` on DGX Spark for immediate testing
+
+### Attempts and results
+1. `20260319T073629Z_dgx_l7_d256_i600_cal1`
+   - status: `crash`
+   - hardware: DGX Spark GB10
+   - wallclock: `3.337413s`
+   - result: failed immediately because the remote default Torch build was CPU-only
+   - conclusion: DGX connectivity was fine; runtime stack was not
+
+2. `20260319T074326Z_dgx_cuda_smoke_l7_d256_i10`
+   - status: `crash`
+   - hardware: DGX Spark GB10 with repaired CUDA venv
+   - wallclock: `10.687298s`
+   - result: reached CUDA but failed in Triton / Inductor native helper compilation because `Python.h` was unavailable
+   - conclusion: a trainer-side compile fallback was the cleanest unblocker
+
+3. `20260319T074539Z_dgx_cuda_nocompile_smoke_l7_d256_i10`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `4.05009256`
+   - pre-quant `val_bpb`: `4.0449`
+   - final val loss: `6.83841164`
+   - bytes total: `3,132,014`
+   - wallclock: `224.752517s`
+   - conclusion: the no-compile fallback produced the first valid canonical DGX Spark row and fully unblocked the remote lane
+
+4. `20260319T075011Z_dgx_cuda_nocompile_l7_d256_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.07993040`
+   - pre-quant `val_bpb`: `2.0791`
+   - final val loss: `3.51187535`
+   - bytes total: `4,054,116`
+   - wallclock: `294.237825s`
+   - conclusion: this established the first meaningful remote baseline; it was much faster than the comparable local MLX lane while remaining far under the artifact cap
+
+5. `20260319T075551Z_dgx_cuda_nocompile_l8_d256_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.07359205`
+   - pre-quant `val_bpb`: `2.0726`
+   - final val loss: `3.50117332`
+   - bytes total: `4,595,170`
+   - wallclock: `332.748109s`
+   - conclusion: the first real remote architecture move worked; adding one layer improved exact final `val_bpb` by `0.00633835` versus the remote `7x256` baseline while preserving ample byte headroom
+
+### Milestone reporting completed
+- Ran:
+  - `openclaw system event --text "Parameter Golf milestone: DGX Spark remote CUDA lane unblocked with DISABLE_COMPILE fallback; first canonical remote smoke row completed" --mode now`
+
+### What the data suggests now
+- The DGX Spark remote lane is now materially more useful than the local MLX lane for ongoing search:
+  - `7x256 i600` on DGX Spark completed in `294.237825s`
+  - the comparable best local MLX `7x256 i600` run took `735.800758s`
+- The depth trend from local MLX survives on the remote PyTorch lane:
+  - remote `7x256 i600`: `2.07993040`
+  - remote `8x256 i600`: `2.07359205`
+- The remote `8x256` result did not beat the earlier local MLX `7x256 i600` exact score of `2.07206045`, but it came very close while giving a much faster iteration loop and a cleaner path for continued architecture search.
+
+### Immediate next direction
+- Keep the DGX Spark lane as the primary search path for now, using `DISABLE_COMPILE=1` on this host.
+- Stay architecture-first.
+- The next cheap decisive remote branch should likely test one of:
+  - `9x256` at the same step budget to see whether depth continues paying
+  - a modest width reallocation around the new best remote depth while watching byte growth
