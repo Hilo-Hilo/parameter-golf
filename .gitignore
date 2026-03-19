@@ -8,4 +8,9 @@ data/manifest.json
 data/docs_selected.jsonl
 .mypy_cache/
 .venv
+.venv/
 logs/
+final_model.pt
+final_model.int8.ptz
+results/*.tmp
+results/*.lock

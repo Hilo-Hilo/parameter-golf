@@ -1,0 +1,1 @@
+ts_utc	experiment_id	run_id	track	trainer	branch	commit	status	exit_code	exact_final_val_bpb	pre_quant_val_bpb	final_val_loss	pre_quant_val_loss	bytes_total	bytes_code	bytes_model	wallclock_seconds	step_stop	log_path	submission_path	notes
