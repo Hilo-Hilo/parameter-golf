@@ -10,6 +10,8 @@ data/docs_selected.jsonl
 .venv
 .venv/
 logs/
+automation/logs/
+automation/state/
 final_model.pt
 final_model.int8.ptz
 results/*.tmp
