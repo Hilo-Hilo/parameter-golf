@@ -1223,3 +1223,71 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the active remote pivot.
 - Move the next cheap probe to a different nearby parameter-allocation branch rather than more width or more attention heads, with the leading candidate now a depth check such as `9x544 i600` if bytes fit cleanly under the cap.
+
+## 2026-03-19 08:04 PDT — 9x544 KV4 depth probe sets a new repo best after one wrapper-path crash
+
+### Why this entry exists
+- After `8x544 i600` with `NUM_HEADS=4` and `NUM_KV_HEADS=4` became the active remote pivot, the next highest-signal single-axis probe was extra depth at the same width and full-KV allocation.
+- This entry records that branch because the clean rerun beat the prior repo best by more than the leaderboard noise threshold while remaining comfortably under the artifact cap.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote repo parity check before launch:
+  - remote checkout `HEAD`: `ead46ea`
+  - remote `train_gpt.py` SHA-256 matched the local working copy: `11d75807f9db69f9c000c0d196afb565e5cb011ef6ed414a6f444fa6c7a43b18`
+- Remote dataset/tokenizer state for these attempts:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+
+### Attempts and results
+1. `20260319T144724Z_dgx_cuda_nocompile_l9_d544_kv4_i600`
+   - status: `crash`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - wallclock: `0.674252s`
+   - failure mode: immediate remote start failure
+   - root cause: I pointed the remote command at `~/.venv-cuda/bin/python3`, but the CUDA venv on this host lives at `~/parameter-golf/.venv-cuda/bin/python3`
+   - conclusion: wrapper-path mistake only; the hypothesis itself was not tested by this first attempt
+
+2. `20260319T144745Z_dgx_cuda_nocompile_l9_d544_kv4_i600_rerun`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.98140198`
+   - pre-quant `val_bpb`: `1.9795`
+   - final val loss: `3.34551425`
+   - pre-quant val loss: `3.3423`
+   - bytes total: `13,073,918`
+   - bytes model: `13,026,044`
+   - wrapped wallclock: `977.892933s`
+   - quantized roundtrip eval time: `399677ms`
+   - command shape: `9` layers, `544` model dim, `4` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the depth-up branch on the stronger KV4 pivot was clearly worth it; `9x544 KV4` beat the prior best `8x544 KV4` by `0.00757621` exact `val_bpb`
+
+### Artifact and scaling notes
+- Compared with the prior best `8x544 i600` KV4 pivot:
+  - exact `val_bpb`: `1.98897819 -> 1.98140198`
+  - pre-quant `val_bpb`: `1.9871 -> 1.9795`
+  - bytes total: `11,687,478 -> 13,073,918`
+  - wallclock: `872.776429s -> 977.892933s`
+- The compressed artifact remains valid with room under the cap:
+  - `bytes_total`: `13,073,918`
+  - remaining headroom: `2,926,082`
+- The run also improved the pre-quant metric, so this looks like a real modeling gain rather than a compression-only effect.
+
+### Milestone reporting completed
+- Ran:
+  - `openclaw system event --text "Parameter Golf milestone: DGX 9x544 KV4 i600 reached new best exact val_bpb 1.98140198 under 13.08MB total artifact" --mode now`
+
+### What changed in the search picture
+- The best current remote frontier is now:
+  - `8x544 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.98897819`
+  - `8x576 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.99156207`
+  - `9x544 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.98140198`
+- This is the first clean sign that the full-KV neighborhood still wanted more depth after the `8x544` width pivot, not just a better attention allocation.
+
+### Immediate next direction
+- Keep `9x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the new active remote pivot.
+- Shift the next cheap probe to a nearby depth-vs-width reallocation at similar byte scale, with the leading candidate now `10x512 i600` while keeping `NUM_HEADS=4` and `NUM_KV_HEADS=4`.
