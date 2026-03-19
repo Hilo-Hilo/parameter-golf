@@ -1116,3 +1116,110 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x544 i600` with `NUM_KV_HEADS=4` as the new active remote pivot.
 - Continue on nearby attention architecture at the same pivot, with the next clean single-axis probe now likely a head-count check such as `NUM_HEADS=8` while keeping `NUM_KV_HEADS=4`.
+
+## 2026-03-19 06:03 PDT — More attention heads regress at the KV4 pivot; keep 4 heads
+
+### Why this entry exists
+- After `8x544 i600` with `NUM_KV_HEADS=4` set the new repo best, the next clean single-axis attention probe was the planned head-count check at the same width, depth, and training budget.
+- This entry records that run because it cleanly separated the value of full KV allocation from the value of finer attention partitioning, and the answer was negative.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote repo state at launch:
+  - branch: `research/continuous-mar18`
+  - remote `train_gpt.py` SHA-256 still matched the local working copy: `11d75807f9db69f9c000c0d196afb565e5cb011ef6ed414a6f444fa6c7a43b18`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `820.302265s`
+
+### Attempt and result
+1. `20260319T134524Z_dgx_cuda_nocompile_l8_d544_h8_kv4_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.01746457`
+   - pre-quant `val_bpb`: `2.0157`
+   - final val loss: `3.40640442`
+   - bytes total: `10,292,655`
+   - bytes model: `10,244,781`
+   - wallclock: `820.302265s`
+   - command shape: `8` layers, `544` model dim, `8` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: increasing head count from `4 -> 8` at the `8x544 KV4` pivot was a decisive regression; it lost to the current pivot by `0.02848638` exact `val_bpb` and also regressed pre-quant, so the better result came from keeping larger per-head dimensions rather than splitting attention more finely
+
+### Artifact and scaling notes
+- Compared with the current best `8x544 i600` KV4 pivot with `4` heads:
+  - exact `val_bpb`: `1.98897819 -> 2.01746457`
+  - pre-quant `val_bpb`: `1.9871 -> 2.0157`
+  - bytes total: `11,687,478 -> 10,292,655`
+  - wallclock: `872.776429s -> 820.302265s`
+- The run stayed comfortably under the artifact cap:
+  - `bytes_total`: `10,292,655`
+  - remaining headroom: `5,707,345`
+- Because both pre-quant and exact roundtrip metrics worsened materially, this is a real modeling loss rather than a compression-only trade.
+
+### What changed in the search picture
+- Around the best current remote pivot, the nearby attention-axis picture is now:
+  - `8x544 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=2`: `2.00436903`
+  - `8x544 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.98897819`
+  - `8x544 i600`, `NUM_HEADS=8`, `NUM_KV_HEADS=4`: `2.01746457`
+- That means the profitable change was restoring full KV heads, not increasing the total number of attention heads.
+
+### Immediate next direction
+- Keep `8x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the active remote pivot.
+- Shift the next cheap probe away from head-count and back to parameter allocation around the winning attention setup, with the leading candidate now `8x576 i600` while keeping `NUM_HEADS=4` and `NUM_KV_HEADS=4`.
+
+## 2026-03-19 06:20 PDT — Width at 576 stays close on KV4 but still loses to 8x544
+
+### Why this entry exists
+- After the head-count probe showed that the `8x544 KV4` gain did not come from using more attention heads, the next highest-signal nearby architecture check was width again on top of the stronger KV allocation.
+- This entry records that run because it answers whether the earlier `8x576` width regression was specific to the leaner `NUM_KV_HEADS=2` branch or whether `544` is still the local optimum once full KV heads are restored.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `925.533893s`
+
+### Attempt and result
+1. `20260319T140000Z_dgx_cuda_nocompile_l8_d576_kv4_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.99156207`
+   - pre-quant `val_bpb`: `1.9897`
+   - final val loss: `3.36266913`
+   - bytes total: `12,893,076`
+   - bytes model: `12,845,202`
+   - wallclock: `925.533893s`
+   - command shape: `8` layers, `576` model dim, `4` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: width on the stronger KV4 branch stayed competitive, but `8x576` still missed the `8x544 KV4` pivot by `0.00258388` exact `val_bpb`; this is a narrow negative result, not a collapse
+
+### Artifact and scaling notes
+- Compared with the current best `8x544 i600` KV4 pivot:
+  - exact `val_bpb`: `1.98897819 -> 1.99156207`
+  - pre-quant `val_bpb`: `1.9871 -> 1.9897`
+  - bytes total: `11,687,478 -> 12,893,076`
+  - wallclock: `872.776429s -> 925.533893s`
+- The artifact remains submittable with room left under the cap:
+  - `bytes_total`: `12,893,076`
+  - remaining headroom: `3,106,924`
+- Because both pre-quant and exact roundtrip metrics were slightly worse, the miss appears to be a real small-model-quality loss rather than a compression artifact.
+
+### What changed in the search picture
+- The width picture around the best KV4 attention allocation is now:
+  - `8x544 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.98897819`
+  - `8x576 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.99156207`
+- That means the local optimum on the tested width ladder still appears to sit around `544`, but only narrowly once full KV heads are enabled.
+- Combined with the `NUM_HEADS=8` regression, the current best neighborhood is now tightly constrained around the original `8x544`, `4`-head, `4`-KV configuration.
+
+### Immediate next direction
+- Keep `8x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the active remote pivot.
+- Move the next cheap probe to a different nearby parameter-allocation branch rather than more width or more attention heads, with the leading candidate now a depth check such as `9x544 i600` if bytes fit cleanly under the cap.
