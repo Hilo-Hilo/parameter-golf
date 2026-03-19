@@ -535,3 +535,49 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x288 i600` as the new remote pivot.
 - Continue width exploration one hypothesis at a time from this pivot, with the next cheap branch likely another modest width increase at `8` layers while watching whether the surprising compression gain persists.
+
+## 2026-03-19 01:57 PDT — Width keeps paying at 8 layers; 8x320 sets a new repo best
+
+### Why this entry exists
+- `8x288` was strong enough that the next clean branch was another modest width increase at the same `8`-layer depth.
+- This entry records that follow-up run because it improved the exact final roundtrip metric by a large margin again.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `415.404068s`
+
+### Attempt and result
+1. `20260319T084932Z_dgx_cuda_nocompile_l8_d320_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.04731446`
+   - pre-quant `val_bpb`: `2.0462`
+   - final val loss: `3.45680471`
+   - bytes total: `5,018,127`
+   - bytes model: `4,970,253`
+   - wallclock: `415.404068s`
+   - command shape: `8` layers, `320` model dim, `4` heads, `2` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the width branch continues to dominate the depth branch on this DGX budget; `8x320` beat `8x288` by `0.01827047` exact `val_bpb`, beat the previous remote depth pivot `8x256` by `0.02627759`, and beat the prior repo-best local MLX `7x256 i600` score by `0.02474599`
+
+### Artifact and scaling notes
+- Compared with `8x288`, the compressed artifact grew by `871,847` bytes and wallclock grew by about `36.90s`, but both costs were small relative to the score gain.
+- Even at `8x320`, total artifact bytes are still only `5,018,127`, leaving enormous headroom under the `16,000,000` byte cap.
+- The raw serialized model grew to `23,669,581` bytes, but int8 + zlib still compressed it effectively enough to stay far below the cap.
+
+### What changed in the search picture
+- The current best remote width ladder at `8` layers is now:
+  - `8x256 i600`: `2.07359205`
+  - `8x288 i600`: `2.06558493`
+  - `8x320 i600`: `2.04731446`
+- On the current one-shard DGX search budget, width growth at fixed depth is now the clearest profitable direction tested so far.
+
+### Immediate next direction
+- Keep `8x320 i600` as the new remote pivot.
+- Continue the width ladder one hypothesis at a time at `8` layers, with the next cheap probe likely another modest increase such as `8x352` while monitoring whether the gain curve starts to flatten or the compressed artifact trend turns unfavorable.
