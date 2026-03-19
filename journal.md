@@ -1424,3 +1424,22 @@ Why this mattered:
 ### Immediate next direction
 - Keep `9x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the active remote pivot.
 - Shift the next probe away from the immediate width/depth reallocations around `9x544`, with the best next branch now likely a cheap optimization or parameter-allocation change that preserves the winning shape rather than moving farther up the current width ladder.
+
+## 2026-03-19 10:07 PDT — In-progress launch: 9x560 KV4 fine-grained width probe
+
+### Why this entry exists
+- `9x576 KV4` stayed valid but lost narrowly enough that the current local optimum might still sit between `544` and `576`.
+- This note records the next live attempt before it finishes so the durable journal preserves the active hypothesis even if the session is interrupted mid-run.
+
+### Attempt launched
+1. `20260319T170634Z_dgx_cuda_nocompile_l9_d560_kv4_i600`
+   - status: in progress at the time of this entry
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - local wrapper commit at launch: `4973508884bea4236d7acfd221f22760ce9ba10d`
+   - hypothesis: after `9x576 KV4` proved too wide but stayed close, a finer width increase from `544 -> 560` at the same `9`-layer `4`-head `4`-KV budget will locate a better local optimum and beat the current `9x544 KV4` exact `val_bpb`
+   - command shape: `9` layers, `560` model dim, `4` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - early live signal: launch succeeded cleanly and early step time was back in the expected remote regime around `291ms`
+
+### Immediate next direction
+- Let `20260319T170634Z_dgx_cuda_nocompile_l9_d560_kv4_i600` finish and treat its exact final roundtrip `val_bpb` as canonical.
+- If it loses to `9x544 KV4`, keep the frontier at `9x544` and shift the next probe off the immediate width axis.
