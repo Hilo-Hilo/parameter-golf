@@ -1059,3 +1059,60 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x544 i600` as the active remote pivot.
 - Shift the next cheap probe to a different nearby architecture axis at the same pivot rather than further width or depth, with the leading candidate now a KV-allocation check such as `8x544 i600` with `NUM_KV_HEADS=4`.
+
+## 2026-03-19 06:16 PDT — Full KV heads at the 8x544 pivot set a new repo best
+
+### Why this entry exists
+- After both nearby reallocations around `8x544` lost cleanly (`8x576` for more width and `9x512` for more depth), the next untouched local architecture axis was attention KV allocation at the same pivot.
+- This entry records that probe because it produced the best exact roundtrip score in the repo so far.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `872.776429s`
+
+### Attempt and result
+1. `20260319T130254Z_dgx_cuda_nocompile_l8_d544_kv4_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.98897819`
+   - pre-quant `val_bpb`: `1.9871`
+   - final val loss: `3.35830636`
+   - bytes total: `11,687,478`
+   - bytes model: `11,639,604`
+   - wallclock: `872.776429s`
+   - command shape: `8` layers, `544` model dim, `4` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: restoring full KV heads at the `8x544` pivot was decisively worth it; this run beat the prior best `8x544` GQA pivot by `0.01539084` exact `val_bpb` while staying under the artifact cap by a wide margin
+
+### Artifact and scaling notes
+- Compared with the prior best `8x544 i600` GQA run (`NUM_KV_HEADS=2`):
+  - exact `val_bpb`: `2.00436903 -> 1.98897819`
+  - pre-quant `val_bpb`: `2.0023 -> 1.9871`
+  - bytes total: `10,313,039 -> 11,687,478`
+  - wallclock: `793.511867s -> 872.776429s`
+- The compressed artifact remains safely submittable:
+  - `bytes_total`: `11,687,478`
+  - remaining headroom: `4,312,522`
+- Because both pre-quant and exact roundtrip metrics improved materially, this is a real model-quality gain rather than a compression-side artifact.
+
+### Milestone reporting completed
+- Ran:
+  - `openclaw system event --text "Parameter Golf milestone: DGX 8x544 KV4 i600 reached new best exact val_bpb 1.98897819 under 11.69MB total artifact" --mode now`
+
+### What changed in the search picture
+- The current best nearby remote frontier is now:
+  - `8x544 i600` with `NUM_KV_HEADS=2`: `2.00436903`
+  - `8x576 i600` with `NUM_KV_HEADS=2`: `2.00516912`
+  - `9x512 i600` with `NUM_KV_HEADS=2`: `2.01603587`
+  - `8x544 i600` with `NUM_KV_HEADS=4`: `1.98897819`
+- Around the best width/depth pivot found so far, attention allocation just proved to be a much higher-leverage branch than the immediate nearby width-up or depth-up reallocations.
+
+### Immediate next direction
+- Keep `8x544 i600` with `NUM_KV_HEADS=4` as the new active remote pivot.
+- Continue on nearby attention architecture at the same pivot, with the next clean single-axis probe now likely a head-count check such as `NUM_HEADS=8` while keeping `NUM_KV_HEADS=4`.
