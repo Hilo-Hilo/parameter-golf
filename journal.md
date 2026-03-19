@@ -483,3 +483,55 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x256 i600` as the remote pivot configuration.
 - Shift the next cheap architecture probe from additional depth to a modest width reallocation around `8x256`, watching exact roundtrip `val_bpb`, byte growth, and total wallclock together.
+
+## 2026-03-19 01:48 PDT — Width reallocation at the 8-layer pivot produces a new best score
+
+### Why this entry exists
+- After `9x256` regressed relative to `8x256`, the next single-axis remote branch was a modest width increase at the `8`-layer pivot.
+- This entry records that width result because it produced the new best exact final `val_bpb` in the repo so far.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `378.508121s`
+
+### Attempt and result
+1. `20260319T084141Z_dgx_cuda_nocompile_l8_d288_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.06558493`
+   - pre-quant `val_bpb`: `2.0643`
+   - final val loss: `3.48765362`
+   - bytes total: `4,146,280`
+   - bytes model: `4,098,406`
+   - wallclock: `378.508121s`
+   - command shape: `8` layers, `288` model dim, `4` heads, `2` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: reallocating budget from extra depth into extra width at the `8`-layer pivot was clearly the better move; this run beat remote `8x256` by `0.00800712` exact `val_bpb`, beat remote `9x256` by `0.01086215`, and beat the prior repo best local MLX `7x256 i600` score by `0.00647552`
+
+### Notable artifact behavior
+- Despite having a larger uncompressed serialized model (`19,241,293` bytes) than remote `8x256`, the quantized + compressed model artifact was **smaller**:
+  - remote `8x256` bytes model: `4,547,296`
+  - remote `8x288` bytes model: `4,098,406`
+- Total artifact size dropped by `448,890` bytes while score improved, which makes this result especially attractive for further width-side exploration.
+
+### Milestone reporting completed
+- Ran:
+  - `openclaw system event --text "Parameter Golf milestone: DGX 8x288 i600 reached new best exact val_bpb 2.06558493 under 4.15MB total artifact" --mode now`
+
+### What changed in the search picture
+- The current remote architecture picture is now:
+  - `7x256 i600`: `2.07993040`
+  - `8x256 i600`: `2.07359205`
+  - `9x256 i600`: `2.07644708`
+  - `8x288 i600`: `2.06558493`
+- For this cheap DGX budget, the best marginal direction is now clearly width at `8` layers rather than more depth at `256` width.
+
+### Immediate next direction
+- Keep `8x288 i600` as the new remote pivot.
+- Continue width exploration one hypothesis at a time from this pivot, with the next cheap branch likely another modest width increase at `8` layers while watching whether the surprising compression gain persists.
