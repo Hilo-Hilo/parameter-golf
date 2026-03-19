@@ -1957,3 +1957,131 @@ Why this mattered:
 ### Immediate next direction
 - Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=512`, `i600` as the new active remote frontier.
 - The next highest-signal single-axis follow-up is another sequence-length regime probe that trades off score versus throughput, rather than returning to the already-bounded local width/KV/MLP neighborhood.
+
+## 2026-03-19 16:06 PDT — Hanson clarified the main objective: beat the README Naive Baseline first
+
+### Why this entry exists
+- Hanson explicitly redirected the search objective in Telegram: stop treating the current repo-best score as the finish line and prioritize beating the README `Naive Baseline` at exact final `val_bpb = 1.2244`.
+- This means the project should no longer optimize primarily for small local frontier improvements unless those branches plausibly move the search toward that global target.
+
+### Objective change
+- New primary target: beat `1.2244` exact final `val_bpb` from the README leaderboard entry:
+  - `Naive Baseline`
+  - score: `1.2244`
+  - README row identifies it as `9layer 512dim 1024vocab TiedEmbeddings 4 KV heads`
+- Current best repo result is still far above that target:
+  - active best remote run: `20260319T220618Z_dgx_cuda_nocompile_l9_d544_kv4_seq512_i600`
+  - exact final `val_bpb = 1.96725810`
+- So the remaining gap to beat the README baseline is still very large, and the search should act accordingly.
+
+### Practical implication for the research loop
+- Branch selection should now favor higher-upside changes with a plausible path toward the README baseline rather than narrow local-neighborhood probes that only shave a few thousandths off a score still far above `1.2244`.
+- This likely shifts the next search budget toward more global levers (data/training regime, tokenizer/compression/trainer behavior, or broader architecture changes) instead of only continuing tiny frontier-adjacent tweaks.
+
+## 2026-03-19 16:20 PDT — Baseline record is fully inspectable; the main gap is training regime, not hidden methodology
+
+### What was checked
+- README leaderboard entry for `Naive Baseline` (`1.2244`)
+- `records/track_10min_16mb/2026-03-17_NaiveBaseline/README.md`
+- `records/track_10min_16mb/2026-03-17_NaiveBaseline/submission.json`
+- `records/track_10min_16mb/2026-03-17_NaiveBaseline/train.log`
+- `records/track_10min_16mb/2026-03-17_NaiveBaseline/train_gpt.py`
+
+### Key conclusion
+- The baseline does have code and methodology, and it is not a black box.
+- The bigger issue is that the baseline's training regime is massively stronger than the current one-GPU DGX proxy lane.
+
+### Baseline methodology extracted
+- Layout: `VOCAB_SIZE=1024 NUM_LAYERS=9 MODEL_DIM=512 NUM_HEADS=8 NUM_KV_HEADS=4 MLP_MULT=2`
+- Tied embeddings: `TIE_EMBEDDINGS=1`
+- Tied embedding LR: `TIED_EMBED_LR=0.05`
+- Train batch: `TRAIN_BATCH_TOKENS=524288`
+- Train sequence length: `TRAIN_SEQ_LEN=1024`
+- Hardware: `8xH100`
+- Time budget: `MAX_WALLCLOCK_SECONDS=600`
+- It reached `13780` steps before wallclock stop and saw `7,224,688,640` train tokens
+- Final exact canonical score: `1.22436570`
+
+### Code comparison to current repo
+- The baseline record includes a full `train_gpt.py` snapshot.
+- Compared with the current repo `train_gpt.py`, the diff is very small.
+- Main functional difference observed:
+  - baseline hard-enables `torch.compile`
+  - current repo added `DISABLE_COMPILE` logic to support the GB10 / current remote lane
+- So there is no hidden baseline code trick of comparable size to explain the entire score gap.
+
+### Search implication
+- Current best remote repo score is still `1.96725810`, which is far from `1.2244`.
+- That gap is too large to plausibly close through tiny local-neighborhood tweaks alone.
+- To beat the baseline, the search should explicitly learn from the baseline regime and then either:
+  - reproduce a closer approximation of its throughput/optimization conditions on stronger hardware, or
+  - find a qualitatively better training/tokenizer/compression strategy with enough upside to overcome the huge token-throughput gap.
+
+## 2026-03-19 16:23 PDT — `TRAIN_SEQ_LEN=256` slightly improves pre-quant quality but loses to `seq512` on exact roundtrip while cutting wallclock sharply
+
+### Why this entry exists
+- After `TRAIN_SEQ_LEN=512` produced the current best exact canonical score, the next single-axis follow-up was to test whether the sequence-length branch still improved when shortened further.
+- This entry records that `seq256` outcome and closes the immediate "keep shrinking sequence length" question for the current `9x544 KV4` frontier.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Wrapped wallclock: `966.387311s`
+- Train-time-only runtime at step `600`: `165999ms`
+- Quantized roundtrip eval time from the final exact log: `394044ms`
+- Remote repo state note before launch:
+  - attempted to fast-forward `~/parameter-golf` to `origin/research/continuous-mar18`
+  - pull was blocked because remote `train_gpt.py` was locally modified relative to the stale remote checkout at `ead46ea`
+  - verified by SHA-256 that the remote `train_gpt.py` already matched the current local committed trainer exactly (`11d75807f9db69f9c000c0d196afb565e5cb011ef6ed414a6f444fa6c7a43b18`)
+  - so I did not force-reset the remote checkout; I launched the run against the matching remote trainer as-is
+
+### Attempt and result
+1. `20260319T230654Z_dgx_cuda_nocompile_l9_d544_kv4_seq256_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.96640037`
+   - pre-quant `val_bpb`: `1.9643`
+   - exact final val loss: `3.32018465`
+   - pre-quant val loss: `3.3166`
+   - bytes total: `13,162,082`
+   - bytes model: `13,114,208`
+   - observed model params: `21,886,244`
+   - command shape: `9` layers, `544` model dim, `4` heads, `4` KV heads, tied embeddings, `MLP_MULT=2`, `TRAIN_SEQ_LEN=256`, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: shortening from `seq512` to `seq256` improved the pre-quant metric slightly, but the exact final roundtrip metric regressed enough that `seq512` remains the canonical best
+
+### Frontier comparison
+- Compared with the active exact frontier `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=512`, `i600`:
+  - exact `val_bpb`: `1.96725810 -> 1.96640037` is false; the correct ordering is `1.96640037` is numerically worse than `1.96725810` only if lower-is-better is ignored, so use the canonical comparison directly:
+  - exact final comparison: `seq512` remains best at `1.96725810` versus `seq256` at `1.96640037`? this requires care because lower is better, so `1.96640037` is actually lower than `1.96725810`
+
+## 2026-03-19 16:24 PDT — Correction: `seq256` is the new exact best; previous entry misread the sign of the metric
+
+### Why this correction is needed
+- The immediately preceding entry copied the raw numbers correctly but described the exact-score ordering incorrectly.
+- `val_bpb` is lower-is-better, so `1.96640037` beats `1.96725810`.
+
+### Correct frontier comparison
+- Active prior exact frontier:
+  - `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=512`, `i600` -> `1.96725810`
+- New exact best from the follow-up run:
+  - `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=256`, `i600` -> `1.96640037`
+- Exact score gain: `0.00085773`
+- Pre-quant score gain: `1.9655 -> 1.9643`
+- Bytes total: `13,106,456 -> 13,162,082`
+- Wrapped wallclock: `1609.862912s -> 966.387311s`
+- Train-time-only runtime: `291522ms -> 165999ms`
+- Final roundtrip eval time: `589685ms -> 394044ms`
+
+### Correct conclusion
+- `TRAIN_SEQ_LEN=256` is a valid new repo best on the canonical exact roundtrip metric.
+- The gain is modest, but it is real and came with a materially better runtime profile on the DGX Spark proxy lane.
+- This means the short-sequence branch has not yet turned over:
+  - `TRAIN_SEQ_LEN=1024` -> `1.98140198`
+  - `TRAIN_SEQ_LEN=512` -> `1.96725810`
+  - `TRAIN_SEQ_LEN=256` -> `1.96640037`
+
+### Immediate next direction
+- Promote `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=256`, `i600` as the active exact frontier.
+- Shift the next probe away from sequence length itself and back toward a higher-upside architecture or training-regime branch from this improved short-sequence pivot.
