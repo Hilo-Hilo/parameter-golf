@@ -1578,3 +1578,141 @@ Why this mattered:
 ### Immediate next direction
 - Keep `9x544 KV4 i600` with tied embeddings as the active remote frontier.
 - Shift the next probe to another architecture axis that preserves the winning parameter budget but changes attention partitioning, with the leading candidate now a lower head-count check such as `NUM_HEADS=2` and `NUM_KV_HEADS=2` at the same `9x544 i600` shape.
+
+## 2026-03-19 11:42 PDT — Lowering 9x544 attention partitioning to 2 heads crashes immediately on the GB10 flash-attention path
+
+### Why this entry exists
+- The current journaled next direction was to test whether the `9x544 KV4` frontier prefers larger per-head dimensions over the current `4`-head split.
+- This entry records that the first clean `2`-head probe did not produce a comparable score because it failed immediately at attention execution time.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during launch: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Wrapped wallclock before failure: `4.998494s`
+
+### Attempt and result
+1. `20260319T184158Z_dgx_cuda_nocompile_l9_d544_h2_kv2_i600`
+   - status: `crash`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - command shape: `9` layers, `544` model dim, `2` heads, `2` KV heads, tied embeddings, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - observed model params before failure: `21,886,226`
+   - failure point: first warmup forward pass, before `warmup_step:1/20`
+   - canonical score: unavailable
+   - root error from remote log: `RuntimeError: Invalid backend` at `F.scaled_dot_product_attention(...)`
+   - conclusion: the GB10 remote path with the current trainer's hard-enabled flash SDP backend does not support this `head_dim=272` attention shape, so the hypothesis was not answered
+
+### Search implications
+- This is not evidence that `2` heads are bad in-model; it is a backend-compatibility failure in the current remote execution regime.
+- Because `train_gpt.py` currently hard-enables flash SDP and disables math/mem-efficient fallbacks, this exact low-head-count branch is blocked unless the trainer is changed.
+- To preserve throughput and avoid editing the core trainer mid-branch, the next probe should stay on a backend-compatible attention-allocation change at the same winning shape.
+
+### Immediate next direction
+- Keep tied `9x544 KV4 i600` as the active remote frontier.
+- Shift the next single-axis probe to a backend-compatible KV-allocation test such as `NUM_HEADS=4`, `NUM_KV_HEADS=2` at the same `9x544 i600` budget.
+
+## 2026-03-19 11:58 PDT — Reducing 9x544 from full KV to modest GQA loses cleanly despite saving bytes and wallclock
+
+### Why this entry exists
+- After the `2`-head branch crashed on the GB10 flash-attention backend, the next backend-compatible attention-allocation question was whether the current `9x544` frontier was overpaying for fully independent K/V projections.
+- This entry records the answer: at fixed `9x544`, `600` steps, and tied embeddings, reducing `NUM_KV_HEADS` from `4` to `2` is a clear regression.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Wrapped wallclock: `893.685453s`
+- Train-time-only log at step `600`: `157483ms`
+- Final roundtrip eval time: `361974ms`
+
+### Attempt and result
+1. `20260319T184323Z_dgx_cuda_nocompile_l9_d544_h4_kv2_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.00748725`
+   - pre-quant `val_bpb`: `2.0057`
+   - final val loss: `3.38955813`
+   - pre-quant val loss: `3.3865`
+   - bytes total: `11,539,263`
+   - bytes model: `11,491,389`
+   - observed model params: `19,222,820`
+   - command shape: `9` layers, `544` model dim, `4` heads, `2` KV heads, tied embeddings, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: modest GQA is materially worse than the full-KV frontier at the same width/depth budget
+
+### Frontier comparison
+- Compared with the active tied `9x544` full-KV pivot (`NUM_HEADS=4`, `NUM_KV_HEADS=4`):
+  - exact `val_bpb`: `1.98140198 -> 2.00748725`
+  - pre-quant `val_bpb`: `1.9795 -> 2.0057`
+  - bytes total: `13,073,918 -> 11,539,263`
+  - wrapped wallclock: `977.892933s -> 893.685453s`
+- So this branch bought:
+  - `1,534,655` bytes of artifact headroom
+  - about `84.2s` of wrapped wallclock savings
+- But it paid for that with a large quality regression on both pre-quant and exact post-roundtrip metrics.
+
+### What changed in the search picture
+- Near the current frontier, attention allocation now looks much clearer:
+  - `9x544`, `4` heads, `4` KV heads: `1.98140198`
+  - `9x544`, `4` heads, `2` KV heads: `2.00748725`
+  - `9x544`, `2` heads, `2` KV heads: backend crash before scoring
+- This strongly supports keeping full KV at the active `9x544` pivot unless a future trainer change enables a fair low-head-count comparison.
+
+### Immediate next direction
+- Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `i600` as the active remote frontier.
+- Shift the next one-axis probe away from KV sharing and toward another full-KV-compatible parameter-allocation decision, with MLP allocation now a plausible next branch because the current pivot still has about `2.93 MB` of artifact headroom.
+
+## 2026-03-19 12:16 PDT — Narrowing the full-KV frontier from 9x544 to 9x528 also loses, tightening the local optimum
+
+### Why this entry exists
+- After `9x560 KV4` and `9x576 KV4` both lost on the wide side, and `9x544 h4 kv2` lost on the KV-sharing side, the remaining immediate width question was whether the current full-KV pivot was slightly too wide.
+- This entry records that a modest width decrease to `528` also loses cleanly, so the current local full-KV optimum is now much more tightly bounded around `9x544`.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Wrapped wallclock: `982.607123s`
+- Train-time-only log at step `600`: `167651ms`
+- Final roundtrip eval time: `400795ms`
+
+### Attempt and result
+1. `20260319T190003Z_dgx_cuda_nocompile_l9_d528_kv4_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.00800576`
+   - pre-quant `val_bpb`: `2.0062`
+   - final val loss: `3.39043361`
+   - pre-quant val loss: `3.3874`
+   - bytes total: `12,414,318`
+   - bytes model: `12,366,444`
+   - observed model params: `20,634,276`
+   - command shape: `9` layers, `528` model dim, `4` heads, `4` KV heads, tied embeddings, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: a small width decrease does not recover quality; it remains clearly behind the `9x544` full-KV frontier on both pre-quant and exact post-roundtrip metrics
+
+### Frontier comparison
+- Compared with the active tied `9x544` full-KV pivot:
+  - exact `val_bpb`: `1.98140198 -> 2.00800576`
+  - pre-quant `val_bpb`: `1.9795 -> 2.0062`
+  - bytes total: `13,073,918 -> 12,414,318`
+  - wrapped wallclock: `977.892933s -> 982.607123s`
+- Relative to the current pivot, `9x528 KV4` saved only `659,600` total bytes while regressing by `0.02660378` exact `val_bpb`.
+
+### What changed in the search picture
+- The immediate full-KV width neighborhood at `9` layers now looks like:
+  - `9x528 KV4`: `2.00800576`
+  - `9x544 KV4`: `1.98140198`
+  - `9x560 KV4`: `1.99840220`
+  - `9x576 KV4`: `1.98837620`
+- Combined with the nearby attention-allocation results:
+  - `9x544 h4 kv2`: `2.00748725`
+  - `9x544 h2 kv2`: backend crash before scoring
+- This makes the current conclusion straightforward:
+  - `9x544`, `4` heads, `4` KV heads, tied embeddings remains the best tested point in the immediate local neighborhood
+  - the next useful branch should move away from nearby width/KV reallocations and toward a different full-KV-compatible allocation or optimization axis
+
+### Immediate next direction
+- Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `i600` as the active remote frontier.
+- Shift the next probe to a different full-KV-compatible branch, with MLP allocation or another byte-aware reallocation now more justified than more nearby width/KV probing.
