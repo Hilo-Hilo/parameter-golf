@@ -1900,3 +1900,60 @@ Why this mattered:
 ### Immediate next direction
 - Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `i600` as the active remote frontier.
 - Move the next probe to a genuinely different branch rather than another nearby deeper/narrower full-KV variant; the highest-signal candidates now are a broader optimization change on the active frontier or a more distinct architecture change than the `10x512 -> 10x480` family.
+
+## 2026-03-19 15:34 PDT — Reducing the active `9x544 KV4` frontier to `TRAIN_SEQ_LEN=512` sets a new repo best exact roundtrip score
+
+### Why this entry exists
+- After the immediate `9x544 KV4` neighborhood had already been bounded on width, depth-width reallocation, KV sharing, tied-vs-untied output allocation, and MLP width, the next higher-signal single-axis branch was a broader optimization/eval-regime change rather than another nearby architecture tweak.
+- This entry records the first remote sequence-length probe at the active frontier, and it answered that branch decisively: shorter training sequences improved the exact canonical score enough to become the new best run in the repo.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote checkout `HEAD`: `ead46ea`
+- Local `train_gpt.py` SHA-256: `11d75807f9db69f9c000c0d196afb565e5cb011ef6ed414a6f444fa6c7a43b18`
+- Remote `train_gpt.py` SHA-256 matched local: `11d75807f9db69f9c000c0d196afb565e5cb011ef6ed414a6f444fa6c7a43b18`
+- Wrapped wallclock: `1609.862912s`
+- Train-time-only runtime at step `600`: `291522ms`
+- Quantized roundtrip eval time from the final exact log: `589685ms`
+- Remote contention observed during the run:
+  - unrelated GPU jobs remained resident on the same GB10 throughout training and evaluation
+  - the post-training validation and roundtrip tail was much longer than the `TRAIN_SEQ_LEN=1024` frontier under that contention
+
+### Attempt and result
+1. `20260319T220618Z_dgx_cuda_nocompile_l9_d544_kv4_seq512_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.96725810`
+   - pre-quant `val_bpb`: `1.9655`
+   - exact final val loss: `3.32163289`
+   - pre-quant val loss: `3.3186`
+   - bytes total: `13,106,456`
+   - bytes model: `13,058,582`
+   - observed model params: `21,886,244`
+   - command shape: `9` layers, `544` model dim, `4` heads, `4` KV heads, tied embeddings, `MLP_MULT=2`, `TRAIN_SEQ_LEN=512`, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: reducing `TRAIN_SEQ_LEN` from `1024` to `512` at the active `9x544 KV4` frontier improved both pre-quant and exact post-roundtrip quality enough to become the new best completed result while staying comfortably under the byte cap
+
+### Frontier comparison
+- Compared with the prior active tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=1024`, `i600` frontier:
+  - exact `val_bpb`: `1.98140198 -> 1.96725810`
+  - pre-quant `val_bpb`: `1.9795 -> 1.9655`
+  - exact score gain: `0.01414388`
+  - bytes total: `13,073,918 -> 13,106,456`
+  - wrapped wallclock: `977.892933s -> 1609.862912s`
+- So this branch bought a real quality win for only `32,538` extra artifact bytes, but it paid heavily in runtime:
+  - train-time-only runtime grew from `167029ms` to `291522ms`
+  - final roundtrip eval time grew from `399677ms` to `589685ms`
+
+### What changed in the search picture
+- The active best tested remote frontier is now:
+  - `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=512`, `i600` -> `1.96725810`
+  - prior `TRAIN_SEQ_LEN=1024` version of the same shape -> `1.98140198`
+- This means the next serious search branch should treat sequence length as a real lever rather than a bookkeeping detail in this one-shard remote regime.
+- The score gain is large enough to keep, but the throughput penalty is also large enough that the next follow-up should not blindly keep shortening sequence length; it should test whether some intermediate sequence length or adjacent regime change can preserve most of the gain without the same evaluation-time blowup.
+
+### Immediate next direction
+- Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=512`, `i600` as the new active remote frontier.
+- The next highest-signal single-axis follow-up is another sequence-length regime probe that trades off score versus throughput, rather than returning to the already-bounded local width/KV/MLP neighborhood.
