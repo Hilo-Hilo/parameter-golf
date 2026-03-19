@@ -270,3 +270,58 @@ Why this mattered:
 ### Time elapsed and approach notes
 - Approximate elapsed time for this update: about 10 minutes of repo inspection, targeted doc/script edits, and lightweight validation planning
 - Approach used: keep the change surface small, update the worker prompt as the authoritative behavior source, mirror that strategy into the watchdog spec, and add just enough launcher metadata so the runtime state advertises the intended mode
+
+## 2026-03-19 00:31 PDT — Commit/push attempt blocked by sandboxed `.git` write restrictions
+
+### Attempt and result
+- Attempted to stage and commit the remote-first automation update on branch `research/continuous-mar18`
+- Command path attempted: `git add ...` followed by `git commit -m "Update continuous worker for remote-first journaling"`
+- Result: blocked by environment-level permission failure before commit creation
+- Observed failure text: `fatal: Unable to create '.git/index.lock': Operation not permitted`
+
+### Hardware and runtime used for this attempt
+- Hardware used: local operator terminal only
+- Remote hardware used: none
+- Worker restart attempted by me: none
+- Worker stop attempted by me: none
+
+### Repo state after the failed git write
+- Edited files remain only:
+  - `automation/continuous_worker_prompt.md`
+  - `automation/cron_watchdog_spec.md`
+  - `scripts/start_continuous_worker.sh`
+  - `scripts/README.md`
+  - `journal.md`
+- Validation status remains unchanged from the previous entry: shell syntax and Python bytecode compilation passed
+
+### Approach note
+- No destructive workaround was attempted because the restriction is on writing repo metadata under `.git`, not on the working tree files themselves
+
+## 2026-03-19 00:32 PDT — Remote-first automation committed, pushed, and relaunched under watchdog
+
+### Attempt and result
+- After the earlier sandboxed `.git/index.lock` failure, the same repo changes were committed successfully from the main operator session.
+- Commit created on `research/continuous-mar18`: `0c08114` — `Shift continuous worker to remote-first 24/7 mode`
+- Push result: `origin/research/continuous-mar18` advanced from `0440190` to `0c08114`
+
+### Hardware and runtime used for this update
+- Hardware used: local operator terminal only
+- Remote hardware used: none yet
+- Training runs launched in this step: none
+
+### Automation state changes completed
+- Detached continuous worker restarted successfully via `./scripts/start_continuous_worker.sh`
+- New worker pid: `12143`
+- Watchdog cron job `0200ab09-9051-4a73-a227-cf7a8f068780` was re-enabled
+- Watchdog delivery remains configured to announce into the Telegram DM every run
+
+### Repo state and operating mode after relaunch
+- Branch: `research/continuous-mar18`
+- Operating mode: `remote-first-24-7`
+- Preferred compute: `dgx-spark`, `runpod`
+- Secondary compute: `local-mlx`
+- Research strategy: `architecture-first`
+- Journal policy: `append-only`
+
+### Approach note
+- The repo-local worker is now live again under the updated prompt/spec/launcher metadata and can continue building from this remote-first stance until Hanson manually stops it.
