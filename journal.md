@@ -1832,3 +1832,71 @@ Why this mattered:
 ### Immediate next direction
 - Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `i600` as the active remote frontier.
 - Move the next branch away from small local allocation tweaks around this point and toward a broader architecture or optimization change, since the nearby width/KV/tie/MLP neighborhood is now substantially mapped.
+
+## 2026-03-19 14:41 PDT — A byte-safe deeper/narrower full-KV reallocation (`10x480`) loses cleanly to the tied `9x544 KV4` frontier
+
+### Why this entry exists
+- After the immediate `9x544 KV4` local neighborhood had been bounded on width, KV sharing, tied-vs-untied output allocation, and MLP width, the next broader architecture question was whether the frontier still wanted more depth if width was reduced enough to avoid the `10x512 KV4` byte failure.
+- This entry records both the first failed launch of that hypothesis and the valid rerun that answered it.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Wrapped wallclock for the scored rerun: `1394.813439s`
+- Train-time-only runtime at step `600`: `240629ms`
+- Quantized roundtrip eval time from the final exact log: `573764ms`
+- Remote contention observed throughout the rerun:
+  - unrelated GPU processes remained resident on the same GB10 during training and roundtrip evaluation
+  - the remote process stayed CPU-active for a long post-training tail before emitting the final roundtrip lines
+
+### Attempts and results
+1. `20260319T211609Z_dgx_cuda_nocompile_l10_d480_kv4_i600`
+   - status: `crash`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - wrapped wallclock: `0.678742s`
+   - failure mode: immediate remote shell launch bug before training started
+   - root cause: I incorrectly prefixed the remote executable with `export RUN_ID=...`, so the remote shell treated the python path and torchrun flags as invalid identifiers
+   - conclusion: command-construction error only; hypothesis was not tested by this first attempt
+
+2. `20260319T211631Z_dgx_cuda_nocompile_l10_d480_kv4_i600_rerun`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.00835696`
+   - pre-quant `val_bpb`: `2.0070`
+   - exact final val loss: `3.39102660`
+   - pre-quant val loss: `3.3887`
+   - bytes total: `11,615,270`
+   - bytes model: `11,567,396`
+   - observed model params: `18,945,160`
+   - command shape: `10` layers, `480` model dim, `4` heads, `4` KV heads, tied embeddings, `MLP_MULT=2`, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the deeper/narrower reallocation remained comfortably byte-valid, but it lost clearly on both pre-quant and exact roundtrip metrics versus the active `9x544 KV4` frontier
+
+### Frontier comparison
+- Compared with the active tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `i600` pivot:
+  - exact `val_bpb`: `1.98140198 -> 2.00835696`
+  - pre-quant `val_bpb`: `1.9795 -> 2.0070`
+  - bytes total: `13,073,918 -> 11,615,270`
+  - wrapped wallclock: `977.892933s -> 1394.813439s`
+- So the `10x480` branch bought about `1,458,648` bytes of artifact headroom relative to the frontier, but it still regressed by `0.02695498` exact `val_bpb`.
+- Relative to the earlier invalid `10x512 KV4` boundary check:
+  - the width reduction did fix the cap issue cleanly
+  - but the resulting deeper/narrower shape remained decisively behind the current `9x544 KV4` frontier on score
+
+### Process notes
+- The rerun fixed the earlier remote launch bug by passing `RUN_ID` inline as a normal environment prefix rather than via a malformed `export ... executable` pattern.
+- The remote sidecar log path was correct on the rerun: `logs/20260319T211631Z_dgx_cuda_nocompile_l10_d480_kv4_i600_rerun.txt`
+- The final roundtrip phase was unusually long under contention, but it completed and produced canonical exact metric lines, so the scored result is trustworthy and comparable.
+
+### What changed in the search picture
+- The broader depth-vs-width reallocation branch around the current full-KV frontier is now more clearly bounded:
+  - `9x544 KV4`: `1.98140198`
+  - `10x512 KV4`: byte-invalid and score-negative at `2.10053703`
+  - `10x480 KV4`: byte-valid but still score-negative at `2.00835696`
+- That means the current evidence does not support spending more budget on this specific deeper/narrower full-KV family.
+- Combined with the earlier local width/KV/tie/MLP probes, the active best tested point remains tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `i600`.
+
+### Immediate next direction
+- Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `i600` as the active remote frontier.
+- Move the next probe to a genuinely different branch rather than another nearby deeper/narrower full-KV variant; the highest-signal candidates now are a broader optimization change on the active frontier or a more distinct architecture change than the `10x512 -> 10x480` family.
