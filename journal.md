@@ -437,3 +437,49 @@ Why this mattered:
 - The next cheap decisive remote branch should likely test one of:
   - `9x256` at the same step budget to see whether depth continues paying
   - a modest width reallocation around the new best remote depth while watching byte growth
+
+## 2026-03-19 01:40 PDT — DGX depth trend reverses at 9 layers; keep 8x256 as the remote pivot
+
+### Why this entry exists
+- The prior journal entry left two immediate remote branches: continue the depth ladder to `9x256`, or shift into a modest width reallocation around `8x256`.
+- This entry records the first of those two branches so the next step can be chosen from data rather than assumption.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `370.209483s`
+
+### Remote repo / infra note
+- The DGX checkout itself was still at commit `ead46ea` and had a local tracked modification on `train_gpt.py` plus an untracked `.venv-cuda/` directory, so I did not force a remote git sync.
+- Instead, I verified by SHA-256 that the remote `train_gpt.py` file matched the current local `HEAD` trainer exactly, which was sufficient for a comparable scored run without disturbing the remote working tree.
+
+### Attempt and result
+1. `20260319T083321Z_dgx_cuda_nocompile_l9_d256_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.07644708`
+   - pre-quant `val_bpb`: `2.0755`
+   - final val loss: `3.50599392`
+   - bytes total: `5,134,420`
+   - bytes model: `5,086,546`
+   - wallclock: `370.209483s`
+   - command shape: `9` layers, `256` model dim, `4` heads, `2` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the depth trend did not continue past `8` layers on this budget; `9x256` regressed by `0.00285503` exact `val_bpb` versus the best remote `8x256` run while costing `539,250` more total bytes and about `37.46s` more wallclock
+
+### What changed in the search picture
+- Remote depth progression on the same cheap budget is now:
+  - `7x256 i600`: `2.07993040`
+  - `8x256 i600`: `2.07359205`
+  - `9x256 i600`: `2.07644708`
+- This is the first clean sign that the remote depth ladder has a local optimum at `8` layers for the current width, batch, and step budget.
+- `9x256` remains valid and comfortably under the artifact cap, so the result is still useful as a boundary marker even though it is not the new best remote score.
+
+### Immediate next direction
+- Keep `8x256 i600` as the remote pivot configuration.
+- Shift the next cheap architecture probe from additional depth to a modest width reallocation around `8x256`, watching exact roundtrip `val_bpb`, byte growth, and total wallclock together.
