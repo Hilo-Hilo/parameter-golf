@@ -1716,3 +1716,119 @@ Why this mattered:
 ### Immediate next direction
 - Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `i600` as the active remote frontier.
 - Shift the next probe to a different full-KV-compatible branch, with MLP allocation or another byte-aware reallocation now more justified than more nearby width/KV probing.
+
+## 2026-03-19 13:19 PDT — Increasing 9x544 full-KV MLP width to `MLP_MULT=3` stays byte-valid but regresses badly
+
+### Why this entry exists
+- After bounding the immediate `9x544 KV4` neighborhood on width, KV sharing, and tied-vs-untied output allocation, the next single-axis full-KV branch was MLP allocation.
+- This entry records the first MLP-up probe and closes that direction at the current frontier: adding more feedforward width at fixed depth/width/attention budget did not help.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Wrapped wallclock: `1861.251850s`
+- Train-time-only log at step `600`: `305955ms`
+- Quantized roundtrip eval time: `771013ms`
+- Remote contention note during the run:
+  - unrelated GPU jobs remained present on the box throughout the run
+  - this made the end-to-end wallclock much worse than the active frontier despite a still-stable training loop
+
+### Attempt and result
+1. `20260319T194728Z_dgx_cuda_nocompile_l9_d544_kv4_mlp3_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.99324713`
+   - pre-quant `val_bpb`: `1.9915`
+   - final val loss: `3.36551428`
+   - pre-quant val loss: `3.3625`
+   - bytes total: `15,905,946`
+   - bytes model: `15,858,072`
+   - observed model params: `27,213,092`
+   - command shape: `9` layers, `544` model dim, `4` heads, `4` KV heads, tied embeddings, `MLP_MULT=3`, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the larger MLP remained under the `16,000,000`-byte cap, but it regressed materially on both pre-quant and exact roundtrip metrics while consuming almost all remaining artifact headroom
+
+### Frontier comparison
+- Compared with the active tied `9x544`, `4` heads, `4` KV heads, `MLP_MULT=2` pivot:
+  - exact `val_bpb`: `1.98140198 -> 1.99324713`
+  - pre-quant `val_bpb`: `1.9795 -> 1.9915`
+  - bytes total: `13,073,918 -> 15,905,946`
+  - wrapped wallclock: `977.892933s -> 1861.251850s`
+- The MLP-up branch answered the cap question cleanly:
+  - it did **not** invalidate on bytes
+  - but it left only `94,054` bytes of artifact headroom, which is not enough to justify the score regression
+
+### Process note
+- The remote sidecar path bug recurred on this launch: the remote trainer again wrote to `logs/.txt` because the SSH command still passed `RUN_ID=$RUN_ID` for remote-shell expansion rather than injecting the concrete local run id before SSH.
+- The canonical score is still trustworthy because the wrapped local harness captured the full final exact metric and appended the row to `results/results.tsv`.
+- Future remote launches should expand `RUN_ID` locally before invoking SSH so the remote sidecar log path stays stable.
+
+### What changed in the search picture
+- Near the current frontier, the tested MLP-up branch is now bounded:
+  - `9x544 KV4`, `MLP_MULT=2`: `1.98140198`
+  - `9x544 KV4`, `MLP_MULT=3`: `1.99324713`
+- Combined with the nearby negative width/KV/untied checks, this reinforces that the current `9x544 KV4` tied pivot is already close to the best use of its present parameter budget.
+
+### Immediate next direction
+- Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `i600` as the active remote frontier.
+- Shift the next single-axis branch to a contrasting MLP reallocation, with `MLP_MULT=1` now the cleanest remaining test in this local neighborhood.
+
+## 2026-03-19 13:43 PDT — Reducing 9x544 full-KV MLP width to `MLP_MULT=1` is cheaper but still loses
+
+### Why this entry exists
+- After the `MLP_MULT=3` probe showed that adding more feedforward width near the current `9x544 KV4` frontier hurt both score and byte headroom, the natural contrasting test was the opposite MLP reallocation.
+- This entry records that result and closes the immediate MLP-allocation branch around the active frontier: both larger and smaller MLPs lose to the default `MLP_MULT=2` setting.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Wrapped wallclock: the harness completed normally and appended the scored row to `results/results.tsv`
+- Train-time-only log at step `600`: `230186ms`
+- Quantized roundtrip eval time: `528426ms`
+- Process note:
+  - the remote `RUN_ID` propagation was fixed for this launch, and the sidecar log correctly wrote to `logs/20260319T201947Z_dgx_cuda_nocompile_l9_d544_kv4_mlp1_i600.txt`
+
+### Attempt and result
+1. `20260319T201947Z_dgx_cuda_nocompile_l9_d544_kv4_mlp1_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.99395404`
+   - pre-quant `val_bpb`: `1.9919`
+   - final val loss: `3.36670788`
+   - pre-quant val loss: `3.3633`
+   - bytes total: `10,117,202`
+   - bytes model: `10,069,328`
+   - observed model params: `16,559,396`
+   - command shape: `9` layers, `544` model dim, `4` heads, `4` KV heads, tied embeddings, `MLP_MULT=1`, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the smaller MLP bought large byte headroom and much faster runtime, but it still regressed on both pre-quant and exact roundtrip metrics versus the active frontier
+
+### Frontier comparison
+- Compared with the active tied `9x544`, `4` heads, `4` KV heads, `MLP_MULT=2` pivot:
+  - exact `val_bpb`: `1.98140198 -> 1.99395404`
+  - pre-quant `val_bpb`: `1.9795 -> 1.9919`
+  - bytes total: `13,073,918 -> 10,117,202`
+  - train-time-only runtime: `167651ms -> 230186ms` is not directly comparable against the earlier frontier logs because the DGX box remained contended across runs, but the smaller MLP clearly trained and evaluated faster than the `MLP_MULT=3` probe
+- Relative to the `MLP_MULT=3` branch:
+  - exact `val_bpb`: `1.99324713 -> 1.99395404`
+  - bytes total: `15,905,946 -> 10,117,202`
+- So the local MLP-allocation picture is now unambiguous:
+  - `MLP_MULT=2` is best
+  - `MLP_MULT=3` loses while nearly exhausting the byte cap
+  - `MLP_MULT=1` also loses despite saving almost `3 MB` versus the frontier
+
+### What changed in the search picture
+- The immediate full-KV `9x544` local neighborhood is now strongly bounded across several axes:
+  - width down: `9x528 KV4` -> `2.00800576`
+  - width up: `9x560 KV4` -> `1.99840220`, `9x576 KV4` -> `1.98837620`
+  - KV sharing down: `9x544 h4 kv2` -> `2.00748725`
+  - untied output head: `9x544 KV4 untied` -> `1.98789991`
+  - MLP down: `9x544 KV4 mlp1` -> `1.99395404`
+  - MLP up: `9x544 KV4 mlp3` -> `1.99324713`
+- That means the current tied `9x544`, `4` heads, `4` KV heads, `MLP_MULT=2`, `i600` point remains the best tested allocation in its local neighborhood.
+
+### Immediate next direction
+- Keep tied `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `i600` as the active remote frontier.
+- Move the next branch away from small local allocation tweaks around this point and toward a broader architecture or optimization change, since the nearby width/KV/tie/MLP neighborhood is now substantially mapped.
