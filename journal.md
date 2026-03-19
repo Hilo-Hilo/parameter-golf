@@ -581,3 +581,58 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x320 i600` as the new remote pivot.
 - Continue the width ladder one hypothesis at a time at `8` layers, with the next cheap probe likely another modest increase such as `8x352` while monitoring whether the gain curve starts to flatten or the compressed artifact trend turns unfavorable.
+
+## 2026-03-19 02:31 PDT — DGX width ladder continues upward; 8x352 sets another new repo best
+
+### Why this entry exists
+- `8x320 i600` was strong enough that the next single-axis remote move remained another modest width increase at the same `8`-layer depth.
+- This entry records that follow-up because it produced another clear exact roundtrip improvement and preserved large byte headroom.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote repo state checked before the run:
+  - branch: `research/continuous-mar18`
+  - remote `train_gpt.py` SHA-256 matched local `HEAD`: `11d75807f9db69f9c000c0d196afb565e5cb011ef6ed414a6f444fa6c7a43b18`
+  - remote checkout still showed `HEAD` at `ead46ea` with a tracked `train_gpt.py` modification and untracked `.venv-cuda/`, so I again reused the existing remote checkout without forcing a git sync
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `476.058172s`
+
+### Attempt and result
+1. `20260319T092234Z_dgx_cuda_nocompile_l8_d352_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.04202636`
+   - pre-quant `val_bpb`: `2.0408`
+   - final val loss: `3.44787597`
+   - bytes total: `5,979,040`
+   - bytes model: `5,931,166`
+   - wallclock: `476.058172s`
+   - command shape: `8` layers, `352` model dim, `4` heads, `2` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the width ladder is still paying cleanly at `8` layers; `8x352` beat `8x320` by `0.00528810` exact `val_bpb`, beat `8x288` by `0.02355857`, and beat the prior best local MLX `7x256 i600` score by `0.03003409`
+
+### Artifact and scaling notes
+- Compared with `8x320`, the compressed artifact grew by `960,913` bytes and total wallclock grew by about `60.65s`.
+- The exact gain from `8x320 -> 8x352` was smaller than the gain from `8x288 -> 8x320`, which is the first sign that the width curve may be starting to flatten.
+- Even so, the total artifact is still only `5,979,040` bytes, leaving more than `10MB` of headroom under the `16,000,000` byte cap.
+
+### Milestone reporting completed
+- Ran:
+  - `openclaw system event --text "Parameter Golf milestone: DGX 8x352 i600 reached new best exact val_bpb under 6.0MB total artifact" --mode now`
+
+### What changed in the search picture
+- The current best remote width ladder at `8` layers is now:
+  - `8x256 i600`: `2.07359205`
+  - `8x288 i600`: `2.06558493`
+  - `8x320 i600`: `2.04731446`
+  - `8x352 i600`: `2.04202636`
+- Width at fixed depth is still the best branch tested so far on the cheap one-shard DGX budget, but the marginal gain is now compressing.
+
+### Immediate next direction
+- Keep `8x352 i600` as the new remote pivot.
+- Continue the width ladder one hypothesis at a time, with the next cheap probe likely `8x384` to determine whether the width gains persist past the first sign of flattening.
