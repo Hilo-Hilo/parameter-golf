@@ -853,3 +853,54 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x480 i600` as the new remote pivot.
 - Continue one more single-axis width step, likely `8x512 i600`, to test whether the gain persists as the artifact approaches but still remains comfortably below the byte cap.
+
+## 2026-03-19 04:21 PDT — 8x512 still improves, but only slightly; width may finally be entering a marginal regime
+
+### Why this entry exists
+- `8x480 i600` was strong enough that the cleanest next single-axis follow-up was still another width step, this time to `8x512 i600`.
+- This entry records that run because it did produce a new exact roundtrip best, but by a much smaller margin than the prior step, which materially changes how the next branch should be framed.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `710.369248s`
+
+### Attempt and result
+1. `20260319T110827Z_dgx_cuda_nocompile_l8_d512_i600`
+   - status: `keep`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.01472144`
+   - pre-quant `val_bpb`: `2.0130`
+   - final val loss: `3.40177275`
+   - bytes total: `9,301,730`
+   - bytes model: `9,253,856`
+   - wallclock: `710.369248s`
+   - command shape: `8` layers, `512` model dim, `4` heads, `2` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: width still improved at `8` layers, but only narrowly; `8x512` beat `8x480` by `0.00140263` exact `val_bpb` and set another repo-best exact score
+
+### Artifact and scaling notes
+- Compared with `8x480`, the compressed artifact grew by `1,022,306` bytes and wallclock grew by about `39.33s`.
+- Total artifact size is still only `9,301,730` bytes, leaving `6,698,270` bytes of headroom under the `16,000,000` byte cap.
+- The gain from `8x480 -> 8x512` was much smaller than the `8x448 -> 8x480` jump, which is the clearest sign so far that the width branch may finally be approaching its practical turning point on this cheap one-shard budget.
+
+### Milestone reporting completed
+- Ran:
+  - `openclaw system event --text "Parameter Golf milestone: DGX 8x512 i600 reached new best exact val_bpb 2.01472144 under 9.31MB total artifact" --mode now`
+
+### What changed in the search picture
+- The current best remote width ladder at `8` layers is now:
+  - `8x416 i600`: `2.03058793`
+  - `8x448 i600`: `2.02677234`
+  - `8x480 i600`: `2.01612407`
+  - `8x512 i600`: `2.01472144`
+- Width is still the best branch tested so far, but the latest marginal gain is small enough that the next step should explicitly test whether the branch is saturating rather than assume it is still broadly open-ended.
+
+### Immediate next direction
+- Keep `8x512 i600` as the new remote pivot.
+- Use one more cheap single-axis boundary check, likely `8x544 i600`, to determine whether width is still worth pushing or whether the next search budget should shift to a different parameter-allocation branch.
