@@ -9,6 +9,7 @@ Minimal experiment helpers for this repo.
 - `scripts/start_continuous_worker.sh`: launch the detached Codex research worker and write watchdog state
 - `scripts/check_continuous_worker.py`: machine-readable liveness check for the detached worker
 - `scripts/stop_continuous_worker.sh`: stop the detached worker using watchdog state
+- `scripts/watchdog_tick.py`: one deterministic watchdog tick (check/cooldown/restart)
 
 ## Typical Usage
 
@@ -48,6 +49,12 @@ Check worker status:
 
 ```bash
 python3 scripts/check_continuous_worker.py
+```
+
+Run one watchdog tick:
+
+```bash
+python3 scripts/watchdog_tick.py
 ```
 
 Stop worker:
