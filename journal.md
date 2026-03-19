@@ -958,3 +958,49 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x544 i600` as the new remote pivot.
 - Continue one more single-axis width step, likely `8x576 i600`, to determine whether the strong `8x544` gain generalizes again before shifting budget to a different parameter-allocation axis.
+
+## 2026-03-19 05:14 PDT — 8x576 regresses slightly; keep 8x544 as the width pivot
+
+### Why this entry exists
+- `8x544 i600` reopened the width ladder decisively, so the cleanest next single-axis follow-up was the planned `8x576 i600` check.
+- This entry records that run because it marked the first slight regression after the late width rebound and therefore changes the next branch choice.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Total wrapped wallclock for the scored run: `843.691688s`
+
+### Attempt and result
+1. `20260319T120007Z_dgx_cuda_nocompile_l8_d576_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.00516912`
+   - pre-quant `val_bpb`: `2.0035`
+   - final val loss: `3.38564406`
+   - bytes total: `11,390,950`
+   - bytes model: `11,343,076`
+   - wallclock: `843.691688s`
+   - command shape: `8` layers, `576` model dim, `4` heads, `2` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: this width step was a clean negative result; `8x576` missed `8x544` by `0.00080009` exact `val_bpb` while costing more bytes and more wallclock
+
+### Artifact and scaling notes
+- Compared with `8x544`, the compressed artifact grew by `1,077,911` bytes and wallclock grew by about `50.18s`.
+- Total artifact size remains submittable at `11,390,950` bytes, leaving `4,609,050` bytes of headroom under the `16,000,000` byte cap.
+- Because both pre-quant and exact roundtrip metrics regressed slightly, this looks more like a real local turning point than a roundtrip-only compression artifact.
+
+### What changed in the search picture
+- The best current remote width frontier is now:
+  - `8x512 i600`: `2.01472144`
+  - `8x544 i600`: `2.00436903`
+  - `8x576 i600`: `2.00516912`
+- The `8`-layer width ladder appears to have reached its first local peak around `544` on this one-shard DGX budget.
+
+### Immediate next direction
+- Keep `8x544 i600` as the active remote pivot.
+- Shift the next budget to a nearby parameter-allocation branch instead of more width, with the leading cheap probe now a deeper reallocation near the same scale, likely `9x512 i600`.
