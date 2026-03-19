@@ -1355,3 +1355,72 @@ Why this mattered:
 ### Immediate next direction
 - Keep `9x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the active remote pivot.
 - Move the next probe back to width at the same `9`-layer full-KV depth, with the leading candidate now `9x576 i600` if it remains under the cap.
+
+## 2026-03-19 10:04 PDT — 9x576 KV4 stays valid but loses to 9x544 after one interrupted partial attempt
+
+### Why this entry exists
+- After `10x512 i600` with `NUM_HEADS=4` and `NUM_KV_HEADS=4` proved that a deeper-narrower reallocation was both byte-invalid and score-negative, the next clean single-axis check was width-up at the same `9`-layer full-KV depth.
+- This entry records both the first interrupted `9x576` attempt and the clean rerun because together they answer the branch question: the model remains challenge-valid at `9x576 KV4`, but the score does not beat the current `9x544 KV4` pivot.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the scored rerun: `NVIDIA GB10`
+- Remote execution mode for the scored rerun: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Local branch / ledger state during the scored rerun:
+  - branch: `research/continuous-mar18`
+  - local commit recorded by the wrapper: `d956db10af33979a59206678a9de40ea6678cecc`
+- Remote repo parity note:
+  - the DGX checkout itself still sat at older git `HEAD` `ead46ea`
+  - remote `train_gpt.py` SHA-256 still matched the local working copy: `11d75807f9db69f9c000c0d196afb565e5cb011ef6ed414a6f444fa6c7a43b18`
+- Remote dataset/tokenizer state for these attempts:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+
+### Attempts and results
+1. `20260319T161306Z_dgx_cuda_nocompile_l9_d576_kv4_i600`
+   - status: interrupted partial / unscored
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - observed progress: completed warmup through `warmup_step:20/20`, then stopped without reaching logged train steps, artifact lines, or final exact roundtrip metrics
+   - local artifacts written: `.meta` plus a partial wrapped log only; no `.json` summary and no `results/results.tsv` row
+   - conclusion: the hypothesis was not actually answered by this first attempt and should not be treated as comparable
+
+2. `20260319T164651Z_dgx_cuda_nocompile_l9_d576_kv4_i600_rerun`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.98837620`
+   - pre-quant `val_bpb`: `1.9866`
+   - final val loss: `3.35728992`
+   - pre-quant val loss: `3.3542`
+   - bytes total: `14,441,568`
+   - bytes model: `14,393,694`
+   - wrapped wallclock: `1048.734371s`
+   - train-time-only log at the end of step `600`: `175016ms`
+   - final roundtrip eval time: `429170ms`
+   - command shape: `9` layers, `576` model dim, `4` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: width-up at `9` layers stayed cleanly submittable but lost to the active `9x544 KV4` pivot by `0.00697422` exact `val_bpb`, so the winning neighborhood still prefers `544` width at this depth
+
+### Artifact and scaling notes
+- Compared with the current best `9x544 i600` KV4 pivot:
+  - exact `val_bpb`: `1.98140198 -> 1.98837620`
+  - pre-quant `val_bpb`: `1.9795 -> 1.9866`
+  - bytes total: `13,073,918 -> 14,441,568`
+  - wrapped wallclock: `977.892933s -> 1048.734371s`
+- The rerun remains challenge-valid:
+  - `bytes_total`: `14,441,568`
+  - remaining headroom: `1,558,432`
+- Because both pre-quant and exact post-roundtrip metrics worsened, this is a real quality regression rather than a compression-only trade.
+
+### What changed in the search picture
+- The nearby full-KV `9`-layer frontier now looks like:
+  - `9x544 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.98140198`, `13,073,918` bytes
+  - `9x576 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.98837620`, `14,441,568` bytes
+- Combined with the earlier `10x512` miss, this means both immediate reallocations around the current pivot lost:
+  - deeper-narrower (`10x512`) was invalid and much worse
+  - wider-same-depth (`9x576`) was valid but still worse
+- That makes `9x544 KV4 i600` the clearest local optimum tested so far in this neighborhood.
+
+### Immediate next direction
+- Keep `9x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the active remote pivot.
+- Shift the next probe away from the immediate width/depth reallocations around `9x544`, with the best next branch now likely a cheap optimization or parameter-allocation change that preserves the winning shape rather than moving farther up the current width ladder.
