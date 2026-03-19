@@ -1004,3 +1004,58 @@ Why this mattered:
 ### Immediate next direction
 - Keep `8x544 i600` as the active remote pivot.
 - Shift the next budget to a nearby parameter-allocation branch instead of more width, with the leading cheap probe now a deeper reallocation near the same scale, likely `9x512 i600`.
+
+## 2026-03-19 05:59 PDT — 9x512 rerun completes cleanly and loses to the 8x544 pivot
+
+### Why this entry exists
+- After `8x576` became the first width-side regression, the next planned nearby reallocation branch was a deeper model at similar byte scale: `9x512 i600`.
+- An initial local wrapper artifact for that branch existed, but it was incomplete and did not produce a canonical score, so a clean rerun was required before the branch could be judged.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for the scored rerun:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+
+### Attempts and results
+1. `20260319T121534Z_dgx_cuda_nocompile_l9_d512_i600`
+   - result shape: partial local wrapper artifact only
+   - observed progress: reached `step 50/600`
+   - canonical metric status: missing
+   - conclusion: not trustworthy enough to score; I treated it as an incomplete orphaned attempt and reran the same hypothesis cleanly rather than infer from the partial log
+
+2. `20260319T124705Z_dgx_cuda_nocompile_l9_d512_i600_rerun`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.01603587`
+   - pre-quant `val_bpb`: `2.0144`
+   - final val loss: `3.40399213`
+   - bytes total: `10,390,126`
+   - bytes model: `10,342,252`
+   - wallclock: `792.674983s`
+   - command shape: `9` layers, `512` model dim, `4` heads, `2` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: reallocating budget from `8x544` into extra depth at `9x512` was a clean negative result; it missed `8x544` by `0.01166684` exact `val_bpb` while using `77,087` more total bytes and essentially the same wallclock
+
+### Artifact and scaling notes
+- The rerun remained comfortably under the artifact cap:
+  - `bytes_total`: `10,390,126`
+  - remaining headroom: `5,609,874`
+- The pre-quant metric also regressed meaningfully relative to `8x544`:
+  - `8x544 i600` pre-quant `val_bpb`: `2.0023`
+  - `9x512 i600` pre-quant `val_bpb`: `2.0144`
+- Because both pre-quant and exact roundtrip metrics worsened, this looks like a real architectural loss for this nearby depth reallocation rather than a compression-side artifact.
+
+### What changed in the search picture
+- The nearby `8x544` neighborhood now has two clean boundary checks against the current pivot:
+  - more width: `8x576 i600` -> `2.00516912`
+  - more depth with similar bytes: `9x512 i600` -> `2.01603587`
+- Both branches lost to `8x544 i600` -> `2.00436903`.
+- That makes `8x544 i600` the clear local winner among the immediate width-up and depth-up reallocations tested so far.
+
+### Immediate next direction
+- Keep `8x544 i600` as the active remote pivot.
+- Shift the next cheap probe to a different nearby architecture axis at the same pivot rather than further width or depth, with the leading candidate now a KV-allocation check such as `8x544 i600` with `NUM_KV_HEADS=4`.
