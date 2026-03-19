@@ -134,6 +134,13 @@ log_path="$resolved_log_dir/$experiment_id.log"
 meta_path="$resolved_log_dir/$experiment_id.meta"
 summary_path="$resolved_log_dir/$experiment_id.json"
 
+wallclock_now() {
+  python3 - <<'PY'
+import time
+print(f"{time.time():.6f}")
+PY
+}
+
 printf -v command_str '%q ' "$@"
 command_str="${command_str% }"
 
@@ -153,15 +160,25 @@ command_str="${command_str% }"
   printf 'notes=%s\n' "$notes"
 } >"$meta_path"
 
+wallclock_start=$(wallclock_now)
 set +e
 (
   cd "$repo_root"
-  RUN_ID="$run_id" "$@"
+  RUN_ID="$run_id" PYTHONUNBUFFERED=1 "$@"
 ) >"$log_path" 2>&1
 exit_code=$?
 set -e
+wallclock_end=$(wallclock_now)
+process_wallclock_seconds=$(python3 - "$wallclock_start" "$wallclock_end" <<'PY'
+import sys
+start = float(sys.argv[1])
+end = float(sys.argv[2])
+print(f"{max(end - start, 0.0):.6f}")
+PY
+)
 
 printf 'exit_code=%s\n' "$exit_code" >>"$meta_path"
+printf 'process_wallclock_seconds=%s\n' "$process_wallclock_seconds" >>"$meta_path"
 
 python3 "$repo_root/scripts/parse_train_log.py" \
   "$log_path" \
@@ -176,6 +193,7 @@ python3 "$repo_root/scripts/parse_train_log.py" \
   --commit "$commit" \
   --status "$status" \
   --exit-code "$exit_code" \
+  --process-wallclock-seconds "$process_wallclock_seconds" \
   --notes "$notes" \
   --format json >"$summary_path"
 
@@ -192,6 +210,7 @@ python3 "$repo_root/scripts/parse_train_log.py" \
   --commit "$commit" \
   --status "$status" \
   --exit-code "$exit_code" \
+  --process-wallclock-seconds "$process_wallclock_seconds" \
   --notes "$notes" \
   --format tsv >>"$resolved_results_tsv"
 
