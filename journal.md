@@ -1291,3 +1291,67 @@ Why this mattered:
 ### Immediate next direction
 - Keep `9x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the new active remote pivot.
 - Shift the next cheap probe to a nearby depth-vs-width reallocation at similar byte scale, with the leading candidate now `10x512 i600` while keeping `NUM_HEADS=4` and `NUM_KV_HEADS=4`.
+
+## 2026-03-19 09:11 PDT — 10x512 KV4 depth-up reallocation is both byte-invalid and score-negative
+
+### Why this entry exists
+- After `9x544 i600` with `NUM_HEADS=4` and `NUM_KV_HEADS=4` became the active remote pivot, the planned next single-axis reallocation was `10x512 i600` with the same attention setup.
+- This entry records that run because it cleanly answers the deeper-narrower question near the current frontier: this branch missed on both exact score and artifact bytes.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote dataset/tokenizer state for this run:
+  - tokenizer: `~/parameter-golf/data/tokenizers/fineweb_1024_bpe.model`
+  - train shards present: `1`
+  - validation split: full `fineweb_val_*`
+- Wrapped wallclock for the scored run: `2130.390722s`
+- Remote train-time-only log at the end of step `600`: `172622ms`
+- Final roundtrip eval time: `390326ms`
+- Remote contention note:
+  - another GPU process remained resident on the DGX box for the full run, using about `10.7 GiB`
+  - this made the end-to-end wrapped wallclock much worse than earlier isolated DGX runs even though step time during training stayed stable around `287.7ms`
+
+### Attempt and result
+1. `20260319T153530Z_dgx_cuda_nocompile_l10_d512_kv4_i600`
+   - status: `invalid`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `2.10053703`
+   - pre-quant `val_bpb`: `2.1000`
+   - final val loss: `3.54666879`
+   - pre-quant val loss: `3.5458`
+   - bytes total: `16,154,480`
+   - bytes model: `16,106,606`
+   - wrapped wallclock: `2130.390722s`
+   - command shape: `10` layers, `512` model dim, `4` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - conclusion: the deeper-narrower reallocation clearly lost; it missed the artifact cap by `154,480` bytes and also regressed exact roundtrip score versus the current `9x544 KV4` pivot
+
+### Artifact and scaling notes
+- Compared with the current best `9x544 i600` KV4 pivot:
+  - exact `val_bpb`: `1.98140198 -> 2.10053703`
+  - pre-quant `val_bpb`: `1.9795 -> 2.1000`
+  - bytes total: `13,073,918 -> 16,154,480`
+  - wrapped wallclock: `977.892933s -> 2130.390722s`
+- The run is not challenge-valid:
+  - cap: `16,000,000`
+  - observed total: `16,154,480`
+  - overflow: `154,480`
+- Because both pre-quant and exact post-roundtrip metrics regressed materially, this was not a near-miss caused only by compression.
+
+### Process note discovered during this run
+- The local wrapper row used the correct local `run_id`, but the remote command exported `RUN_ID=$RUN_ID` inside a single-quoted SSH string, which meant the remote shell received `RUN_ID=` and wrote the sidecar log to `logs/.txt`.
+- This did not invalidate the scored result because the canonical metric lines still reached the wrapped local log and `results/results.tsv`, but future remote commands should pass the intended run id explicitly rather than exporting an empty one.
+
+### What changed in the search picture
+- The current nearby frontier now looks like:
+  - `9x544 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `1.98140198`, `13,073,918` bytes
+  - `10x512 i600`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`: `2.10053703`, `16,154,480` bytes, invalid
+- This is a decisive negative result:
+  - moving one step deeper while shrinking width to `512` is worse than holding at `9x544`
+  - the active local optimum in this neighborhood still appears to prefer the `9x544 KV4` allocation over this deeper-narrower trade
+
+### Immediate next direction
+- Keep `9x544 i600` with `NUM_HEADS=4`, `NUM_KV_HEADS=4` as the active remote pivot.
+- Move the next probe back to width at the same `9`-layer full-KV depth, with the leading candidate now `9x576 i600` if it remains under the cap.
