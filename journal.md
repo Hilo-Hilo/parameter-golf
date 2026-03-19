@@ -1443,3 +1443,138 @@ Why this mattered:
 ### Immediate next direction
 - Let `20260319T170634Z_dgx_cuda_nocompile_l9_d560_kv4_i600` finish and treat its exact final roundtrip `val_bpb` as canonical.
 - If it loses to `9x544 KV4`, keep the frontier at `9x544` and shift the next probe off the immediate width axis.
+
+## 2026-03-19 10:36 PDT — Backfilled the interrupted 9x560 KV4 attempt and launched a clean rerun
+
+### Why this entry exists
+- The prior `9x560 KV4` attempt never reached a canonical final metric and also never wrote a TSV row, so the durable ledger had a gap.
+- This entry records the recovery work before rerunning the same single-axis hypothesis cleanly.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote hardware state checked before rerun: `dgx-spark` host `spark-6cb3`, GPU `NVIDIA GB10`
+- Observed DGX contention at check time:
+  - one unrelated resident `/usr/bin/python` process was still holding about `10.7 GiB`
+  - the interrupted `9x560` training process itself was no longer running
+
+### Recovery work completed
+1. `20260319T170634Z_dgx_cuda_nocompile_l9_d560_kv4_i600`
+   - status after recovery: `invalid`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - logged progress recovered: through `step 250/600`
+   - parsed train-time-only wallclock from the partial log: `72.937s`
+   - failure shape: wrapped local log and remote sidecar both stopped at `step 250` with no artifact-size lines and no `final_int8_zlib_roundtrip_exact`
+   - ledger repair: appended a backfilled `results/results.tsv` row marked `invalid` because the canonical exact metric is missing
+   - note: the wrapper never captured an exit code for this interrupted attempt, so only the partial log itself is durable
+
+### Rerun launched
+1. `20260319T1736xxZ_dgx_cuda_nocompile_l9_d560_kv4_i600_rerun`
+   - status: launched after the ledger repair; result pending at the time of this entry
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - hypothesis: `9x560 KV4` may still beat `9x544 KV4` even though `9x576 KV4` lost, so the interrupted first attempt should be rerun before abandoning the fine-grained width probe
+   - process fix applied in the rerun command: the remote shell now receives the intended `RUN_ID` explicitly instead of depending on the earlier brittle inline expansion pattern
+
+### Immediate next direction
+- Let the clean `9x560 KV4` rerun finish and score it canonically.
+- Keep `9x544 KV4` as the active frontier unless the rerun actually beats `1.98140198`.
+
+## 2026-03-19 11:55 PDT — Clean 9x560 KV4 rerun loses decisively; shift off the immediate width axis
+
+### Why this entry exists
+- The earlier `9x560 KV4` attempt was interrupted before canonical scoring, so the branch question remained open.
+- This entry records the clean rerun result and closes that question: the fine-grained width-up from `544 -> 560` is not the winning local move around the current `9x544 KV4` frontier.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the rerun: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Remote contention note during the rerun:
+  - the same unrelated `/usr/bin/python` process remained resident at about `10.7 GiB`
+  - despite that contention, the rerun completed cleanly and produced a trustworthy canonical score
+
+### Attempt and result
+1. `20260319T173752Z_dgx_cuda_nocompile_l9_d560_kv4_i600_rerun`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.99840220`
+   - pre-quant `val_bpb`: `1.9964`
+   - final val loss: `3.37421841`
+   - pre-quant val loss: `3.3709`
+   - bytes total: `13,774,425`
+   - bytes model: `13,726,551`
+   - wrapped wallclock: `1051.916175s`
+   - train-time-only log at step `600`: `174869ms`
+   - final roundtrip eval time: `431576ms`
+   - command shape: `9` layers, `560` model dim, `4` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+   - note on continuity: this is the actual clean rerun corresponding to the prior placeholder launch note; the real rerun id was `20260319T173752Z_dgx_cuda_nocompile_l9_d560_kv4_i600_rerun`
+   - conclusion: the fine-grained width increase lost cleanly on both pre-quant and exact post-roundtrip metrics
+
+### Artifact and frontier notes
+- Compared with the active `9x544 KV4` pivot:
+  - exact `val_bpb`: `1.98140198 -> 1.99840220`
+  - pre-quant `val_bpb`: `1.9795 -> 1.9964`
+  - bytes total: `13,073,918 -> 13,774,425`
+  - wrapped wallclock: `977.892933s -> 1051.916175s`
+- The nearby width neighborhood at `9` layers is now strongly bounded:
+  - `9x544 KV4`: `1.98140198`
+  - `9x560 KV4`: `1.99840220`
+  - `9x576 KV4`: `1.98837620`
+- This makes the current conclusion straightforward:
+  - `9x544 KV4 i600` remains the best tested point in the immediate width neighborhood
+  - the next useful branch should move away from nearby width changes and onto a different parameter-allocation axis
+
+### Immediate next direction
+- Keep `9x544 KV4 i600` as the active remote frontier.
+- Shift the next probe to a non-width parameter-allocation change at the same winning shape, with the leading candidate now `TIE_EMBEDDINGS=0` on `9x544 KV4 i600`.
+
+## 2026-03-19 12:14 PDT — Untied `lm_head` at 9x544 KV4 stays valid but does not beat tied embeddings
+
+### Why this entry exists
+- After the nearby `9`-layer width checks (`560` and `576`) both lost to `9x544 KV4`, the next clean parameter-allocation branch was to untie the output head while keeping the winning depth/width/attention shape fixed.
+- This entry records that result and closes the branch: on this budget, the tied-embedding configuration still wins.
+
+### Hardware and runtime used for this update
+- Local orchestration hardware: local operator terminal in the repo root
+- Remote training hardware: `dgx-spark` host `spark-6cb3`
+- Remote GPU observed during the run: `NVIDIA GB10`
+- Remote execution mode: `DISABLE_COMPILE=1` with `~/parameter-golf/.venv-cuda/bin/python3 -m torch.distributed.run --standalone --nproc_per_node=1 train_gpt.py`
+- Run-specific control choice:
+  - set `TIE_EMBEDDINGS=0`
+  - pinned `EMBED_LR=0.05` so the probe would not also inherit the much larger untied-token default LR
+
+### Attempt and result
+1. `20260319T175710Z_dgx_cuda_nocompile_l9_d544_kv4_untied_i600`
+   - status: `discard`
+   - hardware: DGX Spark GB10 with `DISABLE_COMPILE=1`
+   - exact final `val_bpb`: `1.98789991`
+   - pre-quant `val_bpb`: `1.9864`
+   - final val loss: `3.35648573`
+   - pre-quant val loss: `3.3540`
+   - bytes total: `13,591,716`
+   - bytes model: `13,543,842`
+   - wrapped wallclock: `1065.280780s`
+   - train-time-only log at step `600`: `167403ms`
+   - final roundtrip eval time: `400470ms`
+   - command shape: `9` layers, `544` model dim, `4` heads, `4` KV heads, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard, `TIE_EMBEDDINGS=0`, `EMBED_LR=0.05`
+   - conclusion: the untied-head branch stayed challenge-valid and even finished with slightly fewer compressed bytes than tied `9x544`, but it still regressed on both pre-quant and exact roundtrip metrics
+
+### Artifact and frontier notes
+- Compared with the active tied `9x544 KV4` pivot:
+  - exact `val_bpb`: `1.98140198 -> 1.98789991`
+  - pre-quant `val_bpb`: `1.9795 -> 1.9864`
+  - bytes total: `13,073,918 -> 13,591,716`
+  - wrapped wallclock: `977.892933s -> 1065.280780s`
+- The run remained comfortably under the artifact cap:
+  - `bytes_total`: `13,591,716`
+  - remaining headroom: `2,408,284`
+- Combined with the finished width probes, the current frontier picture is now:
+  - `9x544 KV4` tied: `1.98140198`
+  - `9x544 KV4` untied head: `1.98789991`
+  - `9x560 KV4`: `1.99840220`
+  - `9x576 KV4`: `1.98837620`
+- This means the current best local solution remains the original tied `9x544 KV4` shape; neither nearby width changes nor the untied-output allocation improved it.
+
+### Immediate next direction
+- Keep `9x544 KV4 i600` with tied embeddings as the active remote frontier.
+- Shift the next probe to another architecture axis that preserves the winning parameter budget but changes attention partitioning, with the leading candidate now a lower head-count check such as `NUM_HEADS=2` and `NUM_KV_HEADS=2` at the same `9x544 i600` shape.
