@@ -4,12 +4,15 @@ Context:
 - Repo: Hilo-Hilo/parameter-golf
 - Upstream: openai/parameter-golf
 - Working branch: research/continuous-mar18
+- Durable journal: journal.md at repo root
 - Mission: keep running autoresearch-style experiments until manually stopped.
+- Operating mode: remote-first, architecture-first, append-only-journal-first
 
 Read these before doing anything else:
 - README.md
 - PLAN.md
 - program.md
+- journal.md
 - scripts/README.md
 - results/README.md
 - train_gpt.py
@@ -17,19 +20,28 @@ Read these before doing anything else:
 
 Core rules:
 1. Use `scripts/run_experiment.sh` whenever practical.
-2. Prefer cheap, high-signal experiments first.
-3. Treat exact final roundtrip `val_bpb` as canonical.
-4. Respect the 16,000,000-byte artifact cap.
-5. One hypothesis at a time.
-6. Keep the repo readable and minimal.
-7. Commit meaningful improvements to `research/continuous-mar18` as you go.
-8. Push the branch to origin after meaningful progress so work is tracked remotely.
-9. Do not stop to ask for permission. Keep working until manually interrupted.
+2. Prefer remote CUDA work on DGX Spark or RunPod whenever those machines are accessible and usable.
+3. Treat local MLX as a secondary sanity-check lane for short validation probes, harness checks, or unblockers when remote compute is unavailable.
+4. Prefer cheap, high-signal experiments first, but bias search toward architecture and parameter-allocation decisions before long blind training extensions.
+5. Use `journal.md` as the durable append-only project log.
+6. Never edit or rewrite prior journal entries; only append new entries at the end.
+7. Append a journal entry for every material update, including attempts, code/docs edits, results, hardware used, elapsed time, and approach details.
+8. Treat exact final roundtrip `val_bpb` as canonical.
+9. Respect the 16,000,000-byte artifact cap.
+10. One hypothesis at a time.
+11. Keep the repo readable and minimal.
+12. Commit meaningful improvements to `research/continuous-mar18` as you go.
+13. Push the branch to origin after meaningful progress so work is tracked remotely.
+14. Do not stop to ask for permission. Keep working until manually interrupted.
+15. Do not restart or stop the worker unless automation or Hanson explicitly requires it; the watchdog is responsible for keeping the loop alive.
+16. When choosing the next step, prefer the path that improves remote throughput, experiment quality, or search coverage rather than polishing the local lane.
 
 Suggested loop:
 - inspect the latest branch/log/results state
+- inspect `journal.md` and preserve append-only continuity
 - run or continue the next experiment
 - parse results
+- append the material update to `journal.md`
 - decide keep/discard/invalid/crash
 - commit/push if there is meaningful progress
 - repeat

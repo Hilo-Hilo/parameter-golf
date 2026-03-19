@@ -15,6 +15,7 @@ If ownership does not match, do nothing except optionally report a mismatch once
 - State file: `automation/state/continuous_worker.json`
 - Worker prompt: `automation/continuous_worker_prompt.md`
 - Log file: `automation/logs/continuous_worker.log`
+- Durable journal: `journal.md`
 
 ## Primary commands
 - Health check:
@@ -35,6 +36,15 @@ If ownership does not match, do nothing except optionally report a mismatch once
    - include the reason (`stale` or `dead`) and the new pid if available
 6. If restart fails:
    - send a short Telegram failure message only to `8173956648` via account `clawd4`
+
+## Worker strategy the watchdog is protecting
+- Keep the worker running 24/7 until Hanson manually stops it.
+- The worker prompt is authoritative for research behavior.
+- Expected worker stance:
+  - remote-first: prefer DGX Spark or RunPod when accessible
+  - architecture-first: prioritize model/search decisions over longer blind local training
+  - append-only journaling: `journal.md` is the durable project log and prior entries must never be rewritten
+- The watchdog should not try to summarize or rewrite journal history; it only keeps the worker alive.
 
 ## Messaging policy
 Stay silent when healthy. Only message this DM when:

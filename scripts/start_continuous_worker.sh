@@ -34,6 +34,7 @@ STATE_FILE="$STATE_DIR/continuous_worker.json"
 LOCK_FILE="$STATE_DIR/continuous_worker.lock"
 LOG_FILE="$LOG_DIR/continuous_worker.log"
 PROMPT_FILE="$REPO_ROOT/automation/continuous_worker_prompt.md"
+JOURNAL_FILE="$REPO_ROOT/journal.md"
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 : > "$LOCK_FILE"
@@ -103,7 +104,7 @@ if [[ ! -f "$STATE_FILE" ]]; then
   RESTART_COUNT=0
 fi
 
-REPO_ROOT="$REPO_ROOT" BRANCH="$BRANCH" PROMPT_FILE="$PROMPT_FILE" LOG_FILE="$LOG_FILE" LOCK_FILE="$LOCK_FILE" STATE_FILE="$STATE_FILE" OWNER_CHANNEL="$OWNER_CHANNEL" OWNER_ACCOUNT_ID="$OWNER_ACCOUNT_ID" OWNER_TO="$OWNER_TO" NOW="$NOW" PID="$PID" RESTART_COUNT="$RESTART_COUNT" python3 - <<'PY'
+REPO_ROOT="$REPO_ROOT" BRANCH="$BRANCH" PROMPT_FILE="$PROMPT_FILE" JOURNAL_FILE="$JOURNAL_FILE" LOG_FILE="$LOG_FILE" LOCK_FILE="$LOCK_FILE" STATE_FILE="$STATE_FILE" OWNER_CHANNEL="$OWNER_CHANNEL" OWNER_ACCOUNT_ID="$OWNER_ACCOUNT_ID" OWNER_TO="$OWNER_TO" NOW="$NOW" PID="$PID" RESTART_COUNT="$RESTART_COUNT" python3 - <<'PY'
 import json, os
 from pathlib import Path
 state = {
@@ -111,8 +112,14 @@ state = {
   "branch": os.environ["BRANCH"],
   "launcher": "scripts/start_continuous_worker.sh",
   "promptFile": os.environ["PROMPT_FILE"],
+  "journalFile": os.environ["JOURNAL_FILE"],
   "logFile": os.environ["LOG_FILE"],
   "lockFile": os.environ["LOCK_FILE"],
+  "operatingMode": "remote-first-24-7",
+  "preferredCompute": ["dgx-spark", "runpod"],
+  "secondaryCompute": ["local-mlx"],
+  "researchStrategy": "architecture-first",
+  "journalPolicy": "append-only",
   "pid": int(os.environ["PID"]),
   "owner": {
     "channel": os.environ["OWNER_CHANNEL"],

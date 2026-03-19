@@ -11,6 +11,13 @@ Minimal experiment helpers for this repo.
 - `scripts/stop_continuous_worker.sh`: stop the detached worker using watchdog state
 - `scripts/watchdog_tick.py`: one deterministic watchdog tick (check/cooldown/restart)
 
+## Continuous worker stance
+
+- The continuous worker is expected to run 24/7 until manually stopped.
+- Preferred training lane: remote CUDA hardware, with DGX Spark / RunPod first when accessible.
+- Local MLX is the secondary sanity-check lane, not the default long-run search lane.
+- `journal.md` at repo root is the durable append-only project log; material updates should be appended, never rewritten.
+
 ## Typical Usage
 
 PyTorch baseline-style run:

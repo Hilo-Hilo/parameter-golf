@@ -219,3 +219,54 @@ Why this mattered:
   - preserve the validated harness + canonical metric discipline
   - search more aggressively over architecture / parameter allocation / tokenizer / train-time efficiency axes
   - keep every material result and decision appended to this journal
+
+## 2026-03-19 00:30 PDT — Continuous automation shifted to remote-first 24/7 append-only mode
+
+### Why this entry exists
+- Hanson requested that the continuous research loop resume in a 24/7 remote-first mode on branch `research/continuous-mar18`.
+- Hanson also made `journal.md` the durable append-only project log for all material automation and research updates.
+- This entry records the standing operating rules added to the repo-local worker/watchdog docs and launcher metadata.
+
+### Hardware and runtime used for this update
+- Hardware used for this repo update: local operator terminal only; no training job was launched
+- Remote hardware used in this update: none
+- Intended preferred training hardware after this update: DGX Spark first when accessible, RunPod as the other preferred remote lane
+- Secondary sanity-check lane after this update: local MLX only
+
+### Repo / automation edits completed in this update
+- `automation/continuous_worker_prompt.md`
+  - added `journal.md` to required startup reading
+  - made the worker explicitly remote-first, architecture-first, and append-only-journal-aware
+  - instructed the worker to append a journal update for every material attempt, edit, result, hardware change, or directional decision
+  - clarified that the worker should keep running until manually interrupted and should leave restart/stop control to automation unless Hanson says otherwise
+- `automation/cron_watchdog_spec.md`
+  - documented that the watchdog is protecting a 24/7 remote-first worker
+  - documented `journal.md` as the durable journal the worker must preserve append-only
+- `scripts/start_continuous_worker.sh`
+  - added `journalFile` to the state payload
+  - added runtime metadata fields for `operatingMode`, preferred/secondary compute lanes, `researchStrategy`, and `journalPolicy`
+- `scripts/README.md`
+  - documented the new continuous-worker stance in one short section
+
+### Standing rules now captured in automation
+- Preferred execution lane: remote CUDA training on DGX Spark / RunPod when accessible
+- Search bias: architecture-first and parameter-allocation-first before spending more time on blind longer local runs
+- Local MLX role: short sanity checks, harness validation, and unblockers only
+- Journal policy: append-only, never rewrite prior entries, and append every material update with attempts, edits, results, hardware used, elapsed time, code/docs touched, and approach details
+- Worker lifecycle: continue 24/7 until manually stopped
+
+### Attempts, results, and non-results for this update
+- Training attempts run: none
+- Worker restart attempted by me: none
+- Worker stop attempted by me: none
+- Experimental results generated: none
+- Operational result: repo-local automation instructions now match the remote-first 24/7 journaling strategy Hanson requested
+
+### Lightweight validation run after edits
+- `bash -n scripts/start_continuous_worker.sh`
+- `python3 -m py_compile scripts/check_continuous_worker.py scripts/watchdog_tick.py`
+- Additional behavior constraint respected: no watchdog tick was executed and no worker process was restarted during this update
+
+### Time elapsed and approach notes
+- Approximate elapsed time for this update: about 10 minutes of repo inspection, targeted doc/script edits, and lightweight validation planning
+- Approach used: keep the change surface small, update the worker prompt as the authoritative behavior source, mirror that strategy into the watchdog spec, and add just enough launcher metadata so the runtime state advertises the intended mode
