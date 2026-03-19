@@ -2085,3 +2085,24 @@ Why this mattered:
 ### Immediate next direction
 - Promote `9x544`, `NUM_HEADS=4`, `NUM_KV_HEADS=4`, `MLP_MULT=2`, `TRAIN_SEQ_LEN=256`, `i600` as the active exact frontier.
 - Shift the next probe away from sequence length itself and back toward a higher-upside architecture or training-regime branch from this improved short-sequence pivot.
+
+## 2026-03-19 16:26 PDT — Started the next DGX Spark follow-up: baseline-like `8`-head attention on the new `seq256` frontier
+
+### Why this entry exists
+- The `seq256` result became the new exact frontier, so the next branch should move back to architecture rather than shrinking sequence length again immediately.
+- The chosen follow-up is a head-partition probe with a clearer connection to the README baseline configuration.
+
+### Launch details
+- Run id: `20260319T232605Z_dgx_cuda_nocompile_l9_d544_h8_kv4_seq256_i600`
+- Hypothesis: after `TRAIN_SEQ_LEN=256` set a new exact frontier on `9x544 KV4`, increasing `NUM_HEADS` from `4` to `8` while keeping `NUM_KV_HEADS=4` fixed will improve exact final `val_bpb` if the short-sequence regime benefits from a more baseline-like attention partition at the same parameter budget
+- Hardware: DGX Spark host `spark-6cb3`, GPU `NVIDIA GB10`
+- Execution mode: `DISABLE_COMPILE=1`
+- Command shape: `9` layers, `544` model dim, `8` heads, `4` KV heads, tied embeddings, `MLP_MULT=2`, `TRAIN_SEQ_LEN=256`, `600` iterations, `8192` train tokens, `32768` val batch, `1` train shard
+- Early launch signal from the live log:
+  - startup completed cleanly
+  - attention mode logged as `gqa num_heads:8 num_kv_heads:4`
+  - observed model params at launch: `19,222,856`
+  - early step time at `step 10`: about `264ms`, slightly faster than the `4`-head `seq256` frontier launch
+
+### Status
+- Result pending; the canonical score has not been emitted yet at the time of this journal append.
