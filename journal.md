@@ -3558,3 +3558,32 @@ Why this mattered:
 - Detached session: `tmux` session `pr236`
 - Live log: `logs/experiments/pr236_11l_int6_smear_swa_1gpu_tmux_20260320_183108.log`
 - Verified progress: warmup reached at least `step 10/20` after the repair.
+
+## 2026-03-20 11:39 PDT — 16:24Z RunPod wallclock continuation harvested and logged
+
+### Completed artifact harvest
+- Mirrored remote RunPod Run 20260320T180424Z from `wbq4skuvvsk9a8` into local `logs/experiments/`:
+  - `20260320T180424Z_l11_d496_untied_verify_stride256_int4all2wc1650_tail.json`
+  - `20260320T180424Z_l11_d496_untied_verify_stride256_int4all2wc1650_tail.log`
+  - `20260320T180424Z_l11_d496_untied_verify_stride256_int4all2wc1650_tail.meta`
+- Mirrored the incomplete companion run log and meta from `f5fbuhtz75bb5u`:
+  - `20260320T180424Z_l11_d496_untied_verify_stride256_int4all1wc1650.log`
+  - `20260320T180424Z_l11_d496_untied_verify_stride256_int4all1wc1650.meta`
+
+### Experimental outcomes appended to `results/results.tsv`
+- Added invalid row: `20260320T180424Z_l11_d496_untied_verify_stride256_int4all2wc1650_tail`
+  - `final_int8_zlib_roundtrip_exact val_bpb = 1.22948341`
+  - `bytes_model = 16,035,944`, `bytes_code = 58,672`, `bytes_total = 16,094,616` (over cap)
+  - `exact_final_val_bpb = 1.22948341` confirmed while continuing the low-hanging-fruit int4/tied-eval tuning path.
+- Added crash row: `20260320T180424Z_l11_d496_untied_verify_stride256_int4all1wc1650`
+  - terminated by `SIGTERM` from torch distributed elastic while running at `step ~2800`
+  - preserved with `status = crash` and local log path for replay in `journal`.
+
+### State/runnable orchestration updates
+- Ran `python3 scripts/research_state.py reconcile` with `now=2026-03-20T18:04:24Z`.
+- `automation/state/research_state.json` now reflects:
+  - latest completed run: `run_id = 20260320T180424Z_l11_d496_untied_verify_stride256_int4all2wc1650_tail`
+  - status: `invalid` (byte cap violation)
+  - new `results.lastCompleted` and `run.lastCompleted` state.
+- Active run remains unchanged (`signature = 970b09c3dd3780e5`, `status = running`, attempt 6)
+  from the ongoing primary lane per core dedupe rule.
