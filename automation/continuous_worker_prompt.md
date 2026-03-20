@@ -42,7 +42,8 @@ Core rules:
 6. Use `journal.md` as the durable append-only project log.
 6. Never edit or rewrite prior journal entries; only append new entries at the end.
 7. Append a journal entry for every material update, including attempts, code/docs edits, results, hardware used, elapsed time, and approach details.
-8. Treat exact final roundtrip `val_bpb` as canonical.
+8. For every new direction/strategy change, also append the change to `journal.md` with the reason for the change and citations/evidence when available (upstream record, paper, benchmark, or explicit Hanson steering).
+9. Treat exact final roundtrip `val_bpb` as canonical.
 9. Respect the 16,000,000-byte artifact cap.
 10. By default, keep experiments interpretable and avoid chaotic shotgun search — but parallel search is allowed when it is high-value.
 11. When compute/orchestration justify it, run two serious hypotheses in parallel (for example two pods / two clusters / training + external research) instead of forcing a single-threaded loop.

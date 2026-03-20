@@ -2762,3 +2762,15 @@ Why this mattered:
 ### Ongoing workflow rule
 - Upstream inspection should be recurring, not occasional.
 - The project should regularly re-fetch `openai/parameter-golf`, inspect newly added/changed `records/` folders and `submission.json` files, and update search priorities when public evidence shifts.
+
+## 2026-03-19 22:06 PDT — Direction changes now require reasons + citations in journal
+
+### Directional change
+- Hanson explicitly said to remember that every new direction/strategy change should also be recorded in `journal.md` with the reason for the change and citations/evidence when available.
+
+### Workflow implication
+- `journal.md` should not only record runs and code changes.
+- It should also record strategy pivots with:
+  - why the direction changed
+  - what evidence motivated it
+  - citations when available (upstream record, paper, benchmark, or explicit Hanson instruction)
