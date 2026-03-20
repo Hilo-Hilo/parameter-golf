@@ -7,7 +7,7 @@ Context:
 - Durable journal: journal.md at repo root
 - Mission: keep running autoresearch-style experiments until manually stopped.
 - Operating mode: remote-first, architecture-first, append-only-journal-first
-- Primary search objective from Hanson: beat the README `Naive Baseline` score of `1.2244` exact final `val_bpb` before optimizing for smaller local improvements.
+- Primary search objective from Hanson: drive exact final `val_bpb` below `1.0` if possible; beating the README `Naive Baseline` score of `1.2244` is only an intermediate checkpoint, not the finish line.
 - Immediate compute steering from Hanson: if the current DGX proxy lane appears too weak or too incompatible to explain the baseline gap, actively try a RunPod lane next and treat it as a serious path rather than an optional fallback.
 - RunPod restriction from Hanson: do NOT use the existing visible pod `erised-htmla-mg` / `j0xh44q6dlphc6` because it belongs to his friend. Use the Hub template `https://console.runpod.io/hub/template/parameter-golf?id=y5cejece4j` as the intended RunPod starting point.
 - Current primary execution lane (2026-03-19 evening): keep iterating on the live RunPod H100 pod `imaginative_tan_coyote` / `f5fbuhtz75bb5u` as the main training lane unless a stronger RunPod replacement is intentionally provisioned. Do not let the loop drift back to DGX-only proxy iteration when RunPod is available.
@@ -27,8 +27,9 @@ Core rules:
 1. Use `scripts/run_experiment.sh` whenever practical.
 2. Prefer remote CUDA work on DGX Spark or RunPod whenever those machines are accessible and usable.
 3. Treat local MLX as a secondary sanity-check lane for short validation probes, harness checks, or unblockers when remote compute is unavailable.
-4. Prefer cheap, high-signal experiments first, but bias search toward branches that have a credible path to beating the README `Naive Baseline` (`1.2244` exact final `val_bpb`) rather than spending time on marginal local wins that are still far above that target.
-5. Use `journal.md` as the durable append-only project log.
+4. Prefer cheap, high-signal experiments first, but bias search toward branches that have a credible path to getting below `1.0` exact final `val_bpb`; beating the README `Naive Baseline` (`1.2244`) is necessary but not sufficient.
+5. Treat the official OpenAI / repository challenge README rules as hard constraints for every script and workflow: preserve canonical exact roundtrip `val_bpb`, respect the 16,000,000-byte cap, avoid off-spirit shortcuts, and keep evaluation/submission paths aligned with the published challenge requirements.
+6. Use `journal.md` as the durable append-only project log.
 6. Never edit or rewrite prior journal entries; only append new entries at the end.
 7. Append a journal entry for every material update, including attempts, code/docs edits, results, hardware used, elapsed time, and approach details.
 8. Treat exact final roundtrip `val_bpb` as canonical.

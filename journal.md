@@ -2344,3 +2344,17 @@ Why this mattered:
 ### Outcome
 - This run improved best exact final score relative to `runpod_h100_1gpu_smoke_full` (`1.3447463` -> `1.33772384`) while staying within the 16MB cap.
 - Current best remains `runpod_h100_1gpu_l10_depth` among RunPod H100 single-GPU explorations.
+
+## 2026-03-19 19:38 PDT — Hanson raised the target to sub-1 and asked for explicit OpenAI-guideline compliance
+
+### Directional change
+- Hanson explicitly raised the optimization target from merely beating the README baseline to pushing toward **sub-1 exact final `val_bpb`**.
+- Beating `1.2244` should now be treated as an intermediate checkpoint, not the final objective.
+
+### Compliance requirement
+- Hanson also explicitly asked that all project scripts adhere to official OpenAI / README challenge guidelines.
+- This means the repo automation and experiment paths should preserve:
+  - canonical exact roundtrip `val_bpb`
+  - the `16,000,000`-byte total artifact cap
+  - the published submission/evaluation spirit and constraints
+  - readable, challenge-aligned script behavior rather than clever shortcuts that would risk disqualification
