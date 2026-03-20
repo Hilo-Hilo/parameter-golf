@@ -2914,3 +2914,29 @@ Why this mattered:
   - `scripts/parse_train_log.py`
   - `scripts/smoke_sliding_eval.py`
 - The smoke script import path was fixed so it can be invoked cleanly from the repo.
+
+## 2026-03-20 22:40 PDT — RunPod SCALAR_LR=0.06 directional follow-up
+
+### Completed material run
+- `experiment_id`: `20260320T061641Z_runpod_h100_1gpu_l11_d496_uscalar06c`
+- Track/hardware: `runpod_h100_1gpu`
+- Commanded changes: one-axis probe from `11x496` untied baseline with `SCALAR_LR=0.06`.
+- Commit: `52476a0ef480a222be3c57025b7c53dc3da79513` (same train script revision as active 11x496 untied branch).
+- Log: `/workspace/parameter-golf/logs/experiments/20260320T061641Z_runpod_h100_1gpu_l11_d496_uscalar06c.log`.
+- Result status: `discard`.
+- `step_stop`: `1051`.
+- `wallclock_seconds`: `709.74503`.
+- `pre_quant_val_bpb`: `1.3222`.
+- `exact_final_val_bpb`: `1.32352664`.
+- `bytes_total`: `14596638`.
+- `bytes_model`: `14548764`.
+- `bytes_code`: `47874`.
+
+### Outcome and interpretation
+- SCALAR-rate tuning remained unpromising on this branch: `SCALAR_LR=0.06` (`1.32352664`) is worse than both `SCALAR_LR=0.08` (`1.32553081`) and the optimizer-branch lead (`MATRIX_LR=0.05`, `1.32048871`).
+- Corrected the earlier `uscalar08` row metadata with canonical metrics from remote JSON:
+  - `ts_utc`: `2026-03-20T05:57:06Z`
+  - `final_val_loss`: `2.23810325`
+  - `pre_quant_val_loss`: `2.2357`
+  - `wallclock_seconds`: `710.730255`
+- Next one-hypothesis direction: switch away from SCALAR_LR and run a next single-axis follow-up in this branch (e.g., alternate optimizer-rate or structural change with `MATRIX`/`HEAD` next).
