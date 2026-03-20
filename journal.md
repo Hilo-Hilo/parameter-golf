@@ -2796,3 +2796,25 @@ Why this mattered:
 ### Outcome
 - Interpretation: `EMBED_LR=0.4` did not beat baseline frontier and sits close to the 0.8 variant (`1.32439830` > `1.31520169`).
 - Next immediate path (one-hypothesis): keep `11x496` untied and test `MATRIX_LR` increase/decrease (`0.05` or `0.02`) as the next likely orthogonal optimizer knob.
+
+## 2026-03-20 05:17 PDT — MATRIX_LR=0.05 improved over previous EMBED_LR probes
+
+### Hypothesis: `MATRIX_LR=0.05`
+- Hardware: RunPod H100 SXM x1 (`f5fbuhtz75bb5u`, image `runpod/parameter-golf:latest`, public SSH target `64.247.201.34:14882`).
+- Branch: `research/continuous-mar18`.
+- Git commit: `52476a0ef480a222be3c57025b7c53dc3da79513`.
+- Command: `runpod_h100_1gpu_l11_d496_umatrix05` via `scripts/run_experiment.sh`, `TRACK=runpod_h100_1gpu`, `MAX_WALLCLOCK_SECONDS=600`.
+
+### Run details
+- Config: `NUM_LAYERS=11`, `MODEL_DIM=496`, `TIE_EMBEDDINGS=0`, `MATRIX_LR=0.05`.
+- Result status: `keep`.
+- Exact stop: `wallclock_cap` at `step_stop=1069`.
+- `wallclock_seconds`: `709.474112`.
+- `pre_quant_val_bpb`: `1.3195`.
+- `exact_final_val_bpb`: `1.32048871`.
+- `bytes_total`: `15150670`.
+- Log: `20260320T051705Z_runpod_h100_1gpu_l11_d496_umatrix05.log`.
+
+### Outcome
+- Interpretation: `MATRIX_LR=0.05` outperformed both `EMBED_LR` perturbations and is closer to target than previous runs, but still above frontier (`1.32048871` > `1.31520169`).
+- Next immediate path (one-hypothesis): test a lower `MATRIX_LR` (`0.03`) as a follow-up on the same 11x496 untied frontier.
