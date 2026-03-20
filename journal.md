@@ -2940,3 +2940,25 @@ Why this mattered:
   - `pre_quant_val_loss`: `2.2357`
   - `wallclock_seconds`: `710.730255`
 - Next one-hypothesis direction: switch away from SCALAR_LR and run a next single-axis follow-up in this branch (e.g., alternate optimizer-rate or structural change with `MATRIX`/`HEAD` next).
+
+## 2026-03-20 23:05 PDT — RunPod MATRIX_LR=0.06 directional follow-up
+
+### Completed material run
+- `experiment_id`: `20260320T063048Z_runpod_h100_1gpu_l11_d496_umatrix06`
+- Track/hardware: `runpod_h100_1gpu`
+- Commanded changes: one-axis probe from `11x496` untied baseline with `MATRIX_LR=0.06`.
+- Commit: `52476a0ef480a222be3c57025b7c53dc3da79513` (same train script revision as active 11x496 untied branch).
+- Log: `/workspace/parameter-golf/logs/experiments/20260320T063048Z_runpod_h100_1gpu_l11_d496_umatrix06.log`.
+- Result status: `discard`.
+- `step_stop`: `1054`.
+- `wallclock_seconds`: `709.101456`.
+- `pre_quant_val_bpb`: `1.3205`.
+- `exact_final_val_bpb`: `1.32140622`.
+- `bytes_total`: `15596327`.
+- `bytes_model`: `15548453`.
+- `bytes_code`: `47874`.
+
+### Outcome and interpretation
+- `MATRIX_LR=0.06` on this branch improved materially over most scalar variants but did not beat the `MATRIX_LR=0.05` best at `1.32048871`.
+- Best frontier remains `1.32048871` (`runpod_h100_1gpu_l11_d496_umatrix05`).
+- Next one-hypothesis direction: test a nearby structural/optimizer axis on top of `11x496` untied, rather than widening the scalar matrix sweep.
