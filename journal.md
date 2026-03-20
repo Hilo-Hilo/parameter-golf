@@ -3380,3 +3380,24 @@ Why this mattered:
 ### Directional impact
 - Quality kept improving with longer wallclock, but `int4_step=1` at 1800s overshoots the 16MB artifact cap.
 - Next high-signal follow-up should recover this stronger validation trend while controlling size (for example `INT4_STEP=2` or adjusted quantization/precision controls at the same 1800s cap).
+## 2026-03-20T14:25:00Z — 1700s all-layer int4 frontier follow-up invalid by bytes but confirms continuation slope
+
+### Run
+- Run: `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1700`
+- Hardware: live RunPod H100 lane `imaginative_tan_coyote` (`f5fbuhtz75bb5u`)
+- Goal: recover the 1800s quality trend (`exact_final_val_bpb~1.2259`) under hard 16MB cap by lowering wallclock to 1700s.
+- Command family: `NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=1700 VERIFY_EXPORT_ROUNDTRIP=1 FP16_TIED_EMBEDDING_EXPORT=1 INT4_LAYERS=0,1,2,3,4,5,6,7,8,9,10 INT4_STEP=1 EVAL_STRIDE=256 EVAL_BATCH_SEQS=32 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Remote artifacts synced to local at:
+  - `logs/experiments/20260320T134803Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1700.{log,meta,json}`
+
+### Result
+- `exact_final_val_bpb: 1.22841875`
+- `pre_quant_val_bpb: 1.2591`
+- `bytes_total: 16,040,676` (`bytes_model: 15,985,193`, `bytes_code: 55,483`), therefore `invalid` due cap (`bytes_total > 16,000,000`)
+- `step_stop: 2970`
+- `wallclock_seconds: 1891.691481`
+- `status: invalid` with note: `bytes_total>16000000`
+
+### Directional impact
+- This run confirms wallclock extension still improves quality versus earlier shorter valid frontier points (`1.23415861` at 1500s, `1.22841875` at 1700s), but byte growth still exceeds the 16MB cap by ~40,676 bytes.
+- Evidence aligns with the frontier thesis (`train_gpt.py` logs and `logs/.../134803.json` metrics) and motivates the next step to explicitly trade quantization aggressiveness or precision-saving knobs (not additional wallclock) for byte budget recovery.
