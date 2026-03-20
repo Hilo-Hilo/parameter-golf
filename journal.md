@@ -2746,3 +2746,19 @@ Why this mattered:
 ### Outcome
 - Interpretation: increasing `EMBED_LR` to `0.8` did not improve the frontier (`1.32399542` > `1.31520169`) and remained a modest regression versus best.
 - Next immediate path (one-hypothesis): keep `11x496` untied and test a single opposite/related optimizer tweak such as `EMBED_LR=0.4` or `MATRIX_LR` adjustment.
+
+## 2026-03-19 22:03 PDT — Training direction updated from upstream and upstream refresh made recurring
+
+### Directional change
+- Hanson explicitly asked to update the training direction based on the refreshed upstream findings and to remember to check upstream regularly.
+
+### Updated priority order
+- The worker should now prioritize:
+  1. sliding-window exact evaluation
+  2. smarter precision-aware export / compression
+  3. warmdown / quantization-aware schedule work
+  4. only then additional architecture sweeps unless a shape change is unusually high-value
+
+### Ongoing workflow rule
+- Upstream inspection should be recurring, not occasional.
+- The project should regularly re-fetch `openai/parameter-golf`, inspect newly added/changed `records/` folders and `submission.json` files, and update search priorities when public evidence shifts.

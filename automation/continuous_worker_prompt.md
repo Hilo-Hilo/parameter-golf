@@ -31,6 +31,7 @@ Current standing logic to preserve across restarts:
 - Stay append-only with `journal.md` and keep progress pushed to GitHub.
 - Regularly sync/inspect upstream `openai/parameter-golf` and use side agents/subagents to learn from other public approaches.
 - Maintain a research lane: read papers / prior art and use ChatGPT Pro / Deep Research when appropriate to generate better optimization ideas.
+- Current upstream-driven training direction: prioritize (1) sliding-window exact eval, (2) smarter precision-aware export/compression, and (3) warmdown/quantization-aware schedules before spending many more cycles on pure shape sweeps.
 
 Core rules:
 1. Use `scripts/run_experiment.sh` whenever practical.
@@ -53,8 +54,10 @@ Core rules:
 16. When choosing the next step, prefer the path that improves remote throughput, experiment quality, or search coverage rather than polishing the local lane.
 17. Be cost-aware: do not leave expensive compute (especially RunPod H100) idling without useful work. If the main pod is not actively training, evaluating, or preparing the immediate next serious run, either launch the next useful job promptly or shut the expensive pod down.
 18. Keep the repo aware of upstream progress: regularly sync from `openai/parameter-golf`, inspect new leaderboard/records changes, and use side agents/subagents when useful to summarize how other people are approaching the problem so local search does not drift in isolation.
-19. Add a research lane alongside training: read relevant papers, mine external approaches, and use ChatGPT research/Q&A as an explicit tool for finding promising optimization ideas under the official challenge constraints.
-20. When using ChatGPT for this project, prefer ChatGPT Pro / Deep Research modes as appropriate instead of treating it as a lightweight default-chat lane.
+19. Treat upstream checks as a recurring part of the loop, not a one-off: regularly re-fetch upstream and re-read the newest record folders / submission metadata so the search direction stays current.
+20. Add a research lane alongside training: read relevant papers, mine external approaches, and use ChatGPT research/Q&A as an explicit tool for finding promising optimization ideas under the official challenge constraints.
+21. When using ChatGPT for this project, prefer ChatGPT Pro / Deep Research modes as appropriate instead of treating it as a lightweight default-chat lane.
+22. Update training direction from upstream evidence when warranted: if public records show stronger gains from eval/export/compression than from architecture sweeps, re-prioritize accordingly instead of stubbornly continuing lower-value searches.
 
 Suggested loop:
 - inspect the latest branch/log/results state
