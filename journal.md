@@ -3360,3 +3360,23 @@ Why this mattered:
 
 ### Next action
 - Launched follow-up continuation on same frontier: `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1800` (MAX_WALLCLOCK_SECONDS=1800) to probe whether continued wallclock yields further quality gains before revisiting quant-depth tradeoffs.
+## 2026-03-20T13:10:00Z — 1800s wallclock follow-up improves score but misses byte cap
+
+### Result
+- Completed run: `20260320T123900Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1800`
+- Hardware: live RunPod H100 lane `imaginative_tan_coyote` (`f5fbuhtz75bb5u`)
+- Command family: `NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=1800` with `VERIFY_EXPORT_ROUNDTRIP=1`, `FP16_TIED_EMBEDDING_EXPORT=1`, `INT4_STEP=1`, `INT4_LAYERS=0..10`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`
+- Canonical final: `exact_final_val_bpb=1.22595806`
+- Pre-quant: `pre_quant_val_bpb=1.2566`
+- Wallclock: `2012.075081s`, `step_stop=3103`
+- Artifact size: `bytes_total=16,113,819` (`bytes_model=16,058,336`, `bytes_code=55,483`), so this run is marked `invalid` due `bytes_total>16,000,000`
+- Status: `invalid` (high-signal direction but not leaderboard-comparable)
+
+### Operational updates
+- Remote artifacts synced locally: `logs/experiments/20260320T123634Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1800.{log,meta,json}`
+- `results/results.tsv` appended with this keep/invalid row
+- `automation/state/research_state.json` reconciled to latest completed signature (`f74ab447f62ef76d`)
+
+### Directional impact
+- Quality kept improving with longer wallclock, but `int4_step=1` at 1800s overshoots the 16MB artifact cap.
+- Next high-signal follow-up should recover this stronger validation trend while controlling size (for example `INT4_STEP=2` or adjusted quantization/precision controls at the same 1800s cap).
