@@ -3453,3 +3453,38 @@ Why this mattered:
   - `--muon-weight-decay` (passes through to `MUON_WEIGHT_DECAY`)
 - This keeps `scripts/run_experiment.sh` aligned with the new `train_gpt.py` controls and enables rapid RunPod/DGX launch templating without manual env wrappers.
 - No remote training/job was started during this iteration; repo remains on branch `research/continuous-mar18` and active `runpod_h100` lane remains the next target.
+
+## 2026-03-20 10:18 PDT — RunPod replacement pod recovered after endpoint/checkout loss
+
+### What broke
+- The previously saved RunPod SSH endpoint stopped working (`connection refused`).
+- RunPod console inspection showed the live pod had effectively been recreated/replaced with a new pod identity / endpoint.
+- The replacement pod had an empty `/workspace/parameter-golf` directory rather than a usable git checkout, and it had also lost the cached challenge data.
+
+### Why this mattered
+- The training lane was not truly progressing because the active replacement pod had lost both code context and data context.
+- This explains why the old endpoint looked dead and why the autonomous loop drifted.
+
+### Recovery steps taken
+- Recovered the fresh SSH details from the RunPod console.
+- Reconnected to the replacement pod at:
+  - `ssh root@64.247.201.51 -p 15402 -i ~/.ssh/id_ed25519`
+- Recreated the repo checkout:
+  - cloned `https://github.com/Hilo-Hilo/parameter-golf.git`
+  - checked out `research/continuous-mar18`
+  - confirmed branch head `88ca417`
+- Started a detached tmux recovery session `pg-main` that:
+  1. re-downloads cached FineWeb `sp1024` data with `python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 8`
+  2. relaunches the low-hanging-fruit H100 path:
+     - `runpod_h100_recover_l11_d496_untied_slide64`
+     - `EVAL_STRIDE=64`
+     - `EVAL_BATCH_SEQS=64`
+     - `NUM_LAYERS=11`
+     - `MODEL_DIM=496`
+     - `TIE_EMBEDDINGS=0`
+     - `VERIFY_EXPORT_ROUNDTRIP=1`
+
+### Evidence
+- RunPod console showed the active pod still existed but with a fresh endpoint.
+- The replacement pod's `/workspace/parameter-golf` was not a git repo and had no cached dataset files.
+- tmux recovery session `pg-main` is now active and downloading the cached dataset before training.
