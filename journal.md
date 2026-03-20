@@ -3204,3 +3204,16 @@ Why this mattered:
 - `upstream/main:records/track_10min_16mb/2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit/train_gpt.py`
 - `records/.../train_seed1337.log`, `train_seed42.log`, `train_seed7.log`
 - `records/track_10min_16mb/2026-03-19_SlidingWindowEval/README.md`
+
+## 2026-03-20T08:52:00Z — RunPod lane cleanup + execute state
+
+### Maintenance
+- Cleared stale background `runpod_h100` verification jobs on the main H100 pod so the faithful direct-copy run owns the GPU (`runpod_h100_1gpu_directcopy_10l_overtone_v2`).
+- Current GPU process check shows only PID `56371` active for this run after cleanup.
+- First in-run metrics show warmup complete and training entering normal steps:
+  - `step:1/20000 train_loss:6.9337 train_time:444ms`
+  - `step:10/20000 train_loss:6.3515`
+
+### Tracking
+- Active run log: `/workspace/parameter-golf/logs/experiments/20260320T083350Z_runpod_h100_1gpu_directcopy_10l_overtone_v2.log`
+- Active run metadata: `/workspace/parameter-golf/logs/experiments/20260320T083350Z_runpod_h100_1gpu_directcopy_10l_overtone_v2.meta`
