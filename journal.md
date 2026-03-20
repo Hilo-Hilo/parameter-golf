@@ -2997,3 +2997,37 @@ Why this mattered:
   - `scripts/parse_train_log.py`
   - `scripts/smoke_sliding_eval.py`
 - No live DGX process was touched.
+
+## 2026-03-19 23:56 PDT — Immediate live pivot: stopped stale LR sweep and relaunched RunPod on low-hanging-fruit path
+
+### Directional change
+- Hanson explicitly told me to pivot immediately to the low-hanging fruits and later called out that I still had an old LR sweep running on RunPod.
+- I stopped that leftover sweep and redirected the H100 onto the new low-hanging-fruit path.
+
+### Why this changed now
+- The old live job was still an 11x496 LR-sweep variant (`MATRIX_LR` / `HEAD_LR`) even after the upstream-driven reprioritization.
+- That was inconsistent with the new direction and was wasting H100 attention on lower-value search.
+
+### Evidence / citations
+- Explicit Hanson steering in chat: pivot immediately to low-hanging fruits.
+- Upstream evidence already logged in this journal:
+  - `2026-03-19_SlidingWindowEval`
+  - `2026-03-19_10L_MixedPrecision`
+  - `2026-03-19_WarmdownQuantization`
+- These point more strongly to eval/export/compression than to continued small LR sweeps.
+
+### Live action taken
+- Stopped the leftover RunPod LR-sweep process.
+- Synced the RunPod repo checkout to the latest `research/continuous-mar18`.
+- Relaunched H100 on:
+  - `runpod_h100_1gpu_l11_d496_untied_slide64`
+  - `EVAL_STRIDE=64`
+  - `EVAL_BATCH_SEQS=64`
+  - `NUM_LAYERS=11`
+  - `MODEL_DIM=496`
+  - `TIE_EMBEDDINGS=0`
+  - `MAX_WALLCLOCK_SECONDS=600`
+  - `VERIFY_EXPORT_ROUNDTRIP=1`
+
+### Constraint
+- DGX Spark was left untouched per Hanson's instruction.
