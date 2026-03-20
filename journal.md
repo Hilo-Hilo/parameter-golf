@@ -3122,3 +3122,26 @@ Why this mattered:
   - `scripts/smoke_research_state.sh`
 - Smoke path passed:
   - `bash scripts/smoke_research_state.sh`
+
+## 2026-03-20T07:37:04Z — RunPod exact-export verify continuation
+
+### Run
+- Maintained main lane on RunPod H100 pod `imaginative_tan_coyote` (`f5fbuhtz75bb5u`), avoiding friend-owned pod.
+- Launched detached `scripts/run_experiment.sh` rerun:
+  - `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_d496_untied_verify3 --track runpod_h100 --trainer train_gpt.py --status keep --notes "verify-export-path: validate best frontier with verify enabled after fix (detached)" -- env NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=600 VERIFY_EXPORT_ROUNDTRIP=1 EVAL_STRIDE=1024 EVAL_BATCH_SEQS=32 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- This validated quant roundtrip/eval with the device-mismatch fix (commit `70e1307`) in the live export/eval path.
+
+### Result
+- Completed successfully with `exit_code=0`; parsed summary JSON recorded at `/workspace/parameter-golf/logs/experiments/20260320T073704Z_runpod_h100_1gpu_l11_d496_untied_verify3.json`.
+- Final row added to `results/results.tsv`:
+  - experiment: `20260320T073704Z_runpod_h100_1gpu_l11_d496_untied_verify3`
+  - status: `keep`
+  - `exact_final_val_bpb=1.31193434`
+  - `pre_quant_val_bpb=1.3107`
+  - `bytes_total=15070268`
+  - `wallclock_seconds=783.016748`
+  - `step_stop=1187`
+
+### Directional impact
+- Exact roundtrip export path is now end-to-end healthy again after the earlier GPU-side `VERIFY_EXPORT_ROUNDTRIP` crash.
+- Result remains above 1.0, so next work should continue precision-aware compression sweeps (int4/expression-level knobs) as directed by current priority before additional shape/curve sweeps.
