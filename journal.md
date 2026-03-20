@@ -3081,3 +3081,44 @@ Why this mattered:
 
 ### Operational change
 - The cron-backed worker/watchdog should explicitly read `journal.md` as part of its recurring loop so the latest project pivots remain active operating context, not just historical notes.
+
+## 2026-03-20 00:45 PDT — Landed worker dedupe/state layer to prevent repeated cron work
+
+### Directional change
+- Hanson explicitly asked how to make sure the cron job does not repeat work, then explicitly said to implement it.
+- I moved the dedupe/state hardening from an isolated worktree onto the working branch once the smoke path passed.
+
+### Why this changed now
+- The previous setup had partial continuity (watchdog state, journal, results), but no dedicated authoritative dedupe/planning layer.
+- That left the loop vulnerable to relaunching stale or already-completed work after restarts.
+
+### Evidence / citations
+- Explicit Hanson steering in chat: make sure the cron job does not repeat work; implement it.
+- Internal repo evidence motivating the change:
+  - repeated stale-logic drift after pivots
+  - stale remote checkouts / repeated sweeps risk when worker restarts
+
+### What was landed
+- Added `scripts/research_state.py` as a machine-readable orchestration state layer.
+- Added `automation/state/research_state.json` bootstrap/update flow.
+- Wired `start_continuous_worker.sh` to bootstrap research state on launch.
+- Wired `check_continuous_worker.py` to reconcile:
+  - worker state
+  - journal tail
+  - recent `results/results.tsv`
+  - active process/log info
+- Added dedupe-aware `shouldRestart` handling into `watchdog_tick.py`.
+- Wired `stop_continuous_worker.sh` to mark stop state in research state.
+- Added `scripts/smoke_research_state.sh` as a lightweight validation path.
+
+### Validation
+- Python syntax checks passed:
+  - `scripts/research_state.py`
+  - `scripts/check_continuous_worker.py`
+  - `scripts/watchdog_tick.py`
+- Shell syntax checks passed:
+  - `scripts/start_continuous_worker.sh`
+  - `scripts/stop_continuous_worker.sh`
+  - `scripts/smoke_research_state.sh`
+- Smoke path passed:
+  - `bash scripts/smoke_research_state.sh`

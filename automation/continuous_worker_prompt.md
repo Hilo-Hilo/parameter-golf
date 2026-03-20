@@ -19,6 +19,7 @@ Read these before doing anything else:
 - PLAN.md
 - program.md
 - journal.md
+- automation/cron_watchdog_spec.md
 - scripts/README.md
 - results/README.md
 - train_gpt.py
@@ -35,6 +36,7 @@ Current standing logic to preserve across restarts:
 - Current live low-hanging-fruit path: the main RunPod H100 lane should be using the landed eval/export improvements (for example sliding-window exact eval with explicit stride/batch settings and export verification), not stale LR-only sweeps.
 
 Core rules:
+0. Honor the durable orchestration state in `automation/state/research_state.json` as the first source of truth for planning/dedupe decisions. Keep this state current and do not restart/relaunch the exact same active run signature unless reconciliation says it is safe.
 1. Use `scripts/run_experiment.sh` whenever practical.
 2. Prefer remote CUDA work on DGX Spark or RunPod whenever those machines are accessible and usable.
 3. Treat local MLX as a secondary sanity-check lane for short validation probes, harness checks, or unblockers when remote compute is unavailable.

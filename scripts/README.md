@@ -10,6 +10,8 @@ Minimal experiment helpers for this repo.
 - `scripts/check_continuous_worker.py`: machine-readable liveness check for the detached worker
 - `scripts/stop_continuous_worker.sh`: stop the detached worker using watchdog state
 - `scripts/watchdog_tick.py`: one deterministic watchdog tick (check/cooldown/restart)
+- `scripts/research_state.py`: durable planning/dedupe state for worker runs, with reconciliation logic
+- `scripts/smoke_research_state.sh`: reproducible smoke path for reconcile/start-stop state lifecycle
 
 ## Continuous worker stance
 
@@ -17,6 +19,8 @@ Minimal experiment helpers for this repo.
 - Preferred training lane: remote CUDA hardware, with DGX Spark / RunPod first when accessible.
 - Local MLX is the secondary sanity-check lane, not the default long-run search lane.
 - `journal.md` at repo root is the durable append-only project log; material updates should be appended, never rewritten.
+- `automation/state/research_state.json` is the durable planning state for reconciliation and run dedupe.
+- The durable state tracks active hypothesis/action signatures, upstream checks, last completed run signature, and reconciliation decisions.
 
 ## Typical Usage
 
@@ -58,10 +62,22 @@ Check worker status:
 python3 scripts/check_continuous_worker.py
 ```
 
+Inspect reconciliation payload with state file:
+
+```bash
+python3 scripts/check_continuous_worker.py --research-state-file automation/state/research_state.json
+```
+
 Run one watchdog tick:
 
 ```bash
 python3 scripts/watchdog_tick.py
+```
+
+Smoke-check orchestration-state lifecycle:
+
+```bash
+scripts/smoke_research_state.sh
 ```
 
 Stop worker:
@@ -72,6 +88,12 @@ scripts/stop_continuous_worker.sh
 
 The watchdog state lives under `automation/state/` and logs under `automation/logs/`.
 These runtime artifacts are intentionally gitignored.
+
+## State-dedupe smoke path
+
+```bash
+scripts/smoke_research_state.sh
+```
 
 ## Notes
 
