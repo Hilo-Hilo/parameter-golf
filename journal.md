@@ -2221,3 +2221,32 @@ Why this mattered:
 ### Immediate implication
 - The fresh RunPod H100 lane is now doing real training work, not just provisioning.
 - The next useful checkpoint is the first completed smoke result (or crash signature) from this detached run.
+
+## 2026-03-19 18:57 PDT — Real H100 RunPod training run active; pg-worker still unclassified
+
+### Live RunPod H100 status
+- The earlier statement that `imaginative_tan_coyote` was idle became stale.
+- It is now actively training a real 10-minute run on the fresh H100 pod.
+- Active run observed on pod:
+  - pod: `imaginative_tan_coyote` / `f5fbuhtz75bb5u`
+  - hardware: `H100 SXM x1`
+  - run name: `runpod_h100_1gpu_seq512`
+  - launcher: `scripts/run_experiment.sh`
+  - trainer: `torchrun --standalone --nproc_per_node=1 train_gpt.py`
+  - config branch observed in log: `TRAIN_SEQ_LEN=512`, `TRAIN_BATCH_TOKENS=524288`, `MAX_WALLCLOCK_SECONDS=600`, `torch_compile: enabled`
+- Live progress observed during SSH check:
+  - active GPU python process using about `11926 MiB`
+  - log had already reached `step:600/20000`
+
+### Why it previously looked idle
+- The first H100 run was only a 60-second smoke meant to validate the pod/template/data path and detached launch behavior.
+- That smoke completed successfully and exited, so the pod looked idle afterwards.
+- A later real run is now active, which is why the RunPod UI shows high GPU utilization again.
+
+### pg-worker classification status
+- `pg-worker` / `qaw9q0vzajnffu` still has not been SSH-inspected.
+- Current visible facts only:
+  - GPU: `RTX 3090 x1`
+  - cost: `$0.22/hr`
+  - disk shown around `78%`
+- It may be killable technically, but it is still an unknown pod from an ownership/workload perspective, so it should not be killed blindly until it is classified.
