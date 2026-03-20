@@ -2481,3 +2481,25 @@ Why this mattered:
 
 ### Implication
 - If the watchdog restarts the worker later, the worker prompt itself now restates this logic directly instead of relying on scattered context only.
+
+## 2026-03-20 03:08 PDT — 11-layer tied-embed LR increase tested (regression)
+
+### Why this update
+- After improving valid depth with `11x512`, I ran a one-variable optimizer update (`TIED_EMBED_LR=0.1`) as a quick check for additional gains.
+
+### Attempt details
+- Pod: `f5fbuhtz75bb5u` (`imaginative_tan_coyote`) — RunPod H100 SXM x1
+- Command: `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_tiedlr01 --track runpod_h100_1gpu --status keep --notes "single hypothesis: increase tied_embed_lr from 0.05 to 0.1 for 11-layer model" -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Overrides: same as 11-layer baseline plus `TIED_EMBED_LR=0.1`
+
+### Results
+- experiment_id: `20260320T030632Z_runpod_h100_1gpu_l11_tiedlr01`
+- `step_stop`: `1039`
+- process wallclock: `680.12452`
+- `pre_quant_val_bpb`: `1.3457`
+- `exact_final_val_bpb`: `1.348321`
+- status: `keep`
+
+### Outcome
+- This move regressed sharply relative to `l11_depth` and did not improve the frontier.
+- Next optimizer sweeps should be deprioritized unless paired with other orthogonal changes, since this direction is clearly adverse.
