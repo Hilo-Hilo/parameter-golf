@@ -3244,3 +3244,40 @@ Why this mattered:
 ### Directional impact
 - Confirms warmdown extension is currently a non-promising axis for this quantized frontier.
 - Next moves should likely prioritize additional architecture/sequence/optim schedule alternatives rather than longer warmdown on this exact config.
+## 2026-03-20T10:09:59Z — RunPod no-FP16 precision control check
+
+### Run
+- Executed a precision control run on the live RunPod H100 lane: `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1_nofp16`.
+- Remote command used `FP16_TIED_EMBEDDING_EXPORT=0` while keeping all 11 layers quantized with `INT4_STEP=1`, `VERIFY_EXPORT_ROUNDTRIP=1`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, `MAX_WALLCLOCK_SECONDS=600`.
+- Synced remote artifacts: `logs/experiments/20260320T095859Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1_nofp16.{log,meta,json}`.
+- Hardware: RunPod live H100 pod `imaginative_tan_coyote` (`f5fbuhtz75bb5u`).
+
+### Result
+- `exact_final_val_bpb=1.30936417`
+- `pre_quant_val_bpb=1.3369`
+- `final_val_loss=2.21080656`
+- `bytes_total=13,197,119` bytes (`bytes_model=13,141,636`, `bytes_code=55,483`)
+- `wallclock_seconds=777.71`, `step_stop=1099`, `exit_code=0`
+
+### Impact
+- This is a non-improving check versus the existing all-layer frontier (`1.29896417` at `20260320T085003Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1`).
+- Indicates `FP16_TIED_EMBEDDING_EXPORT` toggling to `0` is likely detrimental on this exact eval lane at this configuration.
+- Next prioritized hypothesis remains to continue with high-signal frontier paths rather than export-type toggles unless further evidence suggests a recovery mechanism.
+## 2026-03-20T10:25:00Z — RunPod eval-batch tuning sweep check
+
+### Run
+- Executed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1_batch64` on the live RunPod H100 with the same quantized frontier as the previous best but with `EVAL_BATCH_SEQS=64`.
+- Kept `INT4_STEP=1`, `INT4_LAYERS` all 11 layers, `FP16_TIED_EMBEDDING_EXPORT=1`, `VERIFY_EXPORT_ROUNDTRIP=1`, `EVAL_STRIDE=256`, `MAX_WALLCLOCK_SECONDS=600`.
+- Synced remote artifacts: `logs/experiments/20260320T101240Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1_batch64.{log,meta,json}`.
+- Hardware: RunPod live H100 pod `imaginative_tan_coyote`.
+
+### Result
+- `exact_final_val_bpb=1.30399119`
+- `pre_quant_val_bpb=1.3322`, `final_val_loss=2.20173450`
+- `bytes_total=13,370,697` bytes (`bytes_model=13,315,214`, `bytes_code=55,483`)
+- `wallclock_seconds=781.24`, `step_stop=1139`, `exit_code=0`
+
+### Impact
+- This remains worse than the 1.29896417 frontier run (`20260320T085003Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1`).
+- In contrast to the prior `batch32` case, `batch64` did not improve final exact score on this fixed config.
+- Next run path should prioritize non-eval-batch controls or architectural/optimizer schedule variants rather than further eval-batch tuning at this point.
