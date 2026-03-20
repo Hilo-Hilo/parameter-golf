@@ -3210,3 +3210,21 @@ Why this mattered:
 - `INT4_STEP=1` beat `INT4_STEP=2` under the same stride/batch/eval settings, so the next follow-up should continue this compression axis:
   - test narrower quantization pressure variants (e.g., all layers `INT4_STEP=1` with `INT4_LAYERS` subsets on the same stride regime),
   - only then move to other structural hypotheses if no additional monotonic gains appear.
+
+## 2026-03-20T09:05:23Z — Subset quantization check confirms all-layer INT4 remains strongest so far
+
+### Run
+- Kept the same 11x496 untied + sliding-window verify lane and tested first-8-layer quantization:
+  - `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4half1 --track runpod_h100 --trainer train_gpt.py --status keep --notes "int4-compression: first 8 layers int4_step=1 fp16_tied_embedding_export=1 verify exact; sliding eval stride/batch tune" --eval-stride 256 --eval-batch-seqs 32 -- env NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=600 VERIFY_EXPORT_ROUNDTRIP=1 FP16_TIED_EMBEDDING_EXPORT=1 INT4_LAYERS="0,1,2,3,4,5,6,7" INT4_STEP=1 EVAL_STRIDE=256 EVAL_BATCH_SEQS=32 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Synced the new artifacts from `/workspace/parameter-golf/logs/experiments/20260320T090523Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4half1.*` to local `logs/experiments`.
+
+### Result
+- Completed successfully (`exit_code=0`), `exact_final_val_bpb=1.30082265`, `status=keep`.
+- `pre_quant_val_bpb=1.3292`, `bytes_total=13418850`, `step_stop=1175`, `wallclock_seconds=775.605728`.
+- This is behind the all-layer `int4_step=1` frontier (`1.29896417`) and therefore should be retained for comparison but not as primary direction.
+
+### Directional impact
+- Supports the current hypothesis that this lane’s strongest compression point is at higher quantization coverage (`int4_step=1` across all layers), while limiting quantized layers reduced objective quality here.
+- Next experiment should therefore revert to all-layer coverage and explore either:
+  - alternative `INT4_STEP` values near 1 (e.g., 1 with different compile/eval settings),
+  - warmdown/optimizer schedule interactions with the already-learned quantized frontier.
