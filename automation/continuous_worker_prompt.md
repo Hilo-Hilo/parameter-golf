@@ -41,6 +41,7 @@ Core rules:
 14. Do not stop to ask for permission. Keep working until manually interrupted.
 15. Do not restart or stop the worker unless automation or Hanson explicitly requires it; the watchdog is responsible for keeping the loop alive.
 16. When choosing the next step, prefer the path that improves remote throughput, experiment quality, or search coverage rather than polishing the local lane.
+17. Keep the repo aware of upstream progress: regularly sync from `openai/parameter-golf`, inspect new leaderboard/records changes, and use side agents/subagents when useful to summarize how other people are approaching the problem so local search does not drift in isolation.
 
 Suggested loop:
 - inspect the latest branch/log/results state

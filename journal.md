@@ -2406,3 +2406,13 @@ Why this mattered:
 ### Outcome
 - This continues the depth trajectory; `11x512` is better than 10-layer and 9-layer baselines observed so far (`1.33252549` vs `1.33772384` and `1.3447463`).
 - `NUM_LAYERS=11` still improves score but remains above the README `Naive Baseline` target (`1.2244`), so next steps should focus on additional quality gains (optimizer and architecture couplings) while maintaining 16MB cap.
+
+## 2026-03-19 20:01 PDT — Upstream sync + external-approach monitoring added to the standing workflow
+
+### Directional change
+- Hanson explicitly said to remember that side agents should be delegated to keep the repo synced with upstream and to see how other people are approaching the Parameter Golf problem.
+
+### Workflow implication
+- Treat upstream `openai/parameter-golf` sync as part of the ongoing research loop.
+- Use delegated side-agent / subagent work to inspect new upstream leaderboard records, README changes, record folders, and any newly published approaches so local search can react quickly.
+- The project should not rely only on internal experimentation; it should also absorb external signal from upstream progress.
