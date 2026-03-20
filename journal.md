@@ -3401,3 +3401,29 @@ Why this mattered:
 ### Directional impact
 - This run confirms wallclock extension still improves quality versus earlier shorter valid frontier points (`1.23415861` at 1500s, `1.22841875` at 1700s), but byte growth still exceeds the 16MB cap by ~40,676 bytes.
 - Evidence aligns with the frontier thesis (`train_gpt.py` logs and `logs/.../134803.json` metrics) and motivates the next step to explicitly trade quantization aggressiveness or precision-saving knobs (not additional wallclock) for byte budget recovery.
+
+## 2026-03-20T14:55:00Z — Frontier follow-up 1800s no-FP16 variant remains invalid by bytes
+
+### Run
+- `run_id`: `20260320T142035Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1800_nofp16`
+- `commit`: `66fa9d9cb7b9f54fcf14cfa171feaf374851cc7c`
+- `TRACK`: `runpod_h100`
+- `TRAINER`: `train_gpt.py`
+- `HARDWARE`: live RunPod H100 pod `imaginative_tan_coyote` (`f5fbuhtz75bb5u`)
+- `PROCESS_WALLCLOCK_SECONDS`: `2007.78795`
+- `wallclock`: `2007.78795` (run JSON `wallclock_seconds`)
+
+### Artifacts
+- Local log: `logs/experiments/20260320T142035Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1800_nofp16.log`
+- Submission JSON: `logs/experiments/20260320T142035Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1800_nofp16.json`
+
+### Result
+- `exact_final_val_bpb`: `1.22485899`
+- `pre_quant_val_bpb`: `1.2557`
+- `bytes_total`: `16132911` (`bytes_model`: `16077428`, `bytes_code`: `55483`)
+- `step_stop`: `3131`
+- `status`: `invalid` (`bytes_total > 16,000,000`)
+
+### Directional impact
+- This is the same wallclock frontier direction as `1.22595806 @ 1800s` and `1.22841875 @1700s`, but `FP16_TIED_EMBEDDING_EXPORT=0` did not beat the best frontier shape+precision combo and still exceeded the byte cap.
+- Action recorded in ledger as a non-promising branch for now; continue with byte-recovery quantization/compression choices before additional wallclock extension.
