@@ -3342,3 +3342,21 @@ Why this mattered:
   - `MAX_WALLCLOCK_SECONDS=1200`, `INT4_STEP=1`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, full 11-layer int4 quantization, exact export verification enabled.
 - Remote launch via detached `tmux` session `pg-worker2` using the usual `scripts/run_experiment.sh` path.
 - Log currently initializing and warmup/step updates are being emitted, with no JSON summary yet.
+## 2026-03-20T12:35:00Z — RunPod wallclock extension to 1500s improves frontier under exact-size cap
+
+### Result
+- Completed run: `20260320T120707Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1500`
+- Hardware: live RunPod H100 lane `imaginative_tan_coyote` (`f5fbuhtz75bb5u`)
+- Command family: `NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=1500` with `VERIFY_EXPORT_ROUNDTRIP=1`, `FP16_TIED_EMBEDDING_EXPORT=1`, `INT4_STEP=1`, `INT4_LAYERS=0..10`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`
+- Final canonical metric: `exact_final_val_bpb=1.23415861`
+- Pre-quant metric at final eval: `pre_quant_val_bpb=1.2652`
+- Submission artifact: `bytes_total=15792608` (`bytes_model=15737125`, `bytes_code=55483`), within 16,000,000-byte cap
+- Final status: `keep`
+
+### Operational updates
+- Remote artifacts synced locally: `logs/experiments/20260320T120707Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1500.{log,meta,json}`
+- `results/results.tsv` appended with new keep row for the same run
+- `automation/state/research_state.json` reconciled; latest completed signature updated to `b536ad6b3247fa4f`
+
+### Next action
+- Launched follow-up continuation on same frontier: `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1800` (MAX_WALLCLOCK_SECONDS=1800) to probe whether continued wallclock yields further quality gains before revisiting quant-depth tradeoffs.
