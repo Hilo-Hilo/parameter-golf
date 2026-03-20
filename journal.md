@@ -3058,3 +3058,26 @@ Why this mattered:
   - `records/track_10min_16mb/2026-03-19_SlidingWindowEval/README.md`
   - `records/track_10min_16mb/2026-03-19_10L_MixedPrecision/README.md`
   - `records/track_10min_16mb/2026-03-19_WarmdownQuantization/README.md`
+
+## 2026-03-20 00:09 PDT — Cron instructed to read journal.md and preserve the latest pivot
+
+### Directional change
+- Hanson explicitly reminded me to make sure this low-hanging-fruit / upstream-driven pivot is recorded in `journal.md` and that the cron-backed worker explicitly reads `journal.md`.
+
+### Why this matters
+- The project has pivoted away from stale architecture/LR-first behavior toward the current higher-value order:
+  1. sliding-window exact eval
+  2. smarter precision-aware export / compression
+  3. warmdown / quantization-aware schedules
+  4. only then more architecture/LR sweeps unless clearly justified
+- If the cron/worker does not explicitly read `journal.md`, it risks drifting back toward outdated assumptions after restart or prompt churn.
+
+### Evidence / citations
+- Explicit Hanson steering in chat.
+- Upstream evidence already cited in earlier journal entries:
+  - `records/track_10min_16mb/2026-03-19_SlidingWindowEval/README.md`
+  - `records/track_10min_16mb/2026-03-19_10L_MixedPrecision/README.md`
+  - `records/track_10min_16mb/2026-03-19_WarmdownQuantization/README.md`
+
+### Operational change
+- The cron-backed worker/watchdog should explicitly read `journal.md` as part of its recurring loop so the latest project pivots remain active operating context, not just historical notes.
