@@ -2658,3 +2658,69 @@ Why this mattered:
 ### Outcome
 - Interpretation: increasing warmdown from 1200/1200 baseline to 2400 did not improve frontier at this frontier point and appears to over-dampen optimization quality.
 - Next immediate path (one-hypothesis at a time): keep `11x496` untied and test a single optimizer-rate adjustment path (`EMBED_LR`, `MATRIX_LR`, `SCALAR_LR`, or `HEAD_LR`) with default warmdown.
+
+## 2026-03-19 22:00 PDT — Upstream sync refreshed; strongest visible approaches re-prioritized
+
+### Sync status
+- Refreshed local repo against `upstream/main` with a fresh fetch.
+- Current divergence at check time for `research/continuous-mar18...upstream/main`:
+  - local-only commits: `63`
+  - upstream-only commits: `38`
+- This means the local branch has current upstream refs available for inspection, but upstream has continued advancing materially.
+
+### Most important upstream approaches right now
+1. **Warmdown + smarter compression/export is the strongest visible direction**
+   - `2026-03-19_WarmdownQuantization`
+   - `submission.json` reports `val_bpb = 1.15744040`
+   - Key ideas in the upstream record metadata:
+     - train for quantizability with very long warmdown
+     - sliding-window evaluation
+     - fp16 tied embeddings
+     - larger MLP enabled by smarter post-training quantization (`Int6 MLP3x Sliding Window`)
+   - Important note: this folder's `README.md` appears stale relative to `submission.json`, so the upstream tree should be read via `submission.json` / logs, not README alone.
+
+2. **Sliding-window exact eval remains one of the highest-confidence gains**
+   - `2026-03-19_SlidingWindowEval`
+   - exact `val_bpb = 1.19250007`
+   - Training is nearly baseline-identical; the gain comes mostly from evaluation method:
+     - overlapping windows
+     - stride=64
+     - richer context per scored token
+   - This is still the clearest low-risk, high-value improvement path.
+
+3. **10-layer + mixed precision export is strong and challenge-aligned**
+   - `2026-03-19_10L_MixedPrecision`
+   - exact `val_bpb = 1.21474500`
+   - Key ideas:
+     - 10 layers at dim 512
+     - lower learning rates
+     - middle layers compressed more aggressively (int6-like via step-4 rounding)
+   - Main lesson: depth becomes more viable once artifact packing is smarter.
+
+4. **Sliding-window + fp16 embed + 10L + Muon WD + Overtone Init is strong on the visible leaderboard**
+   - `2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit`
+   - mean `val_bpb = 1.17475315`
+   - Combines:
+     - sliding-window evaluation
+     - fp16 tied embeddings
+     - 10 layers
+     - Muon weight decay
+     - overtone spectral embedding init
+     - residual-mixing init tweaks
+
+5. **LoRA TTT is interesting, but its own ablations say the easy gain is elsewhere**
+   - `2026-03-17_LoRA_TTT`
+   - Mean around `1.1928`
+   - Upstream ablation says most of the gain comes from:
+     - document-isolated evaluation
+     - strided evaluation
+   - The LoRA adaptation itself looks like a second-wave refinement, not the first thing to copy.
+
+### Practical reprioritization
+- Highest-value near-term work should focus on:
+  1. sliding-window exact eval
+  2. smarter precision-aware export/compression
+  3. quantization-aware training schedules (especially warmdown / lower-LR robustness)
+  4. only then further depth/shape search
+- Tokenizer changes still do not look like the main public winning lever.
+- The project should continue reading upstream `records/` directly instead of trusting the top-level README alone.
