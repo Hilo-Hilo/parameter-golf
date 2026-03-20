@@ -2296,3 +2296,25 @@ Why this mattered:
 - Baseline behavior improved sharply once full dataset was available; the `TRAIN_SEQ_LEN=1024` full-data run is the best scored so far in this workspace at `1.3447463` exact final `val_bpb`.
 - The `TRAIN_SEQ_LEN=512` ablation was directionally useful but regressed (`1.37133333`), so the one-variable sequence-length path is currently deprioritized.
 - Next hypothesis should prioritize quality/compute tradeoffs in model shape or optimizer scheduling rather than lowering `TRAIN_SEQ_LEN` further on this one-GPU lane.
+
+## 2026-03-19 19:28 PDT — RunPod watchdog steered to H100 lane and pg-worker removed
+
+### Automation update
+- The Parameter Golf watchdog cron job (`0200ab09-9051-4a73-a227-cf7a8f068780`) was updated so future status turns explicitly treat RunPod as the active main execution lane.
+- Repo worker prompt was also updated so the continuous loop should keep iterating on the live H100 RunPod pod `imaginative_tan_coyote` / `f5fbuhtz75bb5u` instead of drifting back to DGX-only proxy iteration when RunPod is available.
+- Repo commit pushed for prompt update:
+  - `231865c` — `Prioritize RunPod lane in watchdog prompt`
+
+### Pod cleanup action
+- Hanson explicitly instructed me to remove `pg-worker`.
+- RunPod pod terminated/removed from the account UI:
+  - pod: `pg-worker`
+  - id: `qaw9q0vzajnffu`
+- Friend's pod remained untouched:
+  - `erised-htmla-mg` / `j0xh44q6dlphc6`
+
+### Live training lane after cleanup
+- The retained active training pod is still:
+  - `imaginative_tan_coyote` / `f5fbuhtz75bb5u`
+  - `H100 SXM x1`
+- This pod remains the main RunPod execution lane for ongoing Parameter Golf experiments.
