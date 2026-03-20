@@ -3587,3 +3587,23 @@ Why this mattered:
   - new `results.lastCompleted` and `run.lastCompleted` state.
 - Active run remains unchanged (`signature = 970b09c3dd3780e5`, `status = running`, attempt 6)
   from the ongoing primary lane per core dedupe rule.
+
+## 2026-03-20 11:46 PDT — Idle RunPod lanes now require action, not passive reporting
+
+### Directional change
+- Hanson explicitly said to make sure the cron job takes action if any of the RunPod lanes are idle.
+
+### Why this matters
+- The project now has two H100 lanes in play (`pg-worker-repl2` and `imaginative_tan_coyote`).
+- Merely reporting that one is idle is not good enough because idle H100s burn money and waste search opportunity.
+
+### Evidence / citations
+- Explicit Hanson steering in chat.
+- Existing cost-discipline rule already logged earlier in the journal for expensive compute.
+
+### Operational change
+- The worker prompt and live cron payload now both treat idle RunPod H100 lanes as actionable.
+- If a lane is idle, the system should either:
+  - launch/continue the next useful run on that lane, or
+  - intentionally shut the pod down if there is no high-value immediate task.
+- Passive "healthy but idle" reporting is no longer sufficient for those expensive lanes.

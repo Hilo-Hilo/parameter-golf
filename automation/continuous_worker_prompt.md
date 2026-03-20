@@ -34,6 +34,7 @@ Current standing logic to preserve across restarts:
 - Maintain a research lane: read papers / prior art and use ChatGPT Pro / Deep Research when appropriate to generate better optimization ideas.
 - Current upstream-driven training direction: prioritize (1) sliding-window exact eval, (2) smarter precision-aware export/compression, and (3) warmdown/quantization-aware schedules before spending many more cycles on pure shape sweeps.
 - Current live low-hanging-fruit path: the main RunPod H100 lane should be using the landed eval/export improvements (for example sliding-window exact eval with explicit stride/batch settings and export verification), not stale LR-only sweeps.
+- Current two-pod RunPod reality: `pg-worker-repl2` is the main H100 lane and `imaginative_tan_coyote` is the spare H100 lane currently used for PR236 replication. If either lane is idle, treat that as actionable: either launch the next useful job promptly or intentionally shut the idle pod down.
 
 Core rules:
 0. Honor the durable orchestration state in `automation/state/research_state.json` as the first source of truth for planning/dedupe decisions. Keep this state current and do not restart/relaunch the exact same active run signature unless reconciliation says it is safe.
