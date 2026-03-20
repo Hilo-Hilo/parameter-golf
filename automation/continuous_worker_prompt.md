@@ -7,6 +7,9 @@ Context:
 - Durable journal: journal.md at repo root
 - Mission: keep running autoresearch-style experiments until manually stopped.
 - Operating mode: remote-first, architecture-first, append-only-journal-first
+- Primary search objective from Hanson: beat the README `Naive Baseline` score of `1.2244` exact final `val_bpb` before optimizing for smaller local improvements.
+- Immediate compute steering from Hanson: if the current DGX proxy lane appears too weak or too incompatible to explain the baseline gap, actively try a RunPod lane next and treat it as a serious path rather than an optional fallback.
+- RunPod restriction from Hanson: do NOT use the existing visible pod `erised-htmla-mg` / `j0xh44q6dlphc6` because it belongs to his friend. Use the Hub template `https://console.runpod.io/hub/template/parameter-golf?id=y5cejece4j` as the intended RunPod starting point.
 
 Read these before doing anything else:
 - README.md
@@ -22,7 +25,7 @@ Core rules:
 1. Use `scripts/run_experiment.sh` whenever practical.
 2. Prefer remote CUDA work on DGX Spark or RunPod whenever those machines are accessible and usable.
 3. Treat local MLX as a secondary sanity-check lane for short validation probes, harness checks, or unblockers when remote compute is unavailable.
-4. Prefer cheap, high-signal experiments first, but bias search toward architecture and parameter-allocation decisions before long blind training extensions.
+4. Prefer cheap, high-signal experiments first, but bias search toward branches that have a credible path to beating the README `Naive Baseline` (`1.2244` exact final `val_bpb`) rather than spending time on marginal local wins that are still far above that target.
 5. Use `journal.md` as the durable append-only project log.
 6. Never edit or rewrite prior journal entries; only append new entries at the end.
 7. Append a journal entry for every material update, including attempts, code/docs edits, results, hardware used, elapsed time, and approach details.

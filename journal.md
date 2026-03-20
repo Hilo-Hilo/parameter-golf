@@ -2106,3 +2106,40 @@ Why this mattered:
 
 ### Status
 - Result pending; the canonical score has not been emitted yet at the time of this journal append.
+
+## 2026-03-19 16:25 PDT — Hanson directed the next serious compute test toward RunPod
+
+### Why this entry exists
+- After comparing the current proxy runs against the official README baseline, Hanson explicitly asked whether the remaining deficit might be mostly a hardware/throughput problem and directed the search to try RunPod in that case.
+
+### Directional decision
+- Treat RunPod as the next serious compute lane to test rather than only a backup behind DGX Spark.
+- The immediate question to answer is whether stronger or more baseline-like remote hardware/setup closes a meaningful share of the remaining gap to `1.2244`.
+
+### Current access status at the time of this entry
+- The previously saved direct SSH endpoint for the old RunPod pod (`root@194.26.196.175 -p 46268`) refused connections.
+- Browser-based RunPod access is still reachable; the login flow was opened successfully and reached the Google account chooser for Hanson's Berkeley account.
+- So the current blocker is not conceptual permission but recovering or provisioning a live pod/session behind valid RunPod auth.
+
+## 2026-03-19 18:18 PDT — RunPod template selected; friend's existing pod marked off-limits
+
+### Directional decision
+- Hanson explicitly said not to use the existing visible RunPod pod because it belongs to his friend.
+- Off-limits pod:
+  - name: `erised-htmla-mg`
+  - id: `j0xh44q6dlphc6`
+- Intended starting point for RunPod work instead:
+  - `https://console.runpod.io/hub/template/parameter-golf?id=y5cejece4j`
+
+### What was verified
+- The linked RunPod Hub template page loaded successfully.
+- Template name: `Parameter Golf`
+- Image: `runpod/parameter-golf:latest`
+- Template docs confirm it is a pre-built environment for the OpenAI Parameter Golf challenge with Python 3.12, PyTorch 2.9.1 (CUDA 12.8), and preinstalled dependencies.
+- Exposed ports shown on the template page include:
+  - `22/TCP` for SSH
+  - `8888/HTTP` for Jupyter Lab
+  - `3000/HTTP` free for custom use
+
+### Immediate implication
+- Future RunPod provisioning for this project should start from the Hub template, not by reusing the visible existing pod.
