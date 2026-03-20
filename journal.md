@@ -2143,3 +2143,40 @@ Why this mattered:
 
 ### Immediate implication
 - Future RunPod provisioning for this project should start from the Hub template, not by reusing the visible existing pod.
+
+## 2026-03-19 18:25 PDT — Fresh RunPod H100 pod deployed and bootstrap started
+
+### Provisioning result
+- A fresh RunPod pod was successfully deployed from the Hub template:
+  - template: `Parameter Golf`
+  - template id: `y5cejece4j`
+  - image: `runpod/parameter-golf:latest`
+- Off-limits friend's pod was intentionally not used:
+  - `erised-htmla-mg` / `j0xh44q6dlphc6`
+- New pod created:
+  - name: `imaginative_tan_coyote`
+  - id: `f5fbuhtz75bb5u`
+  - compute: `H100 SXM x1`
+  - cost: `$2.70/hr`
+  - direct TCP SSH: `ssh root@64.247.201.34 -p 14882 -i ~/.ssh/id_ed25519`
+
+### Environment validation
+- SSH access succeeded.
+- GPU check passed:
+  - `torch 2.9.1+cu128`
+  - CUDA available: `True`
+  - device count: `1`
+  - GPU: `NVIDIA H100 80GB HBM3`
+- The template provided the CUDA/PyTorch environment but not a populated git checkout or cached challenge data by default.
+
+### Repo/bootstrap actions
+- Cloned `https://github.com/Hilo-Hilo/parameter-golf.git` into `/workspace/parameter-golf`
+- Checked out branch `research/continuous-mar18`
+- Verified repo HEAD on pod: `52476a0` (`Record RunPod template steering`)
+- Started challenge-data bootstrap on the H100 pod:
+  - command: `python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 8`
+- This begins fetching the published cached FineWeb/tokenizer assets needed for a first remote run.
+
+### Immediate implication
+- RunPod is no longer blocked at auth/provisioning.
+- The project now has a live H100 lane with working SSH and an in-progress data bootstrap.
