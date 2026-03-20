@@ -2636,3 +2636,25 @@ Why this mattered:
 - Best score remains `1.31520169` at `20260320T033506Z_runpod_h100_1gpu_l11_d496_untied`.
 - The additional orthogonal knobs tested so far (`TRAIN_SEQ_LEN`, `NUM_KV_HEADS`, `NUM_LAYERS`) did not improve over this best.
 - Next likely high-yield direction: hold `11x496` untied and test a targeted optimizer/hyper-parameter path (one at a time), or transition to 8-GPU-style configurations if accessible.
+
+## 2026-03-20 04:39 PDT — WARMDOWN_ITERS=2400 regressed on 11x496 untied
+
+### Hypothesis: `WARMDOWN_ITERS=2400`
+- Hardware: RunPod H100 SXM x1 (`f5fbuhtz75bb5u`, image `runpod/parameter-golf:latest`, public SSH target `64.247.201.34:14882`).
+- Branch: `research/continuous-mar18`.
+- Git commit: `52476a0ef480a222be3c57025b7c53dc3da79513`.
+- Command: `runpod_h100_1gpu_l11_d496_wd2400` via `scripts/run_experiment.sh`, `TRACK=runpod_h100_1gpu`, `MAX_WALLCLOCK_SECONDS=600`.
+
+### Run details
+- Config: `NUM_LAYERS=11`, `MODEL_DIM=496`, `TIE_EMBEDDINGS=0`, `WARMDOWN_ITERS=2400`.
+- Result status: `keep`.
+- Exact stop: `wallclock_cap` at `step_stop=1041`.
+- `wallclock_seconds`: `709.137631`.
+- `pre_quant_val_bpb`: `1.3365`.
+- `exact_final_val_bpb`: `1.34058991` (worse than frontier `1.31520169`).
+- `bytes_total`: `13056554`.
+- Log: `20260320T043922Z_runpod_h100_1gpu_l11_d496_wd2400.log`.
+
+### Outcome
+- Interpretation: increasing warmdown from 1200/1200 baseline to 2400 did not improve frontier at this frontier point and appears to over-dampen optimization quality.
+- Next immediate path (one-hypothesis at a time): keep `11x496` untied and test a single optimizer-rate adjustment path (`EMBED_LR`, `MATRIX_LR`, `SCALAR_LR`, or `HEAD_LR`) with default warmdown.
