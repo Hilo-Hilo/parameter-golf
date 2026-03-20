@@ -3191,3 +3191,16 @@ Why this mattered:
 - Canonical metric logging remains `final_int8_zlib_roundtrip_exact` as required by existing record logs and parser behavior.
 - 16,000,000-byte cap target is preserved by continuing int8+zlib export-first workflow.
 - DGX Spark untouched; RunPod H100 remains primary lane and friend-owned pod remains excluded.
+
+## 2026-03-20T08:36:00Z — RunPod direct-copy launch
+
+### Run launched
+- Synced `origin/feat/baseline-direct` (commit `66fa9d9`) to the RunPod H100 primary pod `imaginative_tan_coyote`/`f5fbuhtz75bb5u` over SSH and launched:
+  - `/workspace/parameter-golf/logs/experiments/20260320T083350Z_runpod_h100_1gpu_directcopy_10l_overtone_v2.log`
+  - `scripts/run_experiment.sh --name runpod_h100_1gpu_directcopy_10l_overtone_v2 --track runpod_h100_1gpu --trainer train_gpt.py --status keep --notes "direct-copy replay: 10L MuonWD Overtone + sliding-window exact" --eval-stride 64 -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Env pinned to the public-winning 10L configuration via repo defaults in the copied winner script (`num_layers=10`, `warmdown_iters=2500`, `qk_gain_init=1.5`, overtone init + phase-transition `resid_mix`, `eval_stride` sliding-window path).
+
+### Evidence/citations
+- `upstream/main:records/track_10min_16mb/2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit/train_gpt.py`
+- `records/.../train_seed1337.log`, `train_seed42.log`, `train_seed7.log`
+- `records/track_10min_16mb/2026-03-19_SlidingWindowEval/README.md`
