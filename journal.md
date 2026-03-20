@@ -3427,3 +3427,21 @@ Why this mattered:
 ### Directional impact
 - This is the same wallclock frontier direction as `1.22595806 @ 1800s` and `1.22841875 @1700s`, but `FP16_TIED_EMBEDDING_EXPORT=0` did not beat the best frontier shape+precision combo and still exceeded the byte cap.
 - Action recorded in ledger as a non-promising branch for now; continue with byte-recovery quantization/compression choices before additional wallclock extension.
+## 2026-03-20T15:12:00Z — train_gpt.py lands eval-seq, muon decay, and overtone init controls for current RunPod lane
+
+### Code update (material)
+- Repository: `research/continuous-mar18`
+- File changed: `train_gpt.py`
+- Appended upstream-prioritized knobs and hooks to improve exact final `val_bpb` exploration while preserving challenge constraints:
+  - Added `EVAL_SEQ_LEN` hyperparameter (`Hyperparameters.eval_seq_len`) and wired it into both periodic and final exact validation paths via `eval_val(seq_len_override=...)`.
+  - Added `MUON_WEIGHT_DECAY` hyperparameter and threaded it into `Muon` optimizer, including in-step decay application.
+  - Added sliding-window eval explicit sequence-length override through `eval_val_sliding(..., seq_len=...)` and included it in final logs/calls (`final_eval_mode:*`).
+  - Kept/retained new overtone init path (`_init_weights`) and phase-gated `resid_mix` warm starts (previously added earlier) while enabling explicit eval behavior to use those settings during continuation runs.
+
+### Execution lane and status
+- No new training run launched in this edit-only iteration.
+- Main compute lane remains the active RunPod H100 pod `imaginative_tan_coyote` (`f5fbuhtz75bb5u`) with the prior `runpod_h100` workflow.
+- No branch/state changes were made in `automation/state/research_state.json` because no new run was started or completed.
+
+### Next move
+- Next run on RunPod should exercise the new controls explicitly (example: `EVAL_SEQ_LEN=1024`, sweep over `MUON_WEIGHT_DECAY`, and compare `FP16_TIED_EMBEDDING_EXPORT`/quant settings with `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`) to recover byte-valid frontier quality.

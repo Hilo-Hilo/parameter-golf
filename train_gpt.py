@@ -56,6 +56,7 @@ class Hyperparameters:
     warmup_steps = int(os.environ.get("WARMUP_STEPS", 20))
     train_batch_tokens = int(os.environ.get("TRAIN_BATCH_TOKENS", 524_288))
     train_seq_len = int(os.environ.get("TRAIN_SEQ_LEN", 1024))
+    eval_seq_len = int(os.environ.get("EVAL_SEQ_LEN", 0))
     # Sliding eval controls: stride sets window overlap; batch_seqs sets windows per forward.
     # Default stride == 1024 keeps non-overlap windows but still enables exact full-stream scoring.
     eval_stride = int(os.environ.get("EVAL_STRIDE", 1024))
@@ -90,6 +91,7 @@ class Hyperparameters:
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
     muon_momentum_warmup_start = float(os.environ.get("MUON_MOMENTUM_WARMUP_START", 0.85))
     muon_momentum_warmup_steps = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
+    muon_weight_decay = float(os.environ.get("MUON_WEIGHT_DECAY", 0.0))
     beta1 = float(os.environ.get("BETA1", 0.9))
     beta2 = float(os.environ.get("BETA2", 0.95))
     adam_eps = float(os.environ.get("ADAM_EPS", 1e-8))
@@ -119,10 +121,24 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 10, eps: float = 1e-7) -
 
 
 class Muon(torch.optim.Optimizer):
-    def __init__(self, params, lr: float, momentum: float, backend_steps: int, nesterov: bool = True):
+    def __init__(
+        self,
+        params,
+        lr: float,
+        momentum: float,
+        backend_steps: int,
+        weight_decay: float = 0.0,
+        nesterov: bool = True,
+    ):
         super().__init__(
             params,
-            dict(lr=lr, momentum=momentum, backend_steps=backend_steps, nesterov=nesterov),
+            dict(
+                lr=lr,
+                momentum=momentum,
+                backend_steps=backend_steps,
+                weight_decay=weight_decay,
+                nesterov=nesterov,
+            ),
         )
 
     @torch.no_grad()
@@ -141,6 +157,7 @@ class Muon(torch.optim.Optimizer):
             if not params:
                 continue
             lr = group["lr"]
+            weight_decay = group["weight_decay"]
             momentum = group["momentum"]
             backend_steps = group["backend_steps"]
             nesterov = group["nesterov"]
@@ -172,6 +189,8 @@ class Muon(torch.optim.Optimizer):
             for p in params:
                 g = updates_flat[curr : curr + p.numel()].view_as(p).to(dtype=p.dtype)
                 p.add_(g, alpha=-lr)
+                if weight_decay != 0.0:
+                    p.mul_(1.0 - lr * weight_decay)
                 curr += p.numel()
 
         return loss
@@ -235,19 +254,21 @@ def eval_val(
     base_bytes_lut: Tensor,
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
+    seq_len_override: int = 0,
 ) -> tuple[float, float]:
     # Validation computes two metrics:
     # - val_loss: token cross-entropy (natural log)
     # - val_bpb: tokenizer-agnostic compression metric used by the challenge
+    seq_len = seq_len_override if seq_len_override > 0 else args.train_seq_len
     local_batch_tokens = args.val_batch_size // (world_size * grad_accum_steps)
-    if local_batch_tokens < args.train_seq_len:
+    if local_batch_tokens < seq_len:
         raise ValueError(
             "VAL_BATCH_SIZE must provide at least one sequence per rank; "
             f"got VAL_BATCH_SIZE={args.val_batch_size}, WORLD_SIZE={world_size}, "
-            f"GRAD_ACCUM_STEPS={grad_accum_steps}, TRAIN_SEQ_LEN={args.train_seq_len}"
+            f"GRAD_ACCUM_STEPS={grad_accum_steps}, seq_len={seq_len}"
         )
-    local_batch_seqs = local_batch_tokens // args.train_seq_len
-    total_seqs = (val_tokens.numel() - 1) // args.train_seq_len
+    local_batch_seqs = local_batch_tokens // seq_len
+    total_seqs = (val_tokens.numel() - 1) // seq_len
     seq_start = (total_seqs * rank) // world_size
     seq_end = (total_seqs * (rank + 1)) // world_size
     val_loss_sum = torch.zeros((), device=device, dtype=torch.float64)
@@ -258,11 +279,11 @@ def eval_val(
     with torch.inference_mode():
         for batch_seq_start in range(seq_start, seq_end, local_batch_seqs):
             batch_seq_end = min(batch_seq_start + local_batch_seqs, seq_end)
-            raw_start = batch_seq_start * args.train_seq_len
-            raw_end = batch_seq_end * args.train_seq_len + 1
+            raw_start = batch_seq_start * seq_len
+            raw_end = batch_seq_end * seq_len + 1
             local = val_tokens[raw_start:raw_end].to(device=device, dtype=torch.int64, non_blocking=True)
-            x = local[:-1].reshape(-1, args.train_seq_len)
-            y = local[1:].reshape(-1, args.train_seq_len)
+            x = local[:-1].reshape(-1, seq_len)
+            y = local[1:].reshape(-1, seq_len)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 batch_loss = model(x, y).detach()
             batch_token_count = float(y.numel())
@@ -296,6 +317,7 @@ def eval_val_sliding(
     base_bytes_lut: Tensor,
     has_leading_space_lut: Tensor,
     is_boundary_token_lut: Tensor,
+    seq_len: int,
     stride: int,
     batch_seqs: int = 32,
 ) -> tuple[float, float]:
@@ -310,7 +332,8 @@ def eval_val_sliding(
     if batch_seqs <= 0:
         raise ValueError(f"eval_batch_seqs must be >= 1, got {batch_seqs}")
 
-    seq_len = args.train_seq_len
+    if seq_len <= 0:
+        seq_len = args.train_seq_len
     stride = min(seq_len, stride)
     total_tokens = val_tokens.numel() - 1
     if total_tokens <= 0:
@@ -844,9 +867,20 @@ class GPT(nn.Module):
     def _init_weights(self) -> None:
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
+            # Overtone init: bias embedding spectrum toward a stable power-law decay.
+            with torch.no_grad():
+                u, s, v = torch.linalg.svd(self.tok_emb.weight.data, full_matrices=False)
+                target_s = s[0] * (1.0 / torch.arange(1, s.shape[0] + 1, dtype=s.dtype)) ** 0.5
+                self.tok_emb.weight.data = (u * target_s[None, :]) @ v
         for module in self.modules():
             if isinstance(module, nn.Linear) and getattr(module, "_zero_init", False):
                 nn.init.zeros_(module.weight)
+        num_layers = len(self.blocks)
+        for i, block in enumerate(self.blocks):
+            with torch.no_grad():
+                phase = torch.sigmoid(torch.tensor(3.0 * (i / max(num_layers - 1, 1) - 0.5)))
+                block.resid_mix.data[0] = phase * torch.ones(block.resid_mix.shape[1])
+                block.resid_mix.data[1] = (1 - phase) * torch.ones(block.resid_mix.shape[1])
 
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         logits = self.forward_logits(input_ids)
@@ -971,6 +1005,8 @@ def main() -> None:
     actual_train_files = len(list(dataset_dir.glob("fineweb_train_*.bin")))
     if args.eval_stride < 0:
         args.eval_stride = 0
+    if args.eval_seq_len <= 0:
+        args.eval_seq_len = args.train_seq_len
     if args.eval_batch_seqs <= 0:
         args.eval_batch_seqs = 1
     val_tokens = load_validation_tokens(args.val_files)
@@ -980,7 +1016,7 @@ def main() -> None:
     log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
-    log0(f"eval_cfg: stride={args.eval_stride} batch_seqs={args.eval_batch_seqs}")
+    log0(f"eval_cfg: stride={args.eval_stride} batch_seqs={args.eval_batch_seqs} seq_len={args.eval_seq_len}")
 
     # -----------------------------
     # MODEL + OPTIMIZER SETUP
@@ -1036,6 +1072,7 @@ def main() -> None:
         lr=args.matrix_lr,
         momentum=args.muon_momentum,
         backend_steps=args.muon_backend_steps,
+        weight_decay=args.muon_weight_decay,
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
@@ -1152,6 +1189,7 @@ def main() -> None:
                 base_bytes_lut,
                 has_leading_space_lut,
                 is_boundary_token_lut,
+                seq_len_override=args.eval_seq_len,
             )
             log0(
                 f"step:{step}/{args.iterations} val_loss:{val_loss:.4f} val_bpb:{val_bpb:.4f} "
@@ -1294,7 +1332,10 @@ def main() -> None:
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
     if args.eval_stride > 0:
-        log0(f"final_eval_mode:sliding_window stride={args.eval_stride} batch_seqs={args.eval_batch_seqs}")
+        log0(
+            f"final_eval_mode:sliding_window stride={args.eval_stride} batch_seqs={args.eval_batch_seqs} "
+            f"seq_len={args.eval_seq_len}"
+        )
         q_val_loss, q_val_bpb = eval_val_sliding(
             args,
             base_model,
@@ -1305,22 +1346,24 @@ def main() -> None:
             base_bytes_lut,
             has_leading_space_lut,
             is_boundary_token_lut,
+            seq_len=args.eval_seq_len,
             stride=args.eval_stride,
             batch_seqs=args.eval_batch_seqs,
         )
     else:
-        log0("final_eval_mode:standard")
+        log0(f"final_eval_mode:standard seq_len={args.eval_seq_len}")
         q_val_loss, q_val_bpb = eval_val(
-            args,
-            model,
-            rank,
-            world_size,
-            device,
-            grad_accum_steps,
-            val_tokens,
-            base_bytes_lut,
-            has_leading_space_lut,
-            is_boundary_token_lut,
+            args=args,
+            model=base_model,
+            rank=rank,
+            world_size=world_size,
+            device=device,
+            grad_accum_steps=grad_accum_steps,
+            val_tokens=val_tokens,
+            base_bytes_lut=base_bytes_lut,
+            has_leading_space_lut=has_leading_space_lut,
+            is_boundary_token_lut=is_boundary_token_lut,
+            seq_len_override=args.eval_seq_len,
         )
     torch.cuda.synchronize()
     log0(
