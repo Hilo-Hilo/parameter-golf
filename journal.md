@@ -3525,3 +3525,36 @@ Why this mattered:
 
 ### Extra operational note
 - Observed one background DGX/Shell process with PID `47154` still running from an older command string using host `dgx-spark`; it is not currently reflected in the active orchestrated signature and has not been edited.
+
+## 2026-03-20 11:29 PDT — Spare H100 PR236 lane repaired under detached tmux supervision
+
+### Directional change
+- Hanson explicitly asked me to use the spare `imaginative_tan_coyote` H100 pod to test the approach from upstream PR #236: `https://github.com/openai/parameter-golf/pull/236`.
+- After the first launch attempts kept dying with `SIGHUP`, I repaired the lane by switching it to a real detached `tmux` session instead of brittle foreground / pseudo-detached launch methods.
+
+### Why this changed now
+- The PR236 lane itself was promising, but the supervision method was wrong.
+- The earlier failures were not because the approach was invalid; they were because the run launcher kept dropping the process when the controlling shell/session ended.
+
+### Evidence / citations
+- Explicit Hanson steering in chat to utilize the spare pod for PR #236.
+- Upstream citation:
+  - `https://github.com/openai/parameter-golf/pull/236`
+  - branch used on the spare pod: `saml212/sam/11L-int6-mlp3x-smear-swa`
+  - record targeted: `2026-03-20_11L_Int6_SmearGate_SWA`
+- Failure evidence before repair:
+  - prior log showed `torch.distributed.elastic... SignalException: Process ... got signal: 1`
+
+### Repair steps taken
+- Kept the main replacement pod (`pg-worker-repl2`) on the main branch frontier run.
+- Reused `imaginative_tan_coyote` as the spare second H100 lane.
+- Confirmed the PR236 checkout and shared tokenizer/dataset symlinks.
+- Relaunched the PR236 recipe in `tmux` session `pr236`.
+- Verified the detached process remains alive after shell return.
+
+### Current spare-lane status after repair
+- Pod: `imaginative_tan_coyote`
+- Worktree: `/workspace/pg-pr236`
+- Detached session: `tmux` session `pr236`
+- Live log: `logs/experiments/pr236_11l_int6_smear_swa_1gpu_tmux_20260320_183108.log`
+- Verified progress: warmup reached at least `step 10/20` after the repair.
