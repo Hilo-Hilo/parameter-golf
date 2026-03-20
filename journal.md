@@ -3643,3 +3643,40 @@ Why this mattered:
   - `logs/experiments/20260320T210339Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750.json`
   - `results/results.tsv` updated with this run row.
 - This was an experimental direction pivot from 9-layer int4 to `INT4_STEP=2` while holding 9-layer coverage and exact eval settings.
+## 2026-03-20 14:41 PDT — RunPod H100 step4 compression attempt remained over-byte (still invalid)
+
+### Material update
+- Ran the frontier compression variant `20260320T214000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s4wc1750` on `pg-worker-repl2` (`wbq4skuvvsk9a8`) using the same 11x496 untied, exact sliding-window setup with more aggressive `INT4_STEP=4`.
+- Notes: `compression-pressure step4 for 9-layer int4 coverage at 1750s`.
+- Final exact metrics from generated summary JSON: `val_bpb=1.22709876`, `val_loss=2.07190505`, `pre_quant_val_bpb=1.2558`, `step_stop=3276`, `wallclock_seconds=2195.639704`, `bytes_model=15270144`, `bytes_total=15328816`.
+- Constraint status: still invalid (`bytes_total` remains above 16,000,000).
+- Relative trend: compared with previous `INT4_STEP=2` run, this configuration lowered bytes substantially but regressed exact final `val_bpb` (1.22709876 vs 1.22371257) while improving compression margin but still short of cap target.
+
+### Logging and state
+- Synced remote artifacts: `logs/experiments/20260320T214119Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s4wc1750.{log,json,meta}` and `results/results.tsv`.
+## 2026-03-20 14:42 PDT — Correction: step4 frontier run is under byte cap (status keep)
+
+- Correction to the previous entry: `20260320T214000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s4wc1750` actually wrote `status: keep` with `bytes_total=15,328,816` in the run summary JSON, so it is under the 16M-byte cap.
+- This run is therefore a **valid** artifact size-wise, but exact final score is `1.22709876`, which is worse than the best frontier score so far (`1.22308526` from `INT4_STEP=2`).
+- Next action: continue compression-pressure sweep with smaller precision budgets that preserve the better `exact_final_val_bpb` observed at step2 while probing for byte/compression configurations closer to cap boundary.
+## 2026-03-20 15:56 PDT — RunPod H100 step3 compression variant (`INT4_STEP=3`) completed as valid but underperforms frontier
+
+### Material update
+- Completed frontier continuation run `20260320T214300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750` (experiment id `20260320T221837Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750`) on the primary RunPod lane (`imaginative_tan_coyote`, track `runpod_h100`).
+- Final exact eval summary from `logs/experiments/20260320T221837Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750.json`:
+  - status `keep` (bytes within cap)
+  - `exact_final_val_bpb=1.22516369`
+  - `pre_quant_val_bpb=1.2551`
+  - `final_val_loss=2.06863776`
+  - `pre_quant_val_loss=2.1192`
+  - `bytes_total=15,942,604` (`bytes_model=15,883,932`, `bytes_code=58,672`)
+  - `wallclock_seconds=2193.122439`
+  - `step_stop=3343`
+- Compared to previous `INT4_STEP=2` frontier result (`1.22371257` then `1.22308526` from earlier runs), this `INT4_STEP=3` setting is still valid under the 16 MB cap but less competitive on final exact bpb.
+
+### Logged artifacts and routing
+- Synced remote artifacts:
+  - `logs/20260320T214300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750.txt`
+  - `logs/launch_20260320T214300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750.out`
+  - `logs/experiments/20260320T221837Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750.{log,json,meta}`
+- Updated durable ledger: `results/results.tsv` appended with this completed row and `python3 scripts/research_state.py reconcile --results-file results/results.tsv` reflected in `automation/state/research_state.json` as latest completed signature.
