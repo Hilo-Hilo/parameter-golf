@@ -2431,3 +2431,27 @@ Why this mattered:
 
 ### Operational note
 - At the moment this instruction was recorded, the `chatgpt.com` browser session under the OpenClaw profile was present but logged out, so ChatGPT use is conceptually approved/required but may still need session re-auth before it becomes a live automation lane.
+
+## 2026-03-20 02:53 PDT — 11-layer + kv-head expansion tested (invalid due 16MB cap)
+
+### Why this update
+- Previous best valid RunPod result was `runpod_h100_1gpu_l11_depth` (`1.33252549` exact final).
+- One-variable follow-up was to increase `NUM_KV_HEADS` from `4` to `8` while keeping `NUM_LAYERS=11` and other defaults.
+
+### Attempt details
+- Pod: `f5fbuhtz75bb5u` (`imaginative_tan_coyote`) — RunPod H100 SXM x1
+- Command: `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_kv8 --track runpod_h100_1gpu --status keep --notes "single hypothesis: test 11 layers with higher KV heads (8) instead of 4" -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Overrides: `DATA_PATH=./data/datasets/fineweb10B_sp1024`, `TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model`, `VOCAB_SIZE=1024`, `MAX_WALLCLOCK_SECONDS=600`, `VAL_LOSS_EVERY=0`, `ITERATIONS=20000`, `TRAIN_BATCH_TOKENS=524288`, `TRAIN_SEQ_LEN=1024`, `NUM_LAYERS=11`, `NUM_KV_HEADS=8`
+
+### Results
+- experiment_id: `20260320T025232Z_runpod_h100_1gpu_l11_kv8`
+- `step_stop`: `1070`
+- process wallclock: `732.724491`
+- `pre_quant_val_bpb`: `1.3291`
+- `exact_final_val_bpb`: `1.33062046`
+- bytes (total/code/model): `17317905` / `47874` / `17270031`
+- status: `invalid` after parse due bytes_total `17317905` > `16000000`
+
+### Outcome
+- Quality improved relative to valid 11x4 run, but this architecture exceeds the 16MB submission cap and is therefore not eligible as-is.
+- The valid frontier remains `runpod_h100_1gpu_l11_depth` at `1.33252549`.
