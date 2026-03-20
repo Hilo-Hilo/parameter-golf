@@ -2884,3 +2884,33 @@ Why this mattered:
 - `SCALAR_LR=0.08` stayed near the neighborhood of other scalar-rate probes but did not beat the best optimizer-rate branch (`MATRIX_LR=0.05`, `1.32048871`).
 - This keeps current frontier unchanged at `1.31520169` (`11x496` untied with lower width).
 - Next one-hypothesis direction: continue one-axis probing within this branch with nearby scalar learning-rate points (`SCALAR_LR=0.06`) while keeping remote H100 lane as primary.
+
+## 2026-03-19 23:20 PDT — Landed low-hanging-fruit change: sliding-window exact eval on working branch
+
+### Directional change
+- I stopped leaving the sliding-eval work stranded in a draft worktree and landed it directly onto `research/continuous-mar18` as the first real low-hanging-fruit implementation.
+
+### Why this changed now
+- Hanson explicitly said to pick off the low-hanging fruit first and called out that I was not actually making the changes yet.
+- Upstream evidence still points to sliding-window exact eval as one of the highest-confidence immediate gains.
+
+### Evidence / citations
+- Explicit Hanson steering in chat: prioritize the low-hanging fruit first.
+- Upstream record citations:
+  - `records/track_10min_16mb/2026-03-19_SlidingWindowEval/README.md`
+  - `records/track_10min_16mb/2026-03-17_LoRA_TTT/README.md`
+- Key upstream lesson: overlapping/strided exact eval gives a real gain even before changing model training.
+
+### What was landed
+- Added `EVAL_STRIDE` and `EVAL_BATCH_SEQS` controls.
+- Added `GPT.forward_logits` to enable per-position scoring.
+- Added `eval_val_sliding` for stride-based exact token scoring over the full validation stream.
+- Preserved canonical exact final logging (`final_int8_zlib_roundtrip_exact ...`).
+- Added `scripts/smoke_sliding_eval.py` as a lightweight validation script.
+
+### Validation
+- Local compile check passed for:
+  - `train_gpt.py`
+  - `scripts/parse_train_log.py`
+  - `scripts/smoke_sliding_eval.py`
+- The smoke script import path was fixed so it can be invoked cleanly from the repo.

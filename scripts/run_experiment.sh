@@ -12,6 +12,8 @@ Options:
   --trainer PATH        Trainer path or label. Default: train_gpt.py
   --status STATUS       Requested status for successful valid runs: keep|discard|invalid|crash
   --notes TEXT          Short free-form note.
+  --eval-stride N       Override EVAL_STRIDE env var for train_gpt.py.
+  --eval-batch-seqs N   Override EVAL_BATCH_SEQS env var for train_gpt.py.
   --submission PATH     Optional submission.json to merge into parsed metrics.
   --results PATH        Results TSV path. Default: results/results.tsv
   --log-dir PATH        Log directory. Default: logs/experiments
@@ -24,6 +26,8 @@ track="local"
 trainer="train_gpt.py"
 status="discard"
 notes=""
+eval_stride=""
+eval_batch_seqs=""
 submission=""
 results_tsv="results/results.tsv"
 log_dir="logs/experiments"
@@ -49,6 +53,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --notes)
       notes="${2:-}"
+      shift 2
+      ;;
+    --eval-stride)
+      eval_stride="${2:-}"
+      shift 2
+      ;;
+    --eval-batch-seqs)
+      eval_batch_seqs="${2:-}"
       shift 2
       ;;
     --submission)
@@ -167,6 +179,12 @@ set +e
   cd "$repo_root"
   if [[ -d "$venv_bin" ]]; then
     export PATH="$venv_bin:$PATH"
+  fi
+  if [[ -n "$eval_stride" ]]; then
+    export EVAL_STRIDE="$eval_stride"
+  fi
+  if [[ -n "$eval_batch_seqs" ]]; then
+    export EVAL_BATCH_SEQS="$eval_batch_seqs"
   fi
   RUN_ID="$run_id" PYTHONUNBUFFERED=1 "$@"
 ) >"$log_path" 2>&1
