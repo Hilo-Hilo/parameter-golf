@@ -3165,3 +3165,26 @@ Why this mattered:
 ### Learnings
 - All-layer int4 at `int4_step=4` plus fp16 tied embeddings was too lossy on this lane, worse than baseline keep run with no int4 (`1.31193434`).
 - Next compression hypotheses should reduce quant pressure (subset layers, lower step, alternative precision settings) before additional architecture sweeps.
+
+## 2026-03-20T08:35:42Z — Compression refinement: int4_step=2 with sliding-window eval tuning on RunPod
+
+### Run
+- Main lane remained `imaginative_tan_coyote` (`f5fbuhtz75bb5u`) / H100 SXM x1, SSH target `64.247.201.34:14882`.
+- Launched detached continuation on the same 11x496 untied frontier with stronger sliding-window controls and denser quantization:
+  - `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all2 --track runpod_h100 --trainer train_gpt.py --status keep --notes "int4-compression: all 11 layers int4_step=2 fp16_tied_embedding_export=1 verify exact; sliding eval stride/batch tune" --eval-stride 256 --eval-batch-seqs 32 -- env NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=600 VERIFY_EXPORT_ROUNDTRIP=1 FP16_TIED_EMBEDDING_EXPORT=1 INT4_LAYERS="0,1,2,3,4,5,6,7,8,9,10" INT4_STEP=2 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Runtime artifact sync: local path copy from `/workspace/parameter-golf/logs/experiments/20260320T083542Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all2.log|meta|json` to local `logs/experiments/`.
+
+### Result
+- Completed successfully with `exit_code=0` and produced:
+  - `final_int8_zlib_roundtrip_exact val_bpb: 1.30962111`
+  - `pre_quant_val_bpb: 1.3375` (final pre-quant check at step 1086)
+  - `bytes_total: 13250579` (model 13195096 + code 55483)
+  - `step_stop: 1086`
+  - `wallclock_seconds: 797.572465`
+- Artifact summary JSON: `results/../logs/experiments/20260320T083542Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all2.json`.
+- Added row to `results/results.tsv` with `track=runpod_h100`, `branch=feat/baseline-direct`, `status=keep`.
+- This is the current best exact final `val_bpb` in local+remote logs since March 20 start of RunPod lane and a meaningful continuation of the eval/compression-first strategy.
+
+### Directional impact
+- The slope improved over both `int4_step=4` and untuned stride-1024 baselines, confirming that tighter sliding-window cadence (stride 256 / batch_seqs 32) plus all-block `int4_step=2` is a valid high-signal axis.
+- Immediate next hypothesis: test `INT4_STEP=1` on the same topology/eval settings before broadening architecture again, since this remains a compression-focused improvement path and is materially low-cost.
