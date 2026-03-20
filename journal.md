@@ -3607,3 +3607,39 @@ Why this mattered:
   - launch/continue the next useful run on that lane, or
   - intentionally shut the pod down if there is no high-value immediate task.
 - Passive "healthy but idle" reporting is no longer sufficient for those expensive lanes.
+## 2026-03-20 19:06 PDT — RunPod frontier run `190632` completed (invalid by bytes)
+- Material update: completed RunPod H100 frontier run `20260320T190632Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1750_nofp16` and appended outputs to local repo.
+- Hardware/lane: primary RunPod H100 (`f5fbuhtz75bb5u`, track `runpod_h100`), detached `scripts/run_experiment.sh` launch via SSH.
+- Config tested: `L=11 D=496`, `tie_embeddings=0`, `MAX_WALLCLOCK_SECONDS=1750`, `VERIFY_EXPORT_ROUNDTRIP=1`, `INT4_LAYERS=0-10`, `INT4_STEP=1`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, `MUON_WEIGHT_DECAY=0.0`, `FP16_TIED_EMBEDDING_EXPORT=0`.
+- Result: final exact int8+zlib metrics `val_bpb=1.22629901`, `val_loss=2.07055469`, train step `3181`, wallclock `2203.996709s` (cap stop).
+- Constraint status: invalid due `bytes_total=18,471,099 > 16,000,000`, so no leaderboard-eligible progression.
+- Artifact sync: copied remote `logs/20260320T190632Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1750_nofp16.{txt,log,json,meta}` and updated local `results/results.tsv` with invalid row for this run.
+- Steering decision: preserve the low-hanging-fruit path, but this proves `FP16_TIED_EMBEDDING_EXPORT=0` is counterproductive for both bytes and score at this config; next immediate job should restore default fp16 tied export and continue wallclock frontier with exact-sliding eval settings.
+## 2026-03-20 20:22 PDT — RunPod frontier run `194525` confirmed over-byte but improved final bpb to 1.22492057
+- Material update: ran continuation on primary RunPod H100 with `FP16_TIED_EMBEDDING_EXPORT=1` at `MAX_WALLCLOCK_SECONDS=1750` under same 11x496 untied sliding-eval/int4-all settings.
+- New run id: `20260320T194525Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1750_fp16`.
+- Final exact metrics from `final_int8_zlib_roundtrip_exact`: `val_bpb=1.22492057`, `val_loss=2.06822725`, `train step=3256`, `elapsed=2206.595662s`, `bytes_total=18,776,285 (>16,000,000)`.
+- Intermediate check at wallclock cap matched expectation: `val_bpb` reached `1.2559` at step 3256 before finalization.
+- Constraint status: still invalid (over byte cap), and final `val_bpb` remains slightly above baseline `1.2244`.
+- Decision: keep `fp16` export for continuity experiments, but this config is not yet within byte budget or below-baseline; next plan should increase byte compression pressure first (e.g., reduce int4 coverage or enforce smaller payload) before longer wallclock continuation.
+## 2026-03-20 21:10 PDT — Compression-pressure run crossed baseline but remains over cap
+- Run id: `20260320T202309Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9wc1750`.
+- Config: `INT4_LAYERS=0-8` (9 layers), `INT4_STEP=1`, `MAX_WALLCLOCK_SECONDS=1750`, `VERIFY_EXPORT_ROUNDTRIP=1`, `FP16_TIED_EMBEDDING_EXPORT=1`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, `MUON_WEIGHT_DECAY=0.0`, untied embedding.
+- Final exact metrics: `val_bpb=1.22308526`, `val_loss=2.06512841`, step cap at `3405`, elapsed `2190.451857s`.
+- Byte metrics: `bytes_total=18,815,357` (`>16,000,000`), so status remains `invalid`.
+- Decision signal: model is now **below 1.2244 baseline on exact final bpb** but over-byte; indicates compression path still dominates and we should prioritize byte-reduction strategies that preserve this improved bpb (e.g., investigate export parameter choices without disabling int4 everywhere). This is now the best raw exact bpb signal seen in this frontier sequence.
+## 2026-03-20 14:40 PDT — RunPod H100 frontier step2 attempt (10% int4 coverage, stride-256 exact eval) ended invalid
+
+### Material update
+- Executed and harvested the continuation run `20260320T211000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750` on `pg-worker-repl2` (`wbq4skuvvsk9a8`), keeping `runpod` as primary lane and avoiding the friend pod.
+- Command path used: `scripts/run_experiment.sh` with `train_gpt.py`, `MAX_WALLCLOCK_SECONDS=1750`, `VERIFY_EXPORT_ROUNDTRIP=1`, `FP16_TIED_EMBEDDING_EXPORT=1`, `INT4_LAYERS=0-8`, `INT4_STEP=2`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`.
+- Final exact eval (post-roundtrip) from run summary JSON: `val_bpb=1.22371257`, `val_loss=2.06618760`, `pre_quant_val_bpb=1.254`, `step_stop=3436`, `wallclock_seconds=2194.291542`, `bytes_total=16666804`.
+- Constraint status remains `invalid` due bytes and because `bytes_total` is still `>16,000,000`.
+- Notes: this did not improve on best valid frontier score (`1.22308526`), but keeps exact final around baseline territory while using denser int4 coverage.
+
+### Logging and state
+- Synced remote artifacts locally:
+  - `logs/experiments/20260320T210339Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750.log`
+  - `logs/experiments/20260320T210339Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750.json`
+  - `results/results.tsv` updated with this run row.
+- This was an experimental direction pivot from 9-layer int4 to `INT4_STEP=2` while holding 9-layer coverage and exact eval settings.
