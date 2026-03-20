@@ -2519,3 +2519,36 @@ Why this mattered:
 ### New standing rule
 - Do not leave expensive compute (especially the RunPod H100 lane) idling without useful work.
 - If the pod is not actively training, evaluating, or immediately preparing the next serious experiment, either launch the next useful job promptly or shut the pod down.
+
+## 2026-03-20 03:22 PDT — 11-layer untied embeddings run improved frontier
+
+### Why this update
+- To continue the successful depth trend while changing one variable, I tested `TIE_EMBEDDINGS=0` on `NUM_LAYERS=11` (keeping the same dataset and compute budget).
+
+### Attempt details
+- Pod: `f5fbuhtz75bb5u` (`imaginative_tan_coyote`) — RunPod H100 SXM x1
+- Command: `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_untied2 --track runpod_h100_1gpu --status keep --notes "single hypothesis: set TIE_EMBEDDINGS=0 on 11-layer baseline" -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Overrides: same as baseline 11-layer run with `TIE_EMBEDDINGS=0`
+
+### Results
+- experiment_id: `20260320T031941Z_runpod_h100_1gpu_l11_untied2`
+- `step_stop`: `1041`
+- process wallclock: `684.790279`
+- `pre_quant_val_bpb`: `1.3191`
+- `exact_final_val_bpb`: `1.32061866`
+- bytes (total/code/model): `15343749` / `47874` / `15295875`
+- status: `keep`
+
+### Outcome
+- New best valid score in this lane: `1.32061866`, improving on prior frontier (`1.33252549`).
+- `TIE_EMBEDDINGS=0` also changed optimizer defaults to `embed_lr=0.6`, `head_lr=0.008` per logged config.
+- Next hypotheses should likely continue from this state (e.g., keep `TIE_EMBEDDINGS=0` and vary `MODEL_DIM`/`MLP_MULT`/small schedule tweaks) while honoring byte cap.
+
+## 2026-03-19 20:44 PDT — Multi-cluster compute permission recorded
+
+### Directional change
+- Hanson explicitly said I can use more GPU clusters if that improves the workflow.
+
+### Workflow implication
+- The project should not stay artificially constrained to the current single-pod setup if broader compute materially improves iteration speed, search breadth, or faithfulness to the official multi-GPU challenge regime.
+- RunPod H100 remains the current main lane, but stronger or additional clusters are now explicitly allowed when they are high-value.

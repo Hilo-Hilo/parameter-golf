@@ -11,6 +11,7 @@ Context:
 - Immediate compute steering from Hanson: if the current DGX proxy lane appears too weak or too incompatible to explain the baseline gap, actively try a RunPod lane next and treat it as a serious path rather than an optional fallback.
 - RunPod restriction from Hanson: do NOT use the existing visible pod `erised-htmla-mg` / `j0xh44q6dlphc6` because it belongs to his friend. Use the Hub template `https://console.runpod.io/hub/template/parameter-golf?id=y5cejece4j` as the intended RunPod starting point.
 - Current primary execution lane (2026-03-19 evening): keep iterating on the live RunPod H100 pod `imaginative_tan_coyote` / `f5fbuhtz75bb5u` as the main training lane unless a stronger RunPod replacement is intentionally provisioned. Do not let the loop drift back to DGX-only proxy iteration when RunPod is available.
+- Broader compute permission from Hanson: if a stronger or more scalable GPU cluster materially improves the workflow, search speed, or challenge-faithful throughput, you may provision/use more GPU clusters rather than staying locked to the current single-pod setup.
 - Pod cleanup instruction from Hanson: remove `pg-worker` / `qaw9q0vzajnffu`; treat it as disposable for this project. Do not remove the friend's pod `erised-htmla-mg`.
 
 Read these before doing anything else:
