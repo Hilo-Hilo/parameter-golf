@@ -3333,3 +3333,12 @@ Why this mattered:
 - The 1200s schedule improved final exact score relative to some earlier runs (`1.2738` at 900s stop window) but crossed the byte cap (`bytes_total` rose to `17.97M`) and is therefore not a leaderboard-valid frontier point.
 - This run confirms that score improvements are still available, but size control remains required for valid submissions.
 - Next direction: keep 1200s timing behavior as a reference but resume with model-compression/size-pruning constraints (or alternative quantization granularity) to recover the 1200s quality under the 16MB budget.
+
+## 2026-03-20T11:14:12Z — Follow-on 1200s frontier validation run started on 66fa baseline revision
+
+### Run
+- New attempt launched on live RunPod H100 lane with deterministic frontier config from the known-valid 900s recipe, now on `feat/baseline-direct` commit `66fa9d9cb7b9f54fcf14cfa171feaf374851cc7c`:
+  - `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1200b`
+  - `MAX_WALLCLOCK_SECONDS=1200`, `INT4_STEP=1`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, full 11-layer int4 quantization, exact export verification enabled.
+- Remote launch via detached `tmux` session `pg-worker2` using the usual `scripts/run_experiment.sh` path.
+- Log currently initializing and warmup/step updates are being emitted, with no JSON summary yet.
