@@ -2250,3 +2250,49 @@ Why this mattered:
   - cost: `$0.22/hr`
   - disk shown around `78%`
 - It may be killable technically, but it is still an unknown pod from an ownership/workload perspective, so it should not be killed blindly until it is classified.
+
+## 2026-03-20 02:13 PDT — RunPod H100 full-data baseline and seq_len ablation executed and logged
+
+### Why this update
+- Prior local RunPod dataset bootstrap used only 8 shards, which produced very poor scores.
+- Continued to run the remote lane on full cached FineWeb and completed `scripts/run_experiment.sh`-wrapped experiments to produce durable result rows and run metadata.
+
+### What changed in the workflow
+- Ran `python3 data/cached_challenge_fineweb.py --variant sp1024 --train-shards 80` on RunPod H100 (`imaginative_tan_coyote`/`f5fbuhtz75bb5u`) to restore full training coverage before scoring.
+- Confirmed dataset status on the pod before training:
+  - `fineweb10B_sp1024` train shards: `80`
+  - val shards: `1`
+- Launched and completed a full baseline-style run (no periodic validation) with 60-minute wallclock-equivalent settings:
+  - command: `scripts/run_experiment.sh --name runpod_h100_1gpu_smoke_full --track runpod_h100_1gpu --status keep --notes "full-data baseline-style sanity run (no periodic val)" -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+  - overrides: `DATA_PATH=./data/datasets/fineweb10B_sp1024`, `TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model`, `VOCAB_SIZE=1024`, `MAX_WALLCLOCK_SECONDS=600`, `VAL_LOSS_EVERY=0`, `ITERATIONS=20000`, `TRAIN_BATCH_TOKENS=524288`, `TRAIN_SEQ_LEN=1024`
+- Ran a one-hypothesis ablation (`TRAIN_SEQ_LEN=512`) with identical optimizer/model settings and same wallclock cap via:
+  - command: `scripts/run_experiment.sh --name runpod_h100_1gpu_seq512 --track runpod_h100_1gpu --status keep --notes "single hypothesis: halve seq_len to double effective step count under same token budget" -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+  - same dataset/tokenizer overrides and training hyperparameters unless noted above.
+
+### Results
+- `runpod_h100_1gpu_smoke_full`
+  - track: `runpod_h100_1gpu`
+  - wallclock: `600`s cap
+  - `step_stop`: `1137`
+  - `process wallclock`: `671.497968`s
+  - `pre_quant_val_bpb`: `1.3432`
+  - `exact_final_val_bpb`: `1.3447463`
+  - bytes (total/code/model): `12782885` / `47874` / `12735011`
+  - status: `keep`
+  - notes: `full-data baseline-style sanity run (no periodic val)`
+  - hardware: `RunPod H100 1x` (`64.247.201.34:14882`, `/workspace/parameter-golf`, commit `52476a0`)
+- `runpod_h100_1gpu_seq512`
+  - track: `runpod_h100_1gpu`
+  - wallclock: `600`s cap
+  - `step_stop`: `1161`
+  - `process wallclock`: `700.96245`s
+  - `pre_quant_val_bpb`: `1.3699`
+  - `exact_final_val_bpb`: `1.37133333`
+  - bytes (total/code/model): `12900675` / `47874` / `12852801`
+  - status: `keep`
+  - notes: `single hypothesis: halve seq_len to double effective step count under same token budget`
+
+### Outcome
+- Baseline behavior improved sharply once full dataset was available; the `TRAIN_SEQ_LEN=1024` full-data run is the best scored so far in this workspace at `1.3447463` exact final `val_bpb`.
+- The `TRAIN_SEQ_LEN=512` ablation was directionally useful but regressed (`1.37133333`), so the one-variable sequence-length path is currently deprioritized.
+- Next hypothesis should prioritize quality/compute tradeoffs in model shape or optimizer scheduling rather than lowering `TRAIN_SEQ_LEN` further on this one-GPU lane.
