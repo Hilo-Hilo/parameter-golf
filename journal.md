@@ -3488,3 +3488,40 @@ Why this mattered:
 - RunPod console showed the active pod still existed but with a fresh endpoint.
 - The replacement pod's `/workspace/parameter-golf` was not a git repo and had no cached dataset files.
 - tmux recovery session `pg-main` is now active and downloading the cached dataset before training.
+## 2026-03-20 10:31 PDT — Frontier audit and run-state validation
+
+### Hardware and runtime used for this checkpoint
+- Hardware: macOS operator terminal with visibility into local worker orchestration.
+- Remote compute access probes: SSH to `dgx-spark` succeeded (`echo OK`), RunPod alias not resolvable in this environment.
+- Compute preference enforced in this checkpoint: prefer RunPod-first via `automation/state/research_state.json`, with DGX as fallback.
+- Active process check done with `ps -ef` and worker-check helper commands.
+
+### Repo and workflow checks
+- Re-loaded required startup docs/state context and rechecked orchestration status.
+- Ran `git fetch upstream --all` and confirmed `upstream` remote is reachable.
+- Re-ran `python3 scripts/check_continuous_worker.py ... --touch-healthy` for current heartbeat/dedupe context.
+- Preserved durable append-only behavior; no prior journal edits were modified.
+
+### Frontier results observed
+- Current active orchestration in `automation/state/research_state.json` remains:
+  - `run.active.status: running`
+  - `run.active.signature: 970b09c3dd3780e5`
+  - `run.active.attempt: 5`
+  - `reconciliation.shouldRestart: false` (active signature is not safe to rerun)
+- Parsed `/Users/.../results/results.tsv` frontier summary for this branch/state:
+  - total `keep` rows: `54`
+  - valid-and-cap-compliant keeps (`bytes_total <= 16,000,000`): `54`
+  - best keep so far: `exact_final_val_bpb = 1.23415861` at `20260320T120707Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1500`
+  - best nearby invalid near-miss: `1.22485899` (`runpod_h100_...wc1800_nofp16`) with `bytes_total = 16,132,911`
+  - frontier trend still indicates byte-cap pressure is the dominant limiter after precision/longer wallclock improvements.
+
+### Direction decision
+- Do not relaunch a duplicate of the active run signature (state reconciliation marks the active run as in progress).
+- Continue current RunPod lane focus as the active run completes/reconciles and prioritize the next hypothesis as `precision-aware compression + evaluation budget control` (for example quant configuration / precision variants or layer-targeted int4 schedules) to recover the near-miss under 16,000,000-byte cap.
+- Record this as the next hypothesis basis with explicit evidence from state + TSV frontier.
+
+### Process artifacts changed this checkpoint
+- None (append-only journal update only).
+
+### Extra operational note
+- Observed one background DGX/Shell process with PID `47154` still running from an older command string using host `dgx-spark`; it is not currently reflected in the active orchestrated signature and has not been edited.
