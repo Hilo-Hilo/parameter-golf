@@ -2503,3 +2503,19 @@ Why this mattered:
 ### Outcome
 - This move regressed sharply relative to `l11_depth` and did not improve the frontier.
 - Next optimizer sweeps should be deprioritized unless paired with other orthogonal changes, since this direction is clearly adverse.
+
+## 2026-03-19 20:20 PDT — Cost-discipline rule added for expensive compute
+
+### Why this entry exists
+- Hanson explicitly warned not to waste resources after seeing the H100 appear low-utilization in the RunPod UI.
+
+### Clarification at the time of the warning
+- The pod was not truly idle; it had an active training process and was in the early warmup/compile portion of a run.
+- Active run observed:
+  - `runpod_h100_1gpu_l11_untied2`
+  - H100 GPU process active
+  - latest visible progress: step `10/20000`
+
+### New standing rule
+- Do not leave expensive compute (especially the RunPod H100 lane) idling without useful work.
+- If the pod is not actively training, evaluating, or immediately preparing the next serious experiment, either launch the next useful job promptly or shut the pod down.
