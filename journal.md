@@ -2606,3 +2606,33 @@ Why this mattered:
 
 ### Constraint
 - Parallelism should still be disciplined: two serious threads are better than chaotic shotgun branching.
+
+## 2026-03-20 04:13 PDT — 11-layer untied frontier confirmed; orthogonal knobs regressed
+
+### Attempt details
+- Hardware: RunPod H100 SXM x1 (`f5fbuhtz75bb5u`), branch `research/continuous-mar18`, commit `52476a0ef480a222be3c57025b7c53dc3da79513`.
+- All commands executed through `scripts/run_experiment.sh` against full 80-shard `fineweb10B_sp1024` with `MAX_WALLCLOCK_SECONDS=600`.
+
+### Orthogonal sweep results around 11-layer untied best
+1. `runpod_h100_1gpu_l11_d496_u512seq`
+   - Config: `NUM_LAYERS=11`, `MODEL_DIM=496`, `TRAIN_SEQ_LEN=512`, `TIE_EMBEDDINGS=0`.
+   - Outcome: `keep`, `exact_final_val_bpb = 1.34816010`.
+   - `bytes_total = 14818008`, `step_stop = 1133`.
+   - Interpretation: worse than the same-width, seq_len-1024 baseline.
+
+2. `runpod_h100_1gpu_l11_d496_u2kv`
+   - Config: `NUM_LAYERS=11`, `MODEL_DIM=496`, `NUM_KV_HEADS=2`, `TIE_EMBEDDINGS=0`.
+   - Outcome: `keep`, `exact_final_val_bpb = 1.32790001`.
+   - `bytes_total = 15276523`, `step_stop = 1060`.
+   - Interpretation: worse than `runpod_h100_1gpu_l11_d496_untied`.
+
+3. `runpod_h100_1gpu_l12_d496_untied`
+   - Config: `NUM_LAYERS=12`, `MODEL_DIM=496`, `TIE_EMBEDDINGS=0`.
+   - Outcome: `keep`, `exact_final_val_bpb = 1.32097771`.
+   - `bytes_total = 15682618`, `step_stop = 1017`.
+   - Interpretation: improved over `l11_d480_untied` but worse than 11-layer width-optimized frontier.
+
+### Current best from RunPod lane
+- Best score remains `1.31520169` at `20260320T033506Z_runpod_h100_1gpu_l11_d496_untied`.
+- The additional orthogonal knobs tested so far (`TRAIN_SEQ_LEN`, `NUM_KV_HEADS`, `NUM_LAYERS`) did not improve over this best.
+- Next likely high-yield direction: hold `11x496` untied and test a targeted optimizer/hyper-parameter path (one at a time), or transition to 8-GPU-style configurations if accessible.
