@@ -2552,3 +2552,57 @@ Why this mattered:
 ### Workflow implication
 - The project should not stay artificially constrained to the current single-pod setup if broader compute materially improves iteration speed, search breadth, or faithfulness to the official multi-GPU challenge regime.
 - RunPod H100 remains the current main lane, but stronger or additional clusters are now explicitly allowed when they are high-value.
+
+## 2026-03-20 03:35 PDT — 11-layer untied width sweep (RunPod) and local optimum refinement
+
+### Attempt details
+- Hardware: RunPod H100 SXM x1 (`f5fbuhtz75bb5u`, image `runpod/parameter-golf:latest`, public SSH target `64.247.201.34:14882`).
+- Git commit: `52476a0ef480a222be3c57025b7c53dc3da79513`.
+- Branch: `research/continuous-mar18`.
+- Execution path: all runs through `scripts/run_experiment.sh` with full 80-shard `fineweb10B_sp1024` data.
+
+#### Hypothesis A (1 variable): `MODEL_DIM=520` with `NUM_LAYERS=11`, `TIE_EMBEDDINGS=0`
+- Result: `crash`, exit code 1.
+- Failure: `head_dim must be even for RoPE` (model width 520 is not compatible with 8 attention heads and current constraints).
+- Log: `20260320T033242Z_runpod_h100_1gpu_l11_d520_untied.log`.
+
+#### Hypothesis B (1 variable): `MODEL_DIM=496` with `NUM_LAYERS=11`, `TIE_EMBEDDINGS=0`
+- Result: successful `keep`.
+- `experiment_id`: `20260320T033506Z_runpod_h100_1gpu_l11_d496_untied`
+- `step_stop`: `1147`
+- process wallclock: `759.216223`
+- `pre_quant_val_bpb`: `1.3139`
+- `exact_final_val_bpb`: `1.31520169`
+- `bytes_total`: `14759069`
+- `bytes_code`: `47874`, `bytes_model`: `14711195`
+
+#### Hypothesis C (1 variable): `MODEL_DIM=480` with `NUM_LAYERS=11`, `TIE_EMBEDDINGS=0`
+- Result: successful `keep`.
+- `experiment_id`: `20260320T034805Z_runpod_h100_1gpu_l11_d480_untied`
+- `step_stop`: `1181`
+- process wallclock: `759.844253`
+- `pre_quant_val_bpb`: `1.3163`
+- `exact_final_val_bpb`: `1.31737389`
+- `bytes_total`: `14307128`
+- `bytes_code`: `47874`, `bytes_model`: `14259254`
+
+### Outcome
+- New best valid run is `MODEL_DIM=496` (`exact_final_val_bpb = 1.31520169`, improved from `1.32061866`).
+- Moving to `MODEL_DIM=480` on the same axis regressed.
+- `MODEL_DIM=520` is invalid under this head configuration due RoPE parity.
+- Next high-signal direction: keep `NUM_LAYERS=11`, `TIE_EMBEDDINGS=0` and test an orthogonal axis with minimal branch divergence (sequence length and/or KV-head allocation), not another width step.
+
+## 2026-03-19 21:06 PDT — Parallel search explicitly authorized
+
+### Directional change
+- Hanson explicitly said I can try multiple approaches at the same time.
+
+### Workflow implication
+- The Parameter Golf loop no longer needs to enforce a strictly single-hypothesis search at all times.
+- When compute and orchestration make it worthwhile, the project can run two serious approaches in parallel, especially across:
+  - multiple GPU pods / clusters
+  - training + upstream-intel / literature lanes
+  - distinct high-value hypotheses with clear attribution
+
+### Constraint
+- Parallelism should still be disciplined: two serious threads are better than chaotic shotgun branching.

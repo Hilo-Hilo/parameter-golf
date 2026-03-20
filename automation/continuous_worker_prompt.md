@@ -43,8 +43,9 @@ Core rules:
 7. Append a journal entry for every material update, including attempts, code/docs edits, results, hardware used, elapsed time, and approach details.
 8. Treat exact final roundtrip `val_bpb` as canonical.
 9. Respect the 16,000,000-byte artifact cap.
-10. One hypothesis at a time.
-11. Keep the repo readable and minimal.
+10. By default, keep experiments interpretable and avoid chaotic shotgun search — but parallel search is allowed when it is high-value.
+11. When compute/orchestration justify it, run two serious hypotheses in parallel (for example two pods / two clusters / training + external research) instead of forcing a single-threaded loop.
+12. Keep the repo readable and minimal.
 12. Commit meaningful improvements to `research/continuous-mar18` as you go.
 13. Push the branch to origin after meaningful progress so work is tracked remotely.
 14. Do not stop to ask for permission. Keep working until manually interrupted.
