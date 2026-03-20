@@ -2840,3 +2840,25 @@ Why this mattered:
 ### Outcome
 - Interpretation: `MATRIX_LR=0.03` degraded versus `MATRIX_LR=0.05` (`1.32698936` > `1.32048871`).
 - Next immediate path: keep focused on `11x496` untied and try `HEAD_LR=0.01` as a conservative optimizer-norm tweak.
+
+## 2026-03-20 05:43 PDT — HEAD_LR=0.01 underperforms frontier
+
+### Hypothesis: `HEAD_LR=0.01`
+- Hardware: RunPod H100 SXM x1 (`f5fbuhtz75bb5u`, image `runpod/parameter-golf:latest`, public SSH target `64.247.201.34:14882`).
+- Branch: `research/continuous-mar18`.
+- Git commit: `52476a0ef480a222be3c57025b7c53dc3da79513`.
+- Command: `runpod_h100_1gpu_l11_d496_uhead01` via `scripts/run_experiment.sh`, `TRACK=runpod_h100_1gpu`, `MAX_WALLCLOCK_SECONDS=600`.
+
+### Run details
+- Config: `NUM_LAYERS=11`, `MODEL_DIM=496`, `TIE_EMBEDDINGS=0`, `HEAD_LR=0.01`.
+- Result status: `keep`.
+- Exact stop: `wallclock_cap` at `step_stop=1044`.
+- `wallclock_seconds`: `708.331720`.
+- `pre_quant_val_bpb`: `1.3221`.
+- `exact_final_val_bpb`: `1.32345066`.
+- `bytes_total`: `14568254`.
+- Log: `20260320T054324Z_runpod_h100_1gpu_l11_d496_uhead01.log`.
+
+### Outcome
+- Interpretation: `HEAD_LR=0.01` is better than baseline `HEAD_LR=0.008` was unknown but above frontier (`1.32345066`), and close to `MATRIX_LR=0.05` but still above best `1.31520169`.
+- Next immediate path (one-hypothesis): with `MATRIX_LR=0.05` still strongest, test whether increasing `SCALAR_LR` has similar effect before moving to larger architecture or DGX.
