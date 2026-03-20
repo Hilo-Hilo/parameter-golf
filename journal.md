@@ -2455,3 +2455,11 @@ Why this mattered:
 ### Outcome
 - Quality improved relative to valid 11x4 run, but this architecture exceeds the 16MB submission cap and is therefore not eligible as-is.
 - The valid frontier remains `runpod_h100_1gpu_l11_depth` at `1.33252549`.
+
+## 2026-03-19 20:09 PDT — ChatGPT Pro / Deep Research preference recorded for Parameter Golf
+
+### Directional preference
+- Hanson explicitly said to remember to use ChatGPT Pro and Deep Research for ChatGPT-based work on this project.
+
+### Workflow implication
+- The ChatGPT research lane should default upward to Pro / Deep Research when appropriate for serious optimization research, paper synthesis, and strategy finding, instead of behaving like a basic lightweight chat lane.

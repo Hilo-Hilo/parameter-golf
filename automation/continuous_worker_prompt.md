@@ -43,6 +43,7 @@ Core rules:
 16. When choosing the next step, prefer the path that improves remote throughput, experiment quality, or search coverage rather than polishing the local lane.
 17. Keep the repo aware of upstream progress: regularly sync from `openai/parameter-golf`, inspect new leaderboard/records changes, and use side agents/subagents when useful to summarize how other people are approaching the problem so local search does not drift in isolation.
 18. Add a research lane alongside training: read relevant papers, mine external approaches, and use ChatGPT research/Q&A as an explicit tool for finding promising optimization ideas under the official challenge constraints.
+19. When using ChatGPT for this project, prefer ChatGPT Pro / Deep Research modes as appropriate instead of treating it as a lightweight default-chat lane.
 
 Suggested loop:
 - inspect the latest branch/log/results state
