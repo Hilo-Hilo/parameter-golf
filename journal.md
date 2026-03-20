@@ -2180,3 +2180,44 @@ Why this mattered:
 ### Immediate implication
 - RunPod is no longer blocked at auth/provisioning.
 - The project now has a live H100 lane with working SSH and an in-progress data bootstrap.
+
+## 2026-03-19 18:32 PDT — First detached RunPod H100 smoke run launched successfully
+
+### Why this entry exists
+- The first direct SSH-launched smoke on RunPod failed for an infrastructure reason: `torchrun` received a `SIGHUP` when the SSH PTY closed.
+- To make RunPod usable for unattended work, remote runs need to be launched under a detached remote supervisor rather than directly under the login shell.
+
+### Infrastructure fix / approach change
+- Switched the remote launch pattern to use a detached `tmux` session on the RunPod pod.
+- Remote session name: `pg-smoke`
+- This keeps the training process alive even if the controlling SSH session exits.
+
+### Attempt launched
+- Pod: `imaginative_tan_coyote` / `f5fbuhtz75bb5u`
+- Hardware: `RunPod H100 SXM x1`
+- Repo path on pod: `/workspace/parameter-golf`
+- Branch on pod: `research/continuous-mar18`
+- Data state before launch: cached FineWeb `sp1024` assets downloaded with `--train-shards 8`
+- Launch mode: detached remote `tmux`
+- Command launched:
+  - `scripts/run_experiment.sh --name runpod_h100_1gpu_smoke_tmux --track runpod-smoke --trainer train_gpt.py --notes "Fresh RunPod H100 template smoke with 1 GPU, cached sp1024 data, detached tmux launcher" -- env MAX_WALLCLOCK_SECONDS=60 VAL_LOSS_EVERY=200 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+
+### Live run state shortly after launch
+- Log path: `logs/experiments/20260320T013234Z_runpod_h100_1gpu_smoke_tmux.log`
+- Config confirmed from log:
+  - tokenizer: `./data/tokenizers/fineweb_1024_bpe.model`
+  - train shards: `8`
+  - validation tokens: `62021632`
+  - model params: `17,059,912`
+  - heads / KV heads: `8 / 4`
+  - train batch tokens: `524288`
+  - train sequence length: `1024`
+  - `torch_compile: enabled`
+  - wallclock cap: `60s`
+- Live progress observed:
+  - warmup reached `20/20`
+  - `torchrun` and `train_gpt.py` remained alive under tmux after SSH exit
+
+### Immediate implication
+- The fresh RunPod H100 lane is now doing real training work, not just provisioning.
+- The next useful checkpoint is the first completed smoke result (or crash signature) from this detached run.
