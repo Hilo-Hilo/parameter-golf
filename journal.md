@@ -2416,3 +2416,18 @@ Why this mattered:
 - Treat upstream `openai/parameter-golf` sync as part of the ongoing research loop.
 - Use delegated side-agent / subagent work to inspect new upstream leaderboard records, README changes, record folders, and any newly published approaches so local search can react quickly.
 - The project should not rely only on internal experimentation; it should also absorb external signal from upstream progress.
+
+## 2026-03-19 20:02 PDT — Papers + ChatGPT added as a formal optimization lane
+
+### Directional change
+- Hanson explicitly asked that the project also read/research papers and use ChatGPT to help identify optimal ways to optimize the solution.
+
+### Workflow implication
+- The Parameter Golf loop should now include a dedicated external-research lane in addition to training and upstream repo sync.
+- That lane should:
+  - read relevant papers / prior art
+  - synthesize promising ideas that fit the official OpenAI challenge constraints
+  - use ChatGPT as an explicit research/idea-generation tool rather than relying only on local reasoning
+
+### Operational note
+- At the moment this instruction was recorded, the `chatgpt.com` browser session under the OpenClaw profile was present but logged out, so ChatGPT use is conceptually approved/required but may still need session re-auth before it becomes a live automation lane.
