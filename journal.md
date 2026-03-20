@@ -3228,3 +3228,19 @@ Why this mattered:
 - Next experiment should therefore revert to all-layer coverage and explore either:
   - alternative `INT4_STEP` values near 1 (e.g., 1 with different compile/eval settings),
   - warmdown/optimizer schedule interactions with the already-learned quantized frontier.
+
+## 2026-03-20T09:18:57Z — Warmdown interaction on all-layer int4_step=1
+
+### Run
+- Ran warmdown-sweep follow-up on the current all-layer quant frontier:
+  - `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wd2400 --track runpod_h100 --trainer train_gpt.py --status keep --notes "int4-compression: all 11 layers int4_step=1 with warmdown 2400" --eval-stride 256 --eval-batch-seqs 32 -- env NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=600 WARMDOWN_ITERS=2400 VERIFY_EXPORT_ROUNDTRIP=1 FP16_TIED_EMBEDDING_EXPORT=1 INT4_LAYERS=\"0,1,2,3,4,5,6,7,8,9,10\" INT4_STEP=1 EVAL_STRIDE=256 EVAL_BATCH_SEQS=32 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Synced run artifacts into local `logs/experiments`.
+
+### Result
+- `exact_final_val_bpb=1.30667957` (`step_stop=1125`, `wallclock_seconds=776.47949`).
+- `pre_quant_val_bpb=1.3345`, `bytes_total=13291021`.
+- This is worse than the same configuration without warmdown (`1.29896417`) and does not improve the frontier.
+
+### Directional impact
+- Confirms warmdown extension is currently a non-promising axis for this quantized frontier.
+- Next moves should likely prioritize additional architecture/sequence/optim schedule alternatives rather than longer warmdown on this exact config.
