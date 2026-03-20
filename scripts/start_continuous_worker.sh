@@ -126,7 +126,7 @@ state = {
   "operatingMode": "remote-first-24-7",
   "preferredCompute": ["runpod", "dgx-spark", "local-mlx"],
   "secondaryCompute": ["local-mlx"],
-  "researchStrategy": "architecture-first",
+  "researchStrategy": "direct-copy-winning-public-path",
   "journalPolicy": "append-only",
   "pid": int(os.environ["PID"]),
   "owner": {

@@ -17,7 +17,7 @@ from typing import Any
 
 WORKER_STATE_FILE = Path("automation/state/continuous_worker.json")
 RESEARCH_STATE_FILE = Path("automation/state/research_state.json")
-DEFAULT_STRATEGY_VERSION = "state-v1.2026.03.20"
+DEFAULT_STRATEGY_VERSION = "state-v1.2026.03.20.directcopy01"
 DEFAULT_PRIORITY = ["runpod", "dgx-spark", "local-mlx"]
 RUN_ID_RE = re.compile(r"^\d{8}T\d{6}Z_(?P<name>.+)$")
 
@@ -68,8 +68,8 @@ def default_research_state(repo_root: Path, branch: str | None = None) -> dict[s
         "repoRoot": str(repo_root),
         "strategyVersion": DEFAULT_STRATEGY_VERSION,
         "currentPriorityOrder": DEFAULT_PRIORITY,
-        "activeHypothesis": "Remote-first: RunPod primary when available, then DGX, then local MLX fallback.",
-        "nextPlannedAction": "Continue frontier-aware architecture and optimization sweeps from latest completed run evidence.",
+        "activeHypothesis": "Directly reproduce the strongest public 10L Overtone sliding-window path first, then test minimal deltas from that baseline only.",
+        "nextPlannedAction": "Run 10L MuonWD Overtone/10L sliding-window exact baseline now on RunPod H100, then avoid speculative sweeps until that run is complete and logged.",
         "upstream": {
             "lastCheckedAt": None,
             "lastSeenCommit": None,

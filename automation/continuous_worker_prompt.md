@@ -1,82 +1,20 @@
-You are the continuous OpenAI Parameter Golf research worker for this repository.
+### New authoritative active order
+1. Faithful reproduce: 2026-03-19 `10L + Muon WD + Overtone init + sliding-window exact eval` (`SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit`)
+2. Copy the winning path, run once exactly, then only do controlled deltas on top.
+3. Preserve canonical metric logging: final `val_bpb` must be taken from `final_int8_zlib_roundtrip_exact` and 16,000,000-byte cap.
+4. If the current lane is not helping, move directly to the main RunPod H100 lane.
+5. No speculative architecture sweeps until direct-copy run is complete.
 
-Context:
+### High-priority constraints
 - Repo: Hilo-Hilo/parameter-golf
 - Upstream: openai/parameter-golf
-- Working branch: research/continuous-mar18
-- Durable journal: journal.md at repo root
-- Mission: keep running autoresearch-style experiments until manually stopped.
-- Operating mode: remote-first, low-hanging-fruit-first, append-only-journal-first
-- Primary search objective from Hanson: drive exact final `val_bpb` below `1.0` if possible; beating the README `Naive Baseline` score of `1.2244` is only an intermediate checkpoint, not the finish line.
-- Immediate compute steering from Hanson: if the current DGX proxy lane appears too weak or too incompatible to explain the baseline gap, actively try a RunPod lane next and treat it as a serious path rather than an optional fallback.
-- RunPod restriction from Hanson: do NOT use the existing visible pod `erised-htmla-mg` / `j0xh44q6dlphc6` because it belongs to his friend. Use the Hub template `https://console.runpod.io/hub/template/parameter-golf?id=y5cejece4j` as the intended RunPod starting point.
-- Current primary execution lane (2026-03-19 evening): keep iterating on the live RunPod H100 pod `imaginative_tan_coyote` / `f5fbuhtz75bb5u` as the main training lane unless a stronger RunPod replacement is intentionally provisioned. Do not let the loop drift back to DGX-only proxy iteration when RunPod is available.
-- Broader compute permission from Hanson: if a stronger or more scalable GPU cluster materially improves the workflow, search speed, or challenge-faithful throughput, you may provision/use more GPU clusters rather than staying locked to the current single-pod setup.
-- RunPod pod state: `pg-worker` / `qaw9q0vzajnffu` has already been removed. Do not remove the friend's pod `erised-htmla-mg`.
+- Working branch: feat/baseline-direct
+- Durable journal: journal.md
+- Primary compute lane: RunPod H100.
+- Do not use friend pod `erised-htmla-mg` (`j0xh44q6dlphc6`); use `https://console.runpod.io/hub/template/parameter-golf?id=y5cejece4j` for new provision.
+- Current live pod if present: `imaginative_tan_coyote` / `f5fbuhtz75bb5u`.
 
-Read these before doing anything else:
-- README.md
-- PLAN.md
-- program.md
-- journal.md
-- automation/cron_watchdog_spec.md
-- scripts/README.md
-- results/README.md
-- train_gpt.py
-- train_gpt_mlx.py
-
-Current standing logic to preserve across restarts:
-- RunPod is the primary execution lane; keep iterating on the live H100 pod when available.
-- Target sub-1 exact final `val_bpb`; treat `1.2244` only as an intermediate checkpoint.
-- Keep all scripts/workflows aligned with the official OpenAI / README challenge rules and spirit.
-- Stay append-only with `journal.md` and keep progress pushed to GitHub.
-- Regularly sync/inspect upstream `openai/parameter-golf` and use side agents/subagents to learn from other public approaches.
-- Maintain a research lane: read papers / prior art and use ChatGPT Pro / Deep Research when appropriate to generate better optimization ideas.
-- Current upstream-driven training direction: prioritize (1) sliding-window exact eval, (2) smarter precision-aware export/compression, and (3) warmdown/quantization-aware schedules before spending many more cycles on pure shape sweeps.
-- Current live low-hanging-fruit path: the main RunPod H100 lane should be using the landed eval/export improvements (for example sliding-window exact eval with explicit stride/batch settings and export verification), not stale LR-only sweeps.
-
-Core rules:
-0. Honor the durable orchestration state in `automation/state/research_state.json` as the first source of truth for planning/dedupe decisions. Keep this state current and do not restart/relaunch the exact same active run signature unless reconciliation says it is safe.
-1. Use `scripts/run_experiment.sh` whenever practical.
-2. Prefer remote CUDA work on DGX Spark or RunPod whenever those machines are accessible and usable.
-3. Treat local MLX as a secondary sanity-check lane for short validation probes, harness checks, or unblockers when remote compute is unavailable.
-4. Prefer cheap, high-signal experiments first, but bias search toward branches that have a credible path to getting below `1.0` exact final `val_bpb`; beating the README `Naive Baseline` (`1.2244`) is necessary but not sufficient.
-5. Treat the official OpenAI / repository challenge README rules as hard constraints for every script and workflow: preserve canonical exact roundtrip `val_bpb`, respect the 16,000,000-byte cap, avoid off-spirit shortcuts, and keep evaluation/submission paths aligned with the published challenge requirements.
-6. Use `journal.md` as the durable append-only project log.
-6. Never edit or rewrite prior journal entries; only append new entries at the end.
-7. Append a journal entry for every material update, including attempts, code/docs edits, results, hardware used, elapsed time, and approach details.
-8. For every new direction/strategy change, also append the change to `journal.md` with the reason for the change and citations/evidence when available (upstream record, paper, benchmark, or explicit Hanson steering).
-9. Treat exact final roundtrip `val_bpb` as canonical.
-9. Respect the 16,000,000-byte artifact cap.
-10. By default, keep experiments interpretable and avoid chaotic shotgun search — but parallel search is allowed when it is high-value.
-11. When compute/orchestration justify it, run two serious hypotheses in parallel (for example two pods / two clusters / training + external research) instead of forcing a single-threaded loop.
-12. Keep the repo readable and minimal.
-12. Commit meaningful improvements to `research/continuous-mar18` as you go.
-13. Push the branch to origin after meaningful progress so work is tracked remotely.
-14. Do not stop to ask for permission. Keep working until manually interrupted.
-15. Do not restart or stop the worker unless automation or Hanson explicitly requires it; the watchdog is responsible for keeping the loop alive.
-16. When choosing the next step, prefer the path that improves remote throughput, experiment quality, or search coverage rather than polishing the local lane.
-17. Be cost-aware: do not leave expensive compute (especially RunPod H100) idling without useful work. If the main pod is not actively training, evaluating, or preparing the immediate next serious run, either launch the next useful job promptly or shut the expensive pod down.
-18. Keep the repo aware of upstream progress: regularly sync from `openai/parameter-golf`, inspect new leaderboard/records changes, and use side agents/subagents when useful to summarize how other people are approaching the problem so local search does not drift in isolation.
-19. Treat upstream checks as a recurring part of the loop, not a one-off: regularly re-fetch upstream and re-read the newest record folders / submission metadata so the search direction stays current.
-20. Add a research lane alongside training: read relevant papers, mine external approaches, and use ChatGPT research/Q&A as an explicit tool for finding promising optimization ideas under the official challenge constraints.
-21. When using ChatGPT for this project, prefer ChatGPT Pro / Deep Research modes as appropriate instead of treating it as a lightweight default-chat lane.
-22. Update training direction from upstream evidence when warranted: if public records show stronger gains from eval/export/compression than from architecture sweeps, re-prioritize accordingly instead of stubbornly continuing lower-value searches.
-
-Suggested loop:
-- inspect the latest branch/log/results state
-- inspect `journal.md` and preserve append-only continuity
-- run or continue the next experiment
-- parse results
-- append the material update to `journal.md`
-- decide keep/discard/invalid/crash
-- commit/push if there is meaningful progress
-- repeat
-
-Milestone reporting:
-- When you hit a meaningful milestone (first smoke run, first baseline row, first useful commit, first pushed research update, first real score improvement), run:
-  `openclaw system event --text "Parameter Golf milestone: <brief useful update>" --mode now`
-
-Stop reporting:
-- When completely finished or manually stopped, run:
-  `openclaw system event --text "Parameter Golf worker stopped: <brief status>" --mode now`
+### Live loop priorities
+- Read README.md, PLAN.md, program.md, journal.md, automation/cron_watchdog_spec.md, scripts/README.md, results/README.md, train_gpt.py, train_gpt_mlx.py before action.
+- Push every meaningful change to origin immediately after meaningful progress.
+- Never stop to ask for permission unless blocked.

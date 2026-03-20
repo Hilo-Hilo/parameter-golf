@@ -3165,3 +3165,29 @@ Why this mattered:
 ### Learnings
 - All-layer int4 at `int4_step=4` plus fp16 tied embeddings was too lossy on this lane, worse than baseline keep run with no int4 (`1.31193434`).
 - Next compression hypotheses should reduce quant pressure (subset layers, lower step, alternative precision settings) before additional architecture sweeps.
+
+## 2026-03-20T08:40:55Z — Direct-copy lock-in to strongest public 10L sliding-window Overtone path
+
+### Decision
+- Copied the winning upstream-path implementation from
+  `upstream/main:records/track_10min_16mb/2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit/train_gpt.py`
+  into root `train_gpt.py` as the direct reproduction anchor.
+- Updated orchestration to prevent drift:
+  - `scripts/research_state.py` now uses direct-copy defaults and explicit next-action text.
+  - `scripts/start_continuous_worker.sh` now sets `researchStrategy: direct-copy-winning-public-path`.
+  - `automation/continuous_worker_prompt.md` now prioritizes faithful reproduction of this public path.
+
+### Why this is the shortest faithful route
+- Public best in the cited set is `records/track_10min_16mb/2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit` with seed mean `val_bpb: 1.1748` and exact-split metrics in:
+  - `train_seed1337.log`
+  - `train_seed42.log`
+  - `train_seed7.log`
+- Supporting context in the same family:
+  - `records/track_10min_16mb/2026-03-19_SlidingWindowEval/README.md` (exact `1.1925` from sliding eval path).
+  - `records/track_10min_16mb/2026-03-19_10L_MixedPrecision/README.md` (10L baseline exploration).
+  - `records/track_10min_16mb/2026-03-19_WarmdownQuantization/README.md` (warmdown/compression interaction).
+
+### Constraint fidelity
+- Canonical metric logging remains `final_int8_zlib_roundtrip_exact` as required by existing record logs and parser behavior.
+- 16,000,000-byte cap target is preserved by continuing int8+zlib export-first workflow.
+- DGX Spark untouched; RunPod H100 remains primary lane and friend-owned pod remains excluded.
