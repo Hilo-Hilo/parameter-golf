@@ -3031,3 +3031,30 @@ Why this mattered:
 
 ### Constraint
 - DGX Spark was left untouched per Hanson's instruction.
+
+## 2026-03-20 00:09 PDT — Purged stale worker/cron assumptions and replaced them with current strategy
+
+### Why this entry exists
+- Hanson explicitly asked me to make sure the cron job knows the latest direction and to purge outdated info and replace it with the new info.
+
+### What stale assumptions were removed/replaced
+- Replaced stale framing like `architecture-first` with a lower-level, current strategy emphasis.
+- Replaced older cron steering that centered only on beating `1.2244` with the updated objective: design to win under official OpenAI rules, target sub-1 if possible.
+- Replaced ambiguous pod state references with current truth:
+  - `pg-worker` is already gone
+  - the friend's pod is still off-limits
+  - RunPod H100 is the active main lane
+- Replaced vague continuation language with the current low-hanging-fruit priority order.
+
+### New authoritative active order
+1. sliding-window exact eval
+2. smarter precision-aware export / compression
+3. warmdown / quantization-aware schedules
+4. only then more architecture/LR sweeps unless unusually high-value
+
+### Evidence / citations
+- Explicit Hanson steering in chat to pivot immediately to low-hanging fruits and to update the cron logic.
+- Upstream evidence already cited earlier in this journal:
+  - `records/track_10min_16mb/2026-03-19_SlidingWindowEval/README.md`
+  - `records/track_10min_16mb/2026-03-19_10L_MixedPrecision/README.md`
+  - `records/track_10min_16mb/2026-03-19_WarmdownQuantization/README.md`

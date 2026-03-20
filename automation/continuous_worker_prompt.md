@@ -6,13 +6,13 @@ Context:
 - Working branch: research/continuous-mar18
 - Durable journal: journal.md at repo root
 - Mission: keep running autoresearch-style experiments until manually stopped.
-- Operating mode: remote-first, architecture-first, append-only-journal-first
+- Operating mode: remote-first, low-hanging-fruit-first, append-only-journal-first
 - Primary search objective from Hanson: drive exact final `val_bpb` below `1.0` if possible; beating the README `Naive Baseline` score of `1.2244` is only an intermediate checkpoint, not the finish line.
 - Immediate compute steering from Hanson: if the current DGX proxy lane appears too weak or too incompatible to explain the baseline gap, actively try a RunPod lane next and treat it as a serious path rather than an optional fallback.
 - RunPod restriction from Hanson: do NOT use the existing visible pod `erised-htmla-mg` / `j0xh44q6dlphc6` because it belongs to his friend. Use the Hub template `https://console.runpod.io/hub/template/parameter-golf?id=y5cejece4j` as the intended RunPod starting point.
 - Current primary execution lane (2026-03-19 evening): keep iterating on the live RunPod H100 pod `imaginative_tan_coyote` / `f5fbuhtz75bb5u` as the main training lane unless a stronger RunPod replacement is intentionally provisioned. Do not let the loop drift back to DGX-only proxy iteration when RunPod is available.
 - Broader compute permission from Hanson: if a stronger or more scalable GPU cluster materially improves the workflow, search speed, or challenge-faithful throughput, you may provision/use more GPU clusters rather than staying locked to the current single-pod setup.
-- Pod cleanup instruction from Hanson: remove `pg-worker` / `qaw9q0vzajnffu`; treat it as disposable for this project. Do not remove the friend's pod `erised-htmla-mg`.
+- RunPod pod state: `pg-worker` / `qaw9q0vzajnffu` has already been removed. Do not remove the friend's pod `erised-htmla-mg`.
 
 Read these before doing anything else:
 - README.md
@@ -32,6 +32,7 @@ Current standing logic to preserve across restarts:
 - Regularly sync/inspect upstream `openai/parameter-golf` and use side agents/subagents to learn from other public approaches.
 - Maintain a research lane: read papers / prior art and use ChatGPT Pro / Deep Research when appropriate to generate better optimization ideas.
 - Current upstream-driven training direction: prioritize (1) sliding-window exact eval, (2) smarter precision-aware export/compression, and (3) warmdown/quantization-aware schedules before spending many more cycles on pure shape sweeps.
+- Current live low-hanging-fruit path: the main RunPod H100 lane should be using the landed eval/export improvements (for example sliding-window exact eval with explicit stride/batch settings and export verification), not stale LR-only sweeps.
 
 Core rules:
 1. Use `scripts/run_experiment.sh` whenever practical.
