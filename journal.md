@@ -2318,3 +2318,29 @@ Why this mattered:
   - `imaginative_tan_coyote` / `f5fbuhtz75bb5u`
   - `H100 SXM x1`
 - This pod remains the main RunPod execution lane for ongoing Parameter Golf experiments.
+
+## 2026-03-20 02:33 PDT — 10-layer depth ablation completed on full-data RunPod H100
+
+### Why this update
+- The previous best from this session (`runpod_h100_1gpu_smoke_full`) improved over the DGX-era partial-shard state, but still left room for architectural exploration.
+- This was the next one-variable test after `TRAIN_SEQ_LEN=1024` and `TRAIN_SEQ_LEN=512` branching: increase depth by one layer with fixed width and context.
+
+### Attempt details
+- Pod: `f5fbuhtz75bb5u` (`imaginative_tan_coyote`) — RunPod H100 SXM x1
+- Repository path: `/workspace/parameter-golf`
+- Command: `scripts/run_experiment.sh --name runpod_h100_1gpu_l10_depth --track runpod_h100_1gpu --status keep --notes "single hypothesis: +1 layer (10x512) to test depth gains under fixed token+wallclock budget" -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Overrides: `DATA_PATH=./data/datasets/fineweb10B_sp1024`, `TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model`, `VOCAB_SIZE=1024`, `MAX_WALLCLOCK_SECONDS=600`, `VAL_LOSS_EVERY=0`, `ITERATIONS=20000`, `TRAIN_BATCH_TOKENS=524288`, `TRAIN_SEQ_LEN=1024`, `NUM_LAYERS=10`
+- Notable technical note: `scripts/run_experiment.sh` did not emit a `.json` summary automatically in this run on first invocation; metrics were still parsed from log and appended via direct `parse_train_log.py` replay with the same metadata to preserve durability.
+
+### Results
+- experiment_id: `20260320T022630Z_runpod_h100_1gpu_l10_depth`
+- `step_stop`: `1108`
+- process wallclock: `708.104481`
+- `pre_quant_val_bpb`: `1.3363`
+- `exact_final_val_bpb`: `1.33772384`
+- bytes (total/code/model): `14094407` / `47874` / `14046533`
+- model params: `18,897,488`
+
+### Outcome
+- This run improved best exact final score relative to `runpod_h100_1gpu_smoke_full` (`1.3447463` -> `1.33772384`) while staying within the 16MB cap.
+- Current best remains `runpod_h100_1gpu_l10_depth` among RunPod H100 single-GPU explorations.
