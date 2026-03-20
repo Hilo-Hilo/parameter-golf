@@ -2724,3 +2724,25 @@ Why this mattered:
   4. only then further depth/shape search
 - Tokenizer changes still do not look like the main public winning lever.
 - The project should continue reading upstream `records/` directly instead of trusting the top-level README alone.
+
+## 2026-03-20 04:52 PDT — EMBED_LR increase on 11x496 untied regressed but stabilized
+
+### Hypothesis: `EMBED_LR=0.8`
+- Hardware: RunPod H100 SXM x1 (`f5fbuhtz75bb5u`, image `runpod/parameter-golf:latest`, public SSH target `64.247.201.34:14882`).
+- Branch: `research/continuous-mar18`.
+- Git commit: `52476a0ef480a222be3c57025b7c53dc3da79513`.
+- Command: `runpod_h100_1gpu_l11_d496_uembed08` via `scripts/run_experiment.sh`, `TRACK=runpod_h100_1gpu`, `MAX_WALLCLOCK_SECONDS=600`.
+
+### Run details
+- Config: `NUM_LAYERS=11`, `MODEL_DIM=496`, `TIE_EMBEDDINGS=0`, `EMBED_LR=0.8`.
+- Result status: `keep`.
+- Exact stop: `wallclock_cap` at `step_stop=1055`.
+- `wallclock_seconds`: `708.848418`.
+- `pre_quant_val_bpb`: `1.3226`.
+- `exact_final_val_bpb`: `1.32399542`.
+- `bytes_total`: `14591739`.
+- Log: `20260320T045217Z_runpod_h100_1gpu_l11_d496_uembed08.log`.
+
+### Outcome
+- Interpretation: increasing `EMBED_LR` to `0.8` did not improve the frontier (`1.32399542` > `1.31520169`) and remained a modest regression versus best.
+- Next immediate path (one-hypothesis): keep `11x496` untied and test a single opposite/related optimizer tweak such as `EMBED_LR=0.4` or `MATRIX_LR` adjustment.
