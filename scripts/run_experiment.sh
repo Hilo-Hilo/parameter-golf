@@ -14,6 +14,8 @@ Options:
   --notes TEXT          Short free-form note.
   --eval-stride N       Override EVAL_STRIDE env var for train_gpt.py.
   --eval-batch-seqs N   Override EVAL_BATCH_SEQS env var for train_gpt.py.
+  --eval-seq-len N      Override EVAL_SEQ_LEN env var for train_gpt.py.
+  --muon-weight-decay N Override MUON_WEIGHT_DECAY env var for train_gpt.py.
   --submission PATH     Optional submission.json to merge into parsed metrics.
   --results PATH        Results TSV path. Default: results/results.tsv
   --log-dir PATH        Log directory. Default: logs/experiments
@@ -28,6 +30,8 @@ status="discard"
 notes=""
 eval_stride=""
 eval_batch_seqs=""
+eval_seq_len=""
+muon_weight_decay=""
 submission=""
 results_tsv="results/results.tsv"
 log_dir="logs/experiments"
@@ -61,6 +65,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     --eval-batch-seqs)
       eval_batch_seqs="${2:-}"
+      shift 2
+      ;;
+    --eval-seq-len)
+      eval_seq_len="${2:-}"
+      shift 2
+      ;;
+    --muon-weight-decay)
+      muon_weight_decay="${2:-}"
       shift 2
       ;;
     --submission)
@@ -185,6 +197,12 @@ set +e
   fi
   if [[ -n "$eval_batch_seqs" ]]; then
     export EVAL_BATCH_SEQS="$eval_batch_seqs"
+  fi
+  if [[ -n "$eval_seq_len" ]]; then
+    export EVAL_SEQ_LEN="$eval_seq_len"
+  fi
+  if [[ -n "$muon_weight_decay" ]]; then
+    export MUON_WEIGHT_DECAY="$muon_weight_decay"
   fi
   RUN_ID="$run_id" PYTHONUNBUFFERED=1 "$@"
 ) >"$log_path" 2>&1

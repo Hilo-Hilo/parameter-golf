@@ -3445,3 +3445,11 @@ Why this mattered:
 
 ### Next move
 - Next run on RunPod should exercise the new controls explicitly (example: `EVAL_SEQ_LEN=1024`, sweep over `MUON_WEIGHT_DECAY`, and compare `FP16_TIED_EMBEDDING_EXPORT`/quant settings with `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`) to recover byte-valid frontier quality.
+## 2026-03-20T15:22:00Z — experiment runner extended for new eval/optimizer knobs
+
+### Change log
+- Updated `scripts/run_experiment.sh` to support new high-signal controls used by this lane:
+  - `--eval-seq-len` (passes through to `EVAL_SEQ_LEN`)
+  - `--muon-weight-decay` (passes through to `MUON_WEIGHT_DECAY`)
+- This keeps `scripts/run_experiment.sh` aligned with the new `train_gpt.py` controls and enables rapid RunPod/DGX launch templating without manual env wrappers.
+- No remote training/job was started during this iteration; repo remains on branch `research/continuous-mar18` and active `runpod_h100` lane remains the next target.
