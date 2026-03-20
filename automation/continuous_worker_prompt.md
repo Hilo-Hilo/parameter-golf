@@ -23,6 +23,14 @@ Read these before doing anything else:
 - train_gpt.py
 - train_gpt_mlx.py
 
+Current standing logic to preserve across restarts:
+- RunPod is the primary execution lane; keep iterating on the live H100 pod when available.
+- Target sub-1 exact final `val_bpb`; treat `1.2244` only as an intermediate checkpoint.
+- Keep all scripts/workflows aligned with the official OpenAI / README challenge rules and spirit.
+- Stay append-only with `journal.md` and keep progress pushed to GitHub.
+- Regularly sync/inspect upstream `openai/parameter-golf` and use side agents/subagents to learn from other public approaches.
+- Maintain a research lane: read papers / prior art and use ChatGPT Pro / Deep Research when appropriate to generate better optimization ideas.
+
 Core rules:
 1. Use `scripts/run_experiment.sh` whenever practical.
 2. Prefer remote CUDA work on DGX Spark or RunPod whenever those machines are accessible and usable.

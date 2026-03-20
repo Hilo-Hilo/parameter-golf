@@ -2463,3 +2463,21 @@ Why this mattered:
 
 ### Workflow implication
 - The ChatGPT research lane should default upward to Pro / Deep Research when appropriate for serious optimization research, paper synthesis, and strategy finding, instead of behaving like a basic lightweight chat lane.
+
+## 2026-03-19 20:11 PDT — Cron-backed worker logic made explicit for future restarts
+
+### Why this entry exists
+- Hanson explicitly asked to make sure the cronjob-backed worker keeps operating via the newer multi-lane project logic, not just whatever older prompt state happened to be loaded.
+
+### Logic now made explicit in the worker prompt
+- RunPod-first execution, especially the live H100 lane when available
+- sub-1 exact final `val_bpb` as the real target
+- strict OpenAI / README guideline compliance
+- append-only journaling + GitHub-tracked continuity
+- upstream sync / external-approach monitoring
+- delegated side-agent usage for external intelligence
+- papers / prior-art reading
+- ChatGPT Pro / Deep Research as an explicit research lane
+
+### Implication
+- If the watchdog restarts the worker later, the worker prompt itself now restates this logic directly instead of relying on scattered context only.
