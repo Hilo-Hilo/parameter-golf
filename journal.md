@@ -3281,3 +3281,55 @@ Why this mattered:
 - This remains worse than the 1.29896417 frontier run (`20260320T085003Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1`).
 - In contrast to the prior `batch32` case, `batch64` did not improve final exact score on this fixed config.
 - Next run path should prioritize non-eval-batch controls or architectural/optimizer schedule variants rather than further eval-batch tuning at this point.
+## 2026-03-20T10:44:00Z — RunPod wallclock extension breakthrough: 10.26 lane reaches 1.2653 final
+
+### Run
+- Primary lane remained live RunPod H100 pod `imaginative_tan_coyote` (`f5fbuhtz75bb5u`), extending the same 11x496 untied frontier with sliding-window exact eval and full int4 coverage.
+- Launched via async wrapper on the pod:
+  - `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc900`
+- Command: `env NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=900 VERIFY_EXPORT_ROUNDTRIP=1 FP16_TIED_EMBEDDING_EXPORT=1 INT4_LAYERS="0,1,2,3,4,5,6,7,8,9,10" INT4_STEP=1 EVAL_STRIDE=256 EVAL_BATCH_SEQS=32 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Synced artifacts:
+  - `logs/experiments/20260320T102612Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc900.log`
+  - `logs/experiments/20260320T102612Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc900.meta`
+  - `logs/experiments/20260320T102612Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc900.json`
+
+### Result
+- Exit code: `0`
+- `exact_final_val_bpb: 1.26530376`
+- `pre_quant_val_bpb: 1.2956`
+- `final_val_loss: 2.13641239`
+- `bytes_total: 14,614,808` (`bytes_model: 14,559,325`, `bytes_code: 55,483`)
+- `step_stop: 1710`
+- `wallclock_seconds: 1076.49275`
+
+### Directional impact
+- This is a strong material improvement over the prior best (`1.29896417` from `20260320T085003Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1`) and reaffirms the frontier path of evaluation/compression scheduling over pure architecture sweeps.
+- Updated `results/results.tsv` and `automation/state/research_state.json` to record this as the current best completed local ledger point.
+- Next hypothesis: keep this all-layer int4 configuration and test high-impact schedule-aware extensions only (e.g., additional wallclock budget shaping and/or quantization-aware LR warmdown interactions) before widening structural search again.
+
+## 2026-03-20T11:15:34Z — RunPod wallclock-cap sweep confirms size cap barrier on 1200s exact path
+
+### Run
+- Run continued on live RunPod `imaginative_tan_coyote` (`f5fbuhtz75bb5u`) from the same frontier recipe as the 900s breakthrough.
+- Experiment: `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1200`
+- Command:
+  `env NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=1200 VERIFY_EXPORT_ROUNDTRIP=1 FP16_TIED_EMBEDDING_EXPORT=1 INT4_LAYERS="0,1,2,3,4,5,6,7,8,9,10" INT4_STEP=1 EVAL_STRIDE=256 EVAL_BATCH_SEQS=32 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Synced artifacts:
+  - `logs/experiments/20260320T104553Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1200.log`
+  - `logs/experiments/20260320T104553Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1200.meta`
+  - `logs/experiments/20260320T104553Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1wc1200.json`
+
+### Result
+- `exact_final_val_bpb: 1.23936419` from final exact sliding-window eval (`final_int8_zlib_roundtrip_exact`)
+- `pre_quant_val_bpb: 1.2714`
+- `final_val_loss: 2.0926147`
+- `bytes_total: 17,974,723` (`bytes_model: 17,917,875`, `bytes_code: 56,848`)
+- `step_stop: 2082`
+- `wallclock_seconds: 1634.185363`
+- `status: invalid` (over `16,000,000` byte cap)
+- Exit code: `0`
+
+### Directional impact
+- The 1200s schedule improved final exact score relative to some earlier runs (`1.2738` at 900s stop window) but crossed the byte cap (`bytes_total` rose to `17.97M`) and is therefore not a leaderboard-valid frontier point.
+- This run confirms that score improvements are still available, but size control remains required for valid submissions.
+- Next direction: keep 1200s timing behavior as a reference but resume with model-compression/size-pruning constraints (or alternative quantization granularity) to recover the 1200s quality under the 16MB budget.
