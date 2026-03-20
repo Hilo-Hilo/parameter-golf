@@ -3680,3 +3680,22 @@ Why this mattered:
   - `logs/launch_20260320T214300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750.out`
   - `logs/experiments/20260320T221837Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750.{log,json,meta}`
 - Updated durable ledger: `results/results.tsv` appended with this completed row and `python3 scripts/research_state.py reconcile --results-file results/results.tsv` reflected in `automation/state/research_state.json` as latest completed signature.
+## 2026-03-20 16:34 PDT — RunPod H100 warmdown trial (`INT4_STEP=2`, `WARMDOWN_ITERS=600`) completed invalid but under 1.2244 frontier
+
+### Material update
+- Executed frontier follow-up run `20260320T223000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750wd600` (experiment id `20260320T225636Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750wd600`) on primary RunPod lane.
+- Final summary from `logs/experiments/20260320T225636Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750wd600.json`:
+  - status: `invalid` (`bytes_total=16,711,626`)
+  - `exact_final_val_bpb=1.22349377`
+  - `pre_quant_val_bpb=1.2537`
+  - `final_val_loss=2.06581816`
+  - `step_stop=3565`
+  - `wallclock_seconds=2192.293312`
+- Result trend: this explicit warmdown run underperformed the earlier step2 non-warmdown frontier (`1.22371257` exact, invalid by 666k bytes) and remains above the best valid frontier score; no clear gain from `WARMDOWN_ITERS=600` in this direction.
+
+### Logging and state
+- Synced new artifacts and updated `results/results.tsv`:
+  - `logs/20260320T223000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750wd600.txt`
+  - `logs/launch_20260320T223000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750wd600.out`
+  - `logs/experiments/20260320T225636Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750wd600.{log,json,meta}`
+- Reconciled state via `python3 scripts/research_state.py reconcile --results-file results/results.tsv`; state now tracks this run as latest completed signature and marks `shouldRestart=true`.
