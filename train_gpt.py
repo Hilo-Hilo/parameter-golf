@@ -1282,9 +1282,11 @@ def main() -> None:
             dequantized = dequant_state.get(name)
             if dequantized is None or not isinstance(original, torch.Tensor) or not original.is_floating_point():
                 continue
-            diff = (original.detach().float().cpu() - dequantized.float()).abs()
+            original_cpu = original.detach().float().to(dequantized.device)
+            dequantized = dequantized.float()
+            diff = (original_cpu - dequantized).abs()
             max_abs_err = max(max_abs_err, float(diff.max()))
-            ref = original.detach().float().abs().max()
+            ref = original_cpu.abs().max()
             if ref > 0:
                 max_rel_err = max(max_rel_err, float((diff / ref).max()))
         log0(f"quant_roundtrip_check max_abs_err:{max_abs_err:.6f} max_rel_err:{max_rel_err:.6f}")
