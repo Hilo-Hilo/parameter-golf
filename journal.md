@@ -2862,3 +2862,25 @@ Why this mattered:
 ### Outcome
 - Interpretation: `HEAD_LR=0.01` is better than baseline `HEAD_LR=0.008` was unknown but above frontier (`1.32345066`), and close to `MATRIX_LR=0.05` but still above best `1.31520169`.
 - Next immediate path (one-hypothesis): with `MATRIX_LR=0.05` still strongest, test whether increasing `SCALAR_LR` has similar effect before moving to larger architecture or DGX.
+
+## 2026-03-20 06:04 PDT — RunPod SCALAR_LR=0.08 logging + next probe path
+
+### Completed material run
+- `experiment_id`: `20260320T055706Z_runpod_h100_1gpu_l11_d496_uscalar08`
+- Track/hardware: `runpod_h100_1gpu`
+- Commanded changes: one-axis probe from `11x496` untied baseline with `SCALAR_LR=0.08`.
+- Commit: `52476a0ef480a222be3c57025b7c53dc3da79513` (same train script revision used in the active 11x496 untied branch)
+- Log: `/workspace/parameter-golf/logs/experiments/20260320T055706Z_runpod_h100_1gpu_l11_d496_uscalar08.json`
+- Result status: `keep`
+- `step_stop`: `1041`
+- `wallclock_seconds`: `600.321000`
+- `pre_quant_val_bpb`: `1.3241`
+- `exact_final_val_bpb`: `1.32553081`
+- `bytes_total`: `14557389`
+- `bytes_model`: `14509515`
+- `bytes_code`: `47874`
+
+### Outcome and interpretation
+- `SCALAR_LR=0.08` stayed near the neighborhood of other scalar-rate probes but did not beat the best optimizer-rate branch (`MATRIX_LR=0.05`, `1.32048871`).
+- This keeps current frontier unchanged at `1.31520169` (`11x496` untied with lower width).
+- Next one-hypothesis direction: continue one-axis probing within this branch with nearby scalar learning-rate points (`SCALAR_LR=0.06`) while keeping remote H100 lane as primary.
