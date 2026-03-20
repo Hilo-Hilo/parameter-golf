@@ -3188,3 +3188,25 @@ Why this mattered:
 ### Directional impact
 - The slope improved over both `int4_step=4` and untuned stride-1024 baselines, confirming that tighter sliding-window cadence (stride 256 / batch_seqs 32) plus all-block `int4_step=2` is a valid high-signal axis.
 - Immediate next hypothesis: test `INT4_STEP=1` on the same topology/eval settings before broadening architecture again, since this remains a compression-focused improvement path and is materially low-cost.
+
+## 2026-03-20T08:50:03Z — Compression frontier jump: INT4_STEP=1 with sliding-window eval
+
+### Run
+- Continued on RunPod H100 lane with immediate next low-hanging follow-up:
+  - `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1 --track runpod_h100 --trainer train_gpt.py --status keep --notes "int4-compression: all 11 layers int4_step=1 fp16_tied_embedding_export=1 verify exact with stride/batch tune" --eval-stride 256 --eval-batch-seqs 32 -- env NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=600 VERIFY_EXPORT_ROUNDTRIP=1 FP16_TIED_EMBEDDING_EXPORT=1 INT4_LAYERS="0,1,2,3,4,5,6,7,8,9,10" INT4_STEP=1 EVAL_STRIDE=256 EVAL_BATCH_SEQS=32 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Remote artifacts synced locally from `/workspace/parameter-golf/logs/experiments/20260320T085003Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4all1.{log,meta,json}`.
+
+### Result
+- Completed successfully with `exit_code=0` and pushed a keep row to local `results/results.tsv`.
+- Final exact metric:
+  - `exact_final_val_bpb=1.29896417` (new local best)
+  - `pre_quant_val_bpb=1.3275`
+  - `bytes_total=13493894`
+  - `step_stop=1186`
+  - `wallclock_seconds=772.590117`
+- This is a material improvement over the previous best `1.30962111` and keeps us on the compression-first lane.
+
+### Directional impact
+- `INT4_STEP=1` beat `INT4_STEP=2` under the same stride/batch/eval settings, so the next follow-up should continue this compression axis:
+  - test narrower quantization pressure variants (e.g., all layers `INT4_STEP=1` with `INT4_LAYERS` subsets on the same stride regime),
+  - only then move to other structural hypotheses if no additional monotonic gains appear.
