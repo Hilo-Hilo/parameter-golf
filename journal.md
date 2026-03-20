@@ -2358,3 +2358,51 @@ Why this mattered:
   - the `16,000,000`-byte total artifact cap
   - the published submission/evaluation spirit and constraints
   - readable, challenge-aligned script behavior rather than clever shortcuts that would risk disqualification
+
+## 2026-03-20 02:39 PDT — 11-layer depth ablation completed on full-data RunPod H100
+
+### Why this update
+- After `10x512` improved best score, the next single-variable hypothesis was to add one more transformer block (`NUM_LAYERS=11`) while keeping token budget, sequence length, and optimizer settings fixed.
+
+### Attempt details
+- Pod: `f5fbuhtz75bb5u` (`imaginative_tan_coyote`) — RunPod H100 SXM x1
+- Repository path: `/workspace/parameter-golf`
+- Command: `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_depth --track runpod_h100_1gpu --status keep --notes "single hypothesis: +2 layers (11x512) after 10x512 improvement" -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Overrides: `DATA_PATH=./data/datasets/fineweb10B_sp1024`, `TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model`, `VOCAB_SIZE=1024`, `MAX_WALLCLOCK_SECONDS=600`, `VAL_LOSS_EVERY=0`, `ITERATIONS=20000`, `TRAIN_BATCH_TOKENS=524288`, `TRAIN_SEQ_LEN=1024`, `NUM_LAYERS=11`
+
+### Results
+- experiment_id: `20260320T023839Z_runpod_h100_1gpu_l11_depth`
+- `step_stop`: `1076`
+- process wallclock: `731.579863` (reported by parse metadata)
+- `pre_quant_val_bpb`: `1.3311`
+- `exact_final_val_bpb`: `1.33252549`
+- bytes (total/code/model): `15285856` / `47874` / `15237982`
+- status: `keep`
+
+### Outcome
+- This continues the depth trajectory; `11x512` is better than 10-layer and 9-layer baselines observed so far (`1.33252549` vs `1.33772384` and `1.3447463`).
+- `NUM_LAYERS=11` still improves score but remains above the README `Naive Baseline` target (`1.2244`), so next steps should focus on additional quality gains (optimizer and architecture couplings) while maintaining 16MB cap.
+
+## 2026-03-20 02:39 PDT — 11-layer depth ablation completed on full-data RunPod H100
+
+### Why this update
+- After `10x512` improved best score, the next single-variable hypothesis was to add one more transformer block (`NUM_LAYERS=11`) while keeping token budget, sequence length, and optimizer settings fixed.
+
+### Attempt details
+- Pod: `f5fbuhtz75bb5u` (`imaginative_tan_coyote`) — RunPod H100 SXM x1
+- Repository path: `/workspace/parameter-golf`
+- Command: `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_depth --track runpod_h100_1gpu --status keep --notes "single hypothesis: +2 layers (11x512) after 10x512 improvement" -- torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Overrides: `DATA_PATH=./data/datasets/fineweb10B_sp1024`, `TOKENIZER_PATH=./data/tokenizers/fineweb_1024_bpe.model`, `VOCAB_SIZE=1024`, `MAX_WALLCLOCK_SECONDS=600`, `VAL_LOSS_EVERY=0`, `ITERATIONS=20000`, `TRAIN_BATCH_TOKENS=524288`, `TRAIN_SEQ_LEN=1024`, `NUM_LAYERS=11`
+
+### Results
+- experiment_id: `20260320T023839Z_runpod_h100_1gpu_l11_depth`
+- `step_stop`: `1076`
+- process wallclock: `731.579863` (reported by parse metadata)
+- `pre_quant_val_bpb`: `1.3311`
+- `exact_final_val_bpb`: `1.33252549`
+- bytes (total/code/model): `15285856` / `47874` / `15237982`
+- status: `keep`
+
+### Outcome
+- This continues the depth trajectory; `11x512` is better than 10-layer and 9-layer baselines observed so far (`1.33252549` vs `1.33772384` and `1.3447463`).
+- `NUM_LAYERS=11` still improves score but remains above the README `Naive Baseline` target (`1.2244`), so next steps should focus on additional quality gains (optimizer and architecture couplings) while maintaining 16MB cap.
