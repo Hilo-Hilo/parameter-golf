@@ -63,6 +63,10 @@ class Hyperparameters:
     max_wallclock_seconds = float(os.environ.get("MAX_WALLCLOCK_SECONDS", 600.0))
     qk_gain_init = float(os.environ.get("QK_GAIN_INIT", 1.5))
     disable_compile = bool(int(os.environ.get("DISABLE_COMPILE", "0")))
+    fp16_tied_embedding_export = bool(int(os.environ.get("FP16_TIED_EMBEDDING_EXPORT", "0")))
+    int4_layers = os.environ.get("INT4_LAYERS", "")
+    int4_step = int(os.environ.get("INT4_STEP", 4))
+    verify_export_roundtrip = bool(int(os.environ.get("VERIFY_EXPORT_ROUNDTRIP", "0")))
 
     # Model shape.
     vocab_size = int(os.environ.get("VOCAB_SIZE", 1024))
@@ -425,7 +429,8 @@ def keep_float_tensor(name: str, t: Tensor, passthrough_orig_dtypes: dict[str, s
         return t.to(dtype=INT8_KEEP_FLOAT_STORE_DTYPE).contiguous()
     return t
 
-def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
+def quantize_float_tensor(t: Tensor, bits: int = 8) -> tuple[Tensor, Tensor]:
+    max_val = 127 if bits == 8 else (2 ** (bits - 1)) - 1  # int6: 31, int8: 127
     t32 = t.float()
     if t32.ndim == 2:
         # Matrices get one scale per row, which usually tracks output-channel
@@ -436,17 +441,45 @@ def quantize_float_tensor(t: Tensor) -> tuple[Tensor, Tensor]:
             else torch.empty((t32.shape[0],), dtype=torch.float32)
         )
         clipped = torch.maximum(torch.minimum(t32, clip_abs[:, None]), -clip_abs[:, None])
-        scale = (clip_abs / 127.0).clamp_min(1.0 / 127.0)
-        q = torch.clamp(torch.round(clipped / scale[:, None]), -127, 127).to(torch.int8).contiguous()
+        scale = (clip_abs / float(max_val)).clamp_min(1.0 / float(max_val))
+        q = torch.clamp(torch.round(clipped / scale[:, None]), -max_val, max_val).to(torch.int8).contiguous()
         return q, scale.to(dtype=INT8_PER_ROW_SCALE_DTYPE).contiguous()
 
     # Vectors / scalars use a simpler per-tensor scale.
     clip_abs = float(torch.quantile(t32.abs().flatten(), INT8_CLIP_Q).item()) if t32.numel() else 0.0
-    scale = torch.tensor(clip_abs / 127.0 if clip_abs > 0 else 1.0, dtype=torch.float32)
-    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -127, 127).to(torch.int8).contiguous()
+    scale = torch.tensor(clip_abs / float(max_val) if clip_abs > 0 else 1.0, dtype=torch.float32)
+    q = torch.clamp(torch.round(torch.clamp(t32, -clip_abs, clip_abs) / scale), -max_val, max_val).to(torch.int8).contiguous()
     return q, scale
 
-def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
+
+def _parse_int_set(raw: str) -> set[int]:
+    out: set[int] = set()
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            out.add(int(token))
+        except ValueError:
+            continue
+    return out
+
+
+def _param_to_block_index(name: str) -> int:
+    if not name.startswith("blocks."):
+        return -1
+    try:
+        return int(name.split("blocks.", 1)[1].split(".", 1)[0])
+    except (IndexError, ValueError):
+        return -1
+
+
+def quantize_state_dict_int8(
+    state_dict: dict[str, Tensor],
+    fp16_tied_embedding: bool = False,
+    int4_layers: set[int] | None = None,
+    int4_step: int = 1,
+):
     # Single supported clean-script export format:
     # - per-row int8 for 2D float tensors
     # - per-tensor int8 for other float tensors
@@ -475,6 +508,13 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             stats["int8_payload_bytes"] += tensor_nbytes(t)
             continue
 
+        if fp16_tied_embedding and name == "tok_emb.weight":
+            kept = t.to(dtype=torch.float16).contiguous()
+            passthrough[name] = kept
+            passthrough_orig_dtypes[name] = str(t.dtype).removeprefix("torch.")
+            stats["int8_payload_bytes"] += tensor_nbytes(kept)
+            continue
+
         # Small float tensors are cheap enough to keep directly. We still downcast
         # fp32/bf16 passthrough tensors to fp16 so metadata does not dominate size.
         if t.numel() <= INT8_KEEP_FLOAT_MAX_NUMEL:
@@ -484,7 +524,11 @@ def quantize_state_dict_int8(state_dict: dict[str, Tensor]):
             continue
 
         stats["num_float_tensors"] += 1
-        q, s = quantize_float_tensor(t)
+        is_low_precision_layer = bool(int4_layers and _param_to_block_index(name) in int4_layers)
+        q, s = quantize_float_tensor(t, bits=8)
+        if is_low_precision_layer and int4_step > 1:
+            step = max(int(int4_step), 1)
+            q = torch.clamp((q.float() / float(step)).round() * float(step), -127, 127).to(torch.int8).contiguous()
         if s.ndim > 0:
             qmeta[name] = {"scheme": "per_row", "axis": 0}
         quantized[name] = q
@@ -1193,7 +1237,21 @@ def main() -> None:
         log0(f"Code size: {code_bytes} bytes")
         log0(f"Total submission size: {model_bytes + code_bytes} bytes")
 
-    quant_obj, quant_stats = quantize_state_dict_int8(base_model.state_dict())
+    export_state = dict(base_model.state_dict())
+    int4_layer_set = _parse_int_set(args.int4_layers)
+    if master_process:
+        log0(
+            "quantization: "
+            f"fp16_tied_embedding_export={args.fp16_tied_embedding_export} "
+            f"int4_layers={sorted(int4_layer_set)} "
+            f"int4_step={args.int4_step}"
+        )
+    quant_obj, quant_stats = quantize_state_dict_int8(
+        export_state,
+        fp16_tied_embedding=args.fp16_tied_embedding_export,
+        int4_layers=int4_layer_set,
+        int4_step=args.int4_step,
+    )
     quant_buf = io.BytesIO()
     torch.save(quant_obj, quant_buf)
     quant_raw = quant_buf.getvalue()
@@ -1216,7 +1274,21 @@ def main() -> None:
     with open("final_model.int8.ptz", "rb") as f:
         quant_blob_disk = f.read()
     quant_state = torch.load(io.BytesIO(zlib.decompress(quant_blob_disk)), map_location="cpu")
-    base_model.load_state_dict(dequantize_state_dict_int8(quant_state), strict=True)
+    dequant_state = dequantize_state_dict_int8(quant_state)
+    if args.verify_export_roundtrip:
+        max_abs_err = 0.0
+        max_rel_err = 0.0
+        for name, original in export_state.items():
+            dequantized = dequant_state.get(name)
+            if dequantized is None or not isinstance(original, torch.Tensor) or not original.is_floating_point():
+                continue
+            diff = (original.detach().float().cpu() - dequantized.float()).abs()
+            max_abs_err = max(max_abs_err, float(diff.max()))
+            ref = original.detach().float().abs().max()
+            if ref > 0:
+                max_rel_err = max(max_rel_err, float((diff / ref).max()))
+        log0(f"quant_roundtrip_check max_abs_err:{max_abs_err:.6f} max_rel_err:{max_rel_err:.6f}")
+    base_model.load_state_dict(dequant_state, strict=True)
     torch.cuda.synchronize()
     t_qeval = time.perf_counter()
     if args.eval_stride > 0:

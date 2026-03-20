@@ -2962,3 +2962,38 @@ Why this mattered:
 - `MATRIX_LR=0.06` on this branch improved materially over most scalar variants but did not beat the `MATRIX_LR=0.05` best at `1.32048871`.
 - Best frontier remains `1.32048871` (`runpod_h100_1gpu_l11_d496_umatrix05`).
 - Next one-hypothesis direction: test a nearby structural/optimizer axis on top of `11x496` untied, rather than widening the scalar matrix sweep.
+
+## 2026-03-19 23:52 PDT — Landed low-hanging-fruit change: precision-aware export/compression on working branch
+
+### Directional change
+- I stopped leaving the export/compression work stranded in a draft worktree and landed it directly onto `research/continuous-mar18` as the second low-hanging-fruit implementation.
+
+### Why this changed now
+- Hanson explicitly said to pivot immediately to the low-hanging fruits.
+- Fresh upstream evidence showed that export/compression is a larger lever than continuing tiny LR sweeps.
+
+### Evidence / citations
+- Explicit Hanson steering in chat: pivot immediately to the low-hanging fruits.
+- Upstream record citations:
+  - `records/track_10min_16mb/2026-03-19_10L_MixedPrecision/README.md`
+  - `records/track_10min_16mb/2026-03-19_WarmdownQuantization/README.md`
+  - `records/track_10min_16mb/2026-03-19_SlidingWindow_FP16Emb_10L_MuonWD_OvertoneInit/README.md`
+- Key upstream lesson: smarter packing/precision allocation is one of the main public reasons upstream is far ahead of our vanilla int8 export path.
+
+### What was landed
+- Added export controls:
+  - `FP16_TIED_EMBEDDING_EXPORT`
+  - `INT4_LAYERS`
+  - `INT4_STEP`
+  - `VERIFY_EXPORT_ROUNDTRIP`
+- Added optional fp16 passthrough for `tok_emb.weight` in the export payload.
+- Added selective lower-precision snapping for chosen block layers in the compressed export path.
+- Added explicit quantization config logging and optional roundtrip verification metrics.
+- Preserved canonical final logging (`final_int8_zlib_roundtrip` and `final_int8_zlib_roundtrip_exact`).
+
+### Validation
+- Local compile check passed for:
+  - `train_gpt.py`
+  - `scripts/parse_train_log.py`
+  - `scripts/smoke_sliding_eval.py`
+- No live DGX process was touched.
