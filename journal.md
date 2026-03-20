@@ -3145,3 +3145,23 @@ Why this mattered:
 ### Directional impact
 - Exact roundtrip export path is now end-to-end healthy again after the earlier GPU-side `VERIFY_EXPORT_ROUNDTRIP` crash.
 - Result remains above 1.0, so next work should continue precision-aware compression sweeps (int4/expression-level knobs) as directed by current priority before additional shape/curve sweeps.
+
+## 2026-03-20T07:52:33Z — Compression sweep: all-block int4_step=4 on RunPod
+
+### Run
+- Continued on primary RunPod pod `imaginative_tan_coyote` (`f5fbuhtz75bb5u`) with verify/eval path:
+  - `scripts/run_experiment.sh --name runpod_h100_1gpu_l11_d496_untied_verify_int4all4 --track runpod_h100 --trainer train_gpt.py --status keep --notes "int4-compression: all 11 layers int4_step=4 fp16_tied_embedding_export=1 verify roundtrip exact" -- env NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0 MAX_WALLCLOCK_SECONDS=600 VERIFY_EXPORT_ROUNDTRIP=1 FP16_TIED_EMBEDDING_EXPORT=1 INT4_LAYERS="0,1,2,3,4,5,6,7,8,9,10" INT4_STEP=4 EVAL_STRIDE=1024 EVAL_BATCH_SEQS=32 torchrun --standalone --nproc_per_node=1 train_gpt.py`
+
+### Result
+- Completed with `exit_code=0`; summary JSON at `/workspace/parameter-golf/logs/experiments/20260320T075233Z_runpod_h100_1gpu_l11_d496_untied_verify_int4all4.json`.
+- Final `results/results.tsv` row:
+  - experiment: `20260320T075233Z_runpod_h100_1gpu_l11_d496_untied_verify_int4all4`
+  - `exact_final_val_bpb=1.32846427`
+  - `pre_quant_val_bpb=1.3135`
+  - `bytes_total=11419963`
+  - `wallclock_seconds=776.502659`
+  - `step_stop=1155`
+
+### Learnings
+- All-layer int4 at `int4_step=4` plus fp16 tied embeddings was too lossy on this lane, worse than baseline keep run with no int4 (`1.31193434`).
+- Next compression hypotheses should reduce quant pressure (subset layers, lower step, alternative precision settings) before additional architecture sweeps.
