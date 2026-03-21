@@ -4377,3 +4377,25 @@ Why this mattered:
 - Completed local sync for `20260321T174256Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0029` from `pg-worker-repl2` (H100).
 - Final exact metric: `exact_final_val_bpb=1.23365113`, `final_val_loss=2.08296845`, `pre_quant_val_bpb=1.2606`, `step_stop=3343`, `wallclock_seconds=1973.308374`, `bytes_total=12790814`.
 - Interpretation: this is a small improvement over prior `mwd0028` (`1.23473342`) and on-par with `mwd0023` class (`~1.2266` remains best), suggesting fp16 tied export default helps a bit relative to `FP16_TIED_EMBEDDING_EXPORT=0` for this layer schedule.
+
+## 2026-03-21 11:18 PDT — Launched RunPod frontier run mwd0030
+- Started `20260321T181813Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0030` on `pg-worker-repl2` (H100) with `MUON_WEIGHT_DECAY=0.0025`.
+- Configuration kept from best candidate: `INT4_LAYERS=0..6`, `INT4_STEP=4`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=80`, default `FP16_TIED_EMBEDDING_EXPORT`.
+- Purpose: test sensitivity of muon decay while holding quantization/export frontier conditions constant.
+
+## 2026-03-21 11:53 PDT — Completed RunPod frontier run mwd0030
+- Completed `20260321T181813Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0030` on `pg-worker-repl2` (H100), the active primary RunPod lane.
+- Configuration retained from prior frontier conditions with updated muon decay control: `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=80`, `INT4_LAYERS=0..6`, `INT4_STEP=4`, `MUON_WEIGHT_DECAY=0.0025`, default fp16 tied embedding export.
+- Final exact roundtrip metrics:
+  - `exact_final_val_bpb=1.23117214`
+  - `pre_quant_val_bpb=1.2588`
+  - `final_val_loss=2.07878277`
+  - `pre_quant_val_loss=2.1255`
+  - `step_stop=3442`
+  - `wallclock_seconds=1972.459778`
+  - `bytes_model=12,776,717`
+  - `bytes_total=12,835,389`
+- Status decision: `discard` (a modest improvement over `mwd0029` `1.23365113` but still worse than best frontier `1.22658554` and far from `<1.0` target).
+- Retained local artifacts:
+  - `logs/experiments/20260321T181813Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0030.{log,json,meta}`
+- Next step: with run complete and lane still warm, continue precision-aware control sweeps around this manifold (muon decay + warmdown coupling) rather than reverting to broad layer-width/int4-coverage sweeps.
