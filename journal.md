@@ -4170,3 +4170,25 @@ Why this mattered:
 ### Next direction
 - Maintain frontier focus on eval/export mechanics before broad architecture sweeps.
 - Since increasing eval batch did not beat `1.22501069`, next useful tests are to vary `EVAL_BATCH_SEQS` near 48/80 and validate serialization/roundtrip settings for any byte or metric headroom.
+
+## 2026-03-21 03:19 PDT — RunPod eval-throughput sweep improved sliding eval behavior without frontier breakthrough
+
+### Material update
+- Completed `20260321T104353Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_bs80_int4l9s3wc1750_mwd0015` on `pg-worker-repl2`.
+- Synced artifacts:
+  - `logs/experiments/20260321T104353Z_runpod_...mwd0015.{log,json,meta}`
+- Final metrics:
+  - `exact_final_val_bpb=1.22604146` (best so far among this eval-batch sweep)
+  - `pre_quant_val_bpb=1.2561`
+  - `step_stop=3140`
+  - `bytes_total=15,730,147`
+  - `wallclock_seconds=1750.216`
+  - `final_eval_mode:sliding_window stride=256 batch_seqs=80`
+- Interpretation:
+  - Non-breakthrough vs best frontier `1.22501069` (mwd0003), but confirms eval throughput increases can add ~0.00069 improvement over baseline b/w batch32 and batch64 within this frontier family.
+- Ledger updates and state:
+  - Appended to `results/results.tsv`.
+  - Reconciled with `python3 scripts/research_state.py reconcile --results-file results/results.tsv`.
+
+### Next direction
+- Next frontier candidate: keep `EVAL_BATCH_SEQS=80` and test higher `WARMDOWN_ITERS`/alternate `MUON_WEIGHT_DECAY` combinations only if no stronger compression lever is found from export settings, since exact bpb has not crossed `1.225` yet.
