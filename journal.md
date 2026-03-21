@@ -4367,3 +4367,13 @@ Why this mattered:
 - Local artifacts copied: log/json/meta under `logs/experiments/` and corresponding results row appended to `results/results.tsv`.
 - Final exact metric: `exact_final_val_bpb=1.23473342`, `final_val_loss=2.08479584`, `step_stop=3346`, `wallclock_seconds=1988.804799`, `bytes_total=12395071` (within cap).
 - Compare: this is worse than the best local frontier (`1.224...`/`1.223...`) and not an improvement; confirms adding layer 7 at step4 with `FP16_TIED_EMBEDDING_EXPORT=0` did not improve over `mwd0023`/`mwd0027`.
+
+## 2026-03-21 10:42 PDT — Launched RunPod frontier run mwd0029
+- Started `20260321T174256Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0029` on `pg-worker-repl2` (H100).
+- Configuration: `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=80`, `INT4_LAYERS=0..6`, `INT4_STEP=4`, `MUON_WEIGHT_DECAY=0.003`, default `FP16_TIED_EMBEDDING_EXPORT=1`.
+- Purpose: isolate export-precision effect relative to `mwd0027/0028` while keeping frontier quantization schedule fixed.
+
+## 2026-03-21 10:42 PDT — Completed RunPod frontier run mwd0029
+- Completed local sync for `20260321T174256Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0029` from `pg-worker-repl2` (H100).
+- Final exact metric: `exact_final_val_bpb=1.23365113`, `final_val_loss=2.08296845`, `pre_quant_val_bpb=1.2606`, `step_stop=3343`, `wallclock_seconds=1973.308374`, `bytes_total=12790814`.
+- Interpretation: this is a small improvement over prior `mwd0028` (`1.23473342`) and on-par with `mwd0023` class (`~1.2266` remains best), suggesting fp16 tied export default helps a bit relative to `FP16_TIED_EMBEDDING_EXPORT=0` for this layer schedule.
