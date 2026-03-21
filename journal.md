@@ -3950,3 +3950,39 @@ Why this mattered:
 ### Interpretation and next direction
 - This run did not beat the best frontier run (`mwd0003`, `1.22501069`) and remains a non-improvement.
 - The 0.0028 sample sits between stronger and weaker muon-weight values but still tracks the same valley side; next frontier continuation should step outside this interval or hold muon at `0.003` and test orthogonal knobs (e.g., batch/warpdown interactions) before changing precision topology.
+
+## 2026-03-20 22:25 PDT — Precision frontier continuation at WD1750 with muon_decay=0.0035 launched
+
+### Material update
+- Launched `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0007` on the primary RunPod H100 lane (`imaginative_tan_coyote`) with:
+  - `INT4_LAYERS=0,1,2,3,4,5,6,7,8`
+  - `INT4_STEP=3`
+  - `MUON_WEIGHT_DECAY=0.0035`
+  - `MAX_WALLCLOCK_SECONDS=1750`
+  - `EVAL_STRIDE=256`
+  - `EVAL_BATCH_SEQS=32`
+  - sliding-window exact eval and export verification enabled
+- Initial artifacts:
+  - `logs/experiments/20260321T052546Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0007.{log,meta}`
+  - `logs/20260321T052546Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0007.txt`
+
+## 2026-03-20 22:06 PDT — Precision frontier continuation at WD1750 with muon_decay=0.0035 completed (keep, non-improvement)
+
+### Material update
+- Completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0007` on the primary RunPod H100 lane.
+- Final metrics from `logs/experiments/20260321T052546Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0007.json`:
+  - `exact_final_val_bpb=1.22647723`
+  - `pre_quant_val_bpb=1.2565`
+  - `final_val_loss=2.07085561`
+  - `bytes_total=15,684,688` (`bytes_model=15,626,016`)
+  - `wallclock_seconds=2193.707946`, `step_stop=3128`
+- Command context: `INT4_LAYERS=0,1,2,3,4,5,6,7,8`, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.0035`, `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, verify roundtrip export on, fp16 tied embedding export on.
+- Synced artifacts:
+  - `logs/experiments/20260321T052546Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0007.{log,json,meta}`
+  - `logs/20260321T052546Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0007.txt`
+- Reconciled state:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Interpretation and next direction
+- Still non-improving vs best frontier run (`mwd0003`, `1.22501069`).
+- Remaining samples in this tiny muon window (`0.0025`, `0.0028`, `0.0035`) are all above best; next step should be moving to orthogonal controls (e.g., warmdown/quantization layout) while preserving `INT4_STEP=3` and sliding-window exact eval.
