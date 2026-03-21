@@ -4346,3 +4346,24 @@ Why this mattered:
 
 ### Next direction
 - Keep RunPod as primary lane; next tests should pivot from broader int4 coverage sweeps toward warmdown-schedule and precision-aware export/compression interactions.
+
+## 2026-03-21 08:31 PDT — RunPod main lane: completed wd1800 mwd0027 frontier run (discard)
+
+## 2026-03-21 10:08 PDT — Launched RunPod frontier control run mwd0028
+- Started a new RunPod main-lane experiment on `pg-worker-repl2` (H100): `20260321T170854Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l7s4wc1750_mwd0028`.
+- Configuration: `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=80`, `INT4_LAYERS=0..7`, `INT4_STEP=4`, `MUON_WEIGHT_DECAY=0.003`, `FP16_TIED_EMBEDDING_EXPORT=0`.
+- Run is now active (`run_experiment.sh` wrapper, track `runpod_h100`, status request `discard`) as the next focused low-hanging-fruit probe on precision-aware int4 coverage.
+- Pulled completed RunPod H100 artifacts from `pg-worker-repl2` for run `20260321T163133Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_wd1800_mwd0027`.
+- Synced files into local `logs/experiments/`:
+  - `20260321T163133Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_wd1800_mwd0027.json`
+  - `20260321T163133Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_wd1800_mwd0027.log`
+  - `20260321T163133Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_wd1800_mwd0027.meta`
+- Appended local result row to `results/results.tsv` for this run (`exact_final_val_bpb=1.2350572`, `bytes_total=12655367`, `status=discard`).
+- Run details: hardware `pg-worker-repl2` (H100), elapsed `1974.53s`, `step_stop=3243`, `INT4_LAYERS=0..6` `INT4_STEP=4` `EVAL_STRIDE=256` `WARMDOWN_ITERS=1800` `MAX_WALLCLOCK_SECONDS=1750`.
+- Interpretation: result remains above frontier (`1.226...` best) and above `<1.0`; no score improvement this lane but confirms `wd1800` with step4 not beneficial.
+
+## 2026-03-21 10:08 PDT — Completed RunPod frontier control run mwd0028
+- Completed synced local artifacts for `20260321T170854Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l7s4wc1750_mwd0028` from `pg-worker-repl2` (H100).
+- Local artifacts copied: log/json/meta under `logs/experiments/` and corresponding results row appended to `results/results.tsv`.
+- Final exact metric: `exact_final_val_bpb=1.23473342`, `final_val_loss=2.08479584`, `step_stop=3346`, `wallclock_seconds=1988.804799`, `bytes_total=12395071` (within cap).
+- Compare: this is worse than the best local frontier (`1.224...`/`1.223...`) and not an improvement; confirms adding layer 7 at step4 with `FP16_TIED_EMBEDDING_EXPORT=0` did not improve over `mwd0023`/`mwd0027`.
