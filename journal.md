@@ -3795,3 +3795,101 @@ Why this mattered:
   - pod: `tremendous_crimson_marmoset`
   - id: `on39in84tsc1nq`
 - Left the active main RunPod lane untouched.
+## 2026-03-20 18:54 PDT — RunPod frontier step3 int4 run with muon decay 0.005 completed (keep)
+
+### Material update
+- Launched and completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0005` on the primary RunPod H100 lane (`imaginative_tan_coyote`).
+- Final metrics from `logs/experiments/20260321T005451Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0005.json`:
+  - `exact_final_val_bpb=1.22568755`
+  - `pre_quant_val_bpb=1.2558`
+  - `final_val_loss=2.06952227`
+  - `bytes_total=15,560,642`
+  - `bytes_model=15,501,970`
+  - `wallclock_seconds=2196.882031`
+  - `step_stop=3110`
+- Notes/command: int4 layers `0-8`, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.005`, `MAX_WALLCLOCK_SECONDS=1750`, sliding exact eval `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, roundtrip export verification enabled, fp16 tied embedding export enabled.
+- Result status: `keep` (below byte cap, above intermediate 1.2244 checkpoint).
+
+### Operational effect
+- Synced experiment artifacts from pod:
+  - `logs/experiments/20260321T005451Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0005.{log,meta,json}`
+- Updated `results/results.tsv` with this run row and reconciled durable state:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+- Directional interpretation: this run is a small keep improvement over the 0.01 weight-decay frontier attempt, so next move is warmdown-parameter exploration at same quantization frontier before architecture/bit-width changes.
+## 2026-03-20 18:32 PDT — RunPod warmdown-600 frontier test completed (keep, non-improvement)
+
+### Material update
+- Launched and completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_wd600` on the live RunPod H100 lane (`imaginative_tan_coyote`).
+- Final metrics from `logs/experiments/20260321T013200Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_wd600.json`:
+  - `exact_final_val_bpb=1.23075207`
+  - `pre_quant_val_bpb=1.2609`
+  - `bytes_total=15,957,310`
+  - `bytes_model=15,898,638`
+  - `wallclock_seconds=2197.800347`
+  - `step_stop=3004`
+- Command details: int4 layers `0-8`, `INT4_STEP=3`, `WARMDOWN_ITERS=600`, `MAX_WALLCLOCK_SECONDS=1750`, sliding exact eval `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, roundtrip verification enabled, fp16 tied embedding export enabled.
+- Result status: `keep` (within cap, but above frontier best).
+
+### Interpretation and next direction
+- This is slightly worse than the best frontier keep from recent steps (`1.22516369` at same quantization frontier without explicit warmdown setting) and does not move closer to the `<1.0` target.
+- Next practical direction remains warmdown/optimizer scheduling without increasing quantization coverage first (to avoid repeated dead-end scans):
+  - consider alternative warmdown values and/or optimizer hyper-parameters before changing quantization geometry again.
+## 2026-03-20 19:08 PDT — Precision frontier continuation at WD1750 with muon_decay=0.001 completed (keep, non-improvement)
+
+### Material update
+- Launched and completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0010` on the primary RunPod H100 lane (`imaginative_tan_coyote`, host `f5fbuhtz75bb5u`).
+- Final metrics from `logs/experiments/20260321T020859Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0010.json`:
+  - `exact_final_val_bpb=1.22773645`
+  - `pre_quant_val_bpb=1.2578`
+  - `final_val_loss=2.07298174`
+  - `bytes_total=15,852,562` (`bytes_model=15,793,890`)
+  - `wallclock_seconds=2193.908782`, `step_stop=3121`
+- Command context: `INT4_LAYERS=0,1,2,3,4,5,6,7,8`, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.001`, `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, verify roundtrip export on, fp16 tied embedding export on.
+- Synced artifacts from pod:
+  - `logs/experiments/20260321T020859Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0010.{log,meta,json}`
+  - `logs/20260321T020859Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0010.txt`
+
+### Interpretation and next direction
+- Result remains a small `keep` (below 16,000,000-byte cap) but is worse than the best frontier point so far (`1.22568755` at `mwd0005`).
+- This run indicates `MUON_WEIGHT_DECAY` at `0.001` is a non-useful continuation at this exact quantization frontier, so next action is to explore other schedule/compression levers before altering layer/bit-width topology.
+- Reconciled research state and results after ingesting this run:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+## 2026-03-20 19:55 PDT — Precision frontier continuation at WD1750 with muon_decay=0.003 improved frontier (keep)
+
+### Material update
+- Launched and completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0003` on the primary RunPod H100 lane (`imaginative_tan_coyote`, host `f5fbuhtz75bb5u`).
+- Final metrics from `logs/experiments/20260321T025500Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0003.json`:
+  - `exact_final_val_bpb=1.22501069`
+  - `pre_quant_val_bpb=1.2551`
+  - `final_val_loss=2.06837942`
+  - `bytes_total=15,754,075` (`bytes_model=15,695,403`)
+  - `wallclock_seconds=2193.640394`, `step_stop=3216`
+- Command context: `INT4_LAYERS=0,1,2,3,4,5,6,7,8`, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.003`, `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, verify roundtrip export on, fp16 tied embedding export on.
+- Synced artifacts from pod:
+  - `logs/experiments/20260321T025500Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0003.{log,json,meta}`
+  - `logs/20260321T025500Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0003.txt`
+
+### Interpretation and next direction
+- This is a frontier-side improvement (better exact final `val_bpb` than `mwd0005` at 1.22568755), but still above the `1.2244` Naive Baseline checkpoint and far above `<1.0` target.
+- Next action is to continue quantization-aware schedule sweeps around this low-loss region before altering layer coverage:
+  - keep `INT4_STEP=3` on 9 layers, vary `MUON_WEIGHT_DECAY` and potentially `WARMDOWN_ITERS` in small steps.
+- Reconciled research state after ingesting this run:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+## 2026-03-20 20:32 PDT — Precision frontier continuation at WD1750 with muon_decay=0.004 completed (keep, non-improvement)
+
+### Material update
+- Launched and completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0004` on the primary RunPod H100 lane.
+- Final metrics from `logs/experiments/20260321T033259Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0004.json`:
+  - `exact_final_val_bpb=1.22603290`
+  - `pre_quant_val_bpb=1.2561`
+  - `final_val_loss=2.07010539`
+  - `bytes_total=15,643,891` (`bytes_model=15,585,219`)
+  - `wallclock_seconds=2195.247232`, `step_stop=3131`
+- Command context: `INT4_LAYERS=0,1,2,3,4,5,6,7,8`, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.004`, `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, verify roundtrip export on, fp16 tied embedding export on.
+- Synced artifacts from pod:
+  - `logs/experiments/20260321T033259Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0004.{log,json,meta}`
+  - `logs/20260321T033259Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0004.txt`
+
+### Interpretation and next direction
+- This run did not beat the best frontier point (`1.22501069` from `mwd0003`) and is therefore marked `keep` only for continuity.
+- Next plan remains near-frontier scheduling exploration and then either a fresh orthogonal axis (e.g., eval batch-seqs / warmdown) or architecture-independent quantization control, keeping sliding-window exact eval as the fixed backbone.
