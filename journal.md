@@ -4030,3 +4030,36 @@ Why this mattered:
 ### Interpretation
 - This run confirmed the same warmdown extension pattern with `MUON_WEIGHT_DECAY=0.0035` remains non-improving vs best frontier in this branch (`1.22501069` from `mwd0003`).
 - Interpretation from adjacent frontier points is that continued MUON-penalty adjustments around this interval have diminishing returns; next high-signal next direction should be orthogonal (e.g., evaluation batch/stride micro-controls, precision topology, or compression-aware warmdown shapes) while retaining `INT4_STEP=3` and the sliding-window exact eval backbone.
+## 2026-03-20 23:50 PDT — Precision frontier continuation at WD1750 with int4 layer-frontier + step3 + warmdown=600 completed
+
+### Material update
+- Completed `20260321T065046Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s3wc1750_mwd0009` on the primary RunPod H100 lane (remote host `f5fbuhtz75bb5u` in current wrapper logs).
+- Final metrics from `logs/experiments/20260321T065046Z_20260321T073800Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s3wc1750_mwd0009.json`:
+  - `exact_final_val_bpb=1.22853731`
+  - `pre_quant_val_bpb=1.2582`
+  - `final_val_loss=2.07433397`
+  - `bytes_total=15,180,872` (`bytes_model=15,122,200`)
+  - `wallclock_seconds=2194.656263`, `step_stop=3114`
+- Command context: `NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0` `INT4_LAYERS=0,1,2,3,4,5,6,7,8,9,10` `INT4_STEP=3` `MUON_WEIGHT_DECAY=0.0035` `WARMDOWN_ITERS=600` `MAX_WALLCLOCK_SECONDS=1750` `EVAL_STRIDE=256` `EVAL_BATCH_SEQS=32` `VERIFY_EXPORT_ROUNDTRIP=1` `FP16_TIED_EMBEDDING_EXPORT=1`.
+- Synced artifacts:
+  - `logs/experiments/20260321T065046Z_20260321T073800Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s3wc1750_mwd0009.{log,json,meta}`
+  - `logs/experiments/launcher_20260321T073800Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s3wc1750_mwd0009.launch.log`
+- Reconciled results/state after completion:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Interpretation
+- This run is a non-improvement versus the best frontier (`1.22501069` at `...mwd0003`) and shows that expanding quantized layers from 9 to 11 at `INT4_STEP=3` degrades both exact score and byte efficiency.
+- Next action: keep frontier pressure on compression geometry by trying `INT4_STEP=4` with all 11 layers and same warmdown/rolling regime.
+
+### Material update (launch)
+- Launched `20260321T074300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s4wc1750_mwd0010` on the same RunPod lane with:
+  - `INT4_LAYERS=0,1,2,3,4,5,6,7,8,9,10`
+  - `INT4_STEP=4`
+  - `MUON_WEIGHT_DECAY=0.0035`
+  - `WARMDOWN_ITERS=600`
+  - `MAX_WALLCLOCK_SECONDS=1750`
+  - `EVAL_STRIDE=256`
+  - `EVAL_BATCH_SEQS=32`
+  - verify roundtrip export + fp16 tied embedding export
+- Initial artifacts:
+  - `logs/experiments/20260321T074300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s4wc1750_mwd0010.{log,meta,txt}`
