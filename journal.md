@@ -4445,5 +4445,13 @@ Why this mattered:
 
 ## 2026-03-21 01:20 PDT — Launched RunPod frontier run mwd0033
 - Started `20260321T200602Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0033` on `pg-worker-repl2` (H100) as the primary RunPod continuation of the warmdown frontier sweep.
+
+## 2026-03-21 13:40 PDT — Control loop checkpoint: active frontier run still in-flight
+- Ran a fresh continuity check cycle with `python3 scripts/check_continuous_worker.py --research-state-file automation/state/research_state.json`; worker is healthy (`noop` action) and remains pid-alive.
+- Ran `python3 scripts/watchdog_tick.py`; no restart action was required and the active lane is still marked running.
+- Confirmed no local artifact sync yet for `mwd0033` (`logs/experiments` and `results/results.tsv` unchanged since `mwd0032` completion), so this run is still pending completion/roundtrip export.
+- Attempted direct SSH/`ls`/`pgrep` probes to `64.247.201.51` and access is currently blocked (`Permission denied`), so remote log-tail verification remains inaccessible from this environment.
+- Synced upstream refs (`git fetch --all --prune`) and compared `upstream/main` (`0f5145101cc5639ea9e93c39635251ce5922190a`) to branch head (`68e0fff...`); no upstream frontier-facing code delta relevant to RunPod experiment controls was observed.
+- Decision: continue waiting on the active `mwd0033` frontier run, then parse and append metrics immediately on completion; keep RunPod as primary lane per active hypothesis.
 - Command controls: `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=80`, `INT4_LAYERS=0..6`, `INT4_STEP=4`, `MUON_WEIGHT_DECAY=0.003`, `WARMDOWN_ITERS=2200`.
 - Run launched via detached remote wrapper; metrics pending capture.
