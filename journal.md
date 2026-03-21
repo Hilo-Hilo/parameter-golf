@@ -3929,3 +3929,24 @@ Why this mattered:
   - FP16 tied embedding export enabled
 - Remote artifacts prepped for immediate sync on completion:
   - `logs/experiments/20260321T044807Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc_..._mwd0006.{log,meta,txt}`
+
+## 2026-03-20 21:25 PDT — Precision frontier continuation at WD1750 with muon_decay=0.0028 completed (keep, non-improvement)
+
+### Material update
+- Completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0006` on the primary RunPod H100 lane.
+- Final metrics from `logs/experiments/20260321T044807Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0006.json`:
+  - `exact_final_val_bpb=1.22661448`
+  - `pre_quant_val_bpb=1.2567`
+  - `final_val_loss=2.07108736`
+  - `bytes_total=15,730,586` (`bytes_model=15,671,914`)
+  - `wallclock_seconds=2206.441872`, `step_stop=3119`
+- Command context: `INT4_LAYERS=0,1,2,3,4,5,6,7,8`, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.0028`, `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, verify roundtrip export on, fp16 tied embedding export on.
+- Synced artifacts:
+  - `logs/experiments/20260321T044807Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0006.{log,json,meta}`
+  - `logs/20260321T044807Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0006.txt`
+- Reconciled state:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Interpretation and next direction
+- This run did not beat the best frontier run (`mwd0003`, `1.22501069`) and remains a non-improvement.
+- The 0.0028 sample sits between stronger and weaker muon-weight values but still tracks the same valley side; next frontier continuation should step outside this interval or hold muon at `0.003` and test orthogonal knobs (e.g., batch/warpdown interactions) before changing precision topology.
