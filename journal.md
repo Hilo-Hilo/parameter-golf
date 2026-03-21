@@ -3741,3 +3741,38 @@ Why this mattered:
   - `logs/experiments/20260320T233427Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l8s2wc1750.{log,json,meta}`
   - `results/results.tsv`
 - Reconciled via `python3 scripts/research_state.py reconcile --results-file results/results.tsv` after row ingest.
+
+## 2026-03-20 17:28 PDT — Spare second lane replaced and PR236 job restarted on fresh H100
+
+### Directional change
+- Hanson explicitly instructed me to restart the stopped spare lane and start the second job.
+- The original spare pod `imaginative_tan_coyote` could not be resumed directly, so I provisioned a fresh H100 replacement from the same Parameter Golf template instead of leaving the second lane down.
+
+### Why this changed now
+- `imaginative_tan_coyote` showed as **not running** in RunPod and the old SSH endpoint was stale.
+- A second parallel H100 lane is still valuable for testing the PR #236 frontier approach.
+
+### Evidence / citations
+- Explicit Hanson steering in chat.
+- RunPod console evidence: original spare pod not running / resumable only via paid restart path, with stale SSH.
+- Upstream citation for the second job:
+  - `https://github.com/openai/parameter-golf/pull/236`
+  - branch: `saml212/sam/11L-int6-mlp3x-smear-swa`
+
+### Replacement lane steps taken
+- Provisioned fresh H100 pod from the Parameter Golf template:
+  - pod: `tremendous_crimson_marmoset`
+  - id: `on39in84tsc1nq`
+  - SSH: `root@213.181.105.235 -p 17873`
+- Recreated both repo checkouts:
+  - `/workspace/parameter-golf` on `research/continuous-mar18`
+  - `/workspace/pg-pr236` on PR #236 branch
+- Started a background bootstrap-and-run script on the fresh pod:
+  - `/workspace/start_pr236_lane.sh`
+- Current background state after launch:
+  - bootstrap PID `3107`
+  - cached FineWeb `sp1024` download running first
+  - then PR236 recipe will launch automatically
+
+### Current second-lane objective
+- Bring the PR #236 path back online on the fresh replacement H100 once data bootstrap completes.
