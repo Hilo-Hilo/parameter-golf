@@ -3986,3 +3986,47 @@ Why this mattered:
 ### Interpretation and next direction
 - Still non-improving vs best frontier run (`mwd0003`, `1.22501069`).
 - Remaining samples in this tiny muon window (`0.0025`, `0.0028`, `0.0035`) are all above best; next step should be moving to orthogonal controls (e.g., warmdown/quantization layout) while preserving `INT4_STEP=3` and sliding-window exact eval.
+
+## 2026-03-20 23:11 PDT — Precision frontier continuation at WD1750 with muon_decay=0.0035 and warmdown=600 launched
+
+### Material update
+- Launched `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0008` on the primary RunPod H100 lane with:
+  - `INT4_LAYERS=0,1,2,3,4,5,6,7,8`
+  - `INT4_STEP=3`
+  - `MUON_WEIGHT_DECAY=0.0035`
+  - `WARMDOWN_ITERS=600`
+  - `MAX_WALLCLOCK_SECONDS=1750`
+  - `EVAL_STRIDE=256`
+  - `EVAL_BATCH_SEQS=32`
+  - verify roundtrip export + fp16 tied embedding
+- Initial artifacts:
+  - `logs/experiments/20260321T061103Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0008.{log,meta}`
+
+## 2026-03-20 23:46 PDT — Precision frontier continuation at WD1750 with muon_decay=0.0035 + warmdown=600 completed
+
+### Material update
+- Completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0008` on the primary RunPod H100 lane (`imaginative_tan_coyote`, host `f5fbuhtz75bb5u`) using `train_gpt.py`.
+- Final metrics from `logs/experiments/20260321T061103Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0008.json`:
+  - `exact_final_val_bpb=1.22734251`
+  - `pre_quant_val_bpb=1.2576`
+  - `final_val_loss=2.0723166`
+  - `bytes_total=15,823,067` (`bytes_model=15,764,395`)
+  - `wallclock_seconds=2196.328332`, `step_stop=3182`
+- Command context:
+  - `INT4_LAYERS=0,1,2,3,4,5,6,7,8`
+  - `INT4_STEP=3`
+  - `MUON_WEIGHT_DECAY=0.0035`
+  - `WARMDOWN_ITERS=600`
+  - `MAX_WALLCLOCK_SECONDS=1750`
+  - `EVAL_STRIDE=256`
+  - `EVAL_BATCH_SEQS=32`
+  - `VERIFY_EXPORT_ROUNDTRIP=1`
+  - `FP16_TIED_EMBEDDING_EXPORT=1`
+- Synced artifacts:
+  - `logs/experiments/20260321T061103Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0008.{log,json,meta}`
+- Reconciled local results after completion:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Interpretation
+- This run confirmed the same warmdown extension pattern with `MUON_WEIGHT_DECAY=0.0035` remains non-improving vs best frontier in this branch (`1.22501069` from `mwd0003`).
+- Interpretation from adjacent frontier points is that continued MUON-penalty adjustments around this interval have diminishing returns; next high-signal next direction should be orthogonal (e.g., evaluation batch/stride micro-controls, precision topology, or compression-aware warmdown shapes) while retaining `INT4_STEP=3` and the sliding-window exact eval backbone.
