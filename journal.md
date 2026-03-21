@@ -3721,3 +3721,23 @@ Why this mattered:
 
 ### Operational effect
 - The worker prompt and live cron payload now explicitly tell the loop to chase the public upstream frontier aggressively while keeping RunPod as the main execution focus.
+## 2026-03-20 16:34 PDT — RunPod H100 8-layer int4 step2 run completed invalid
+
+### Material update
+- Completed `INT4_LAYERS=0-7` (8 layers), `INT4_STEP=2`, `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32` run `20260320T234000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l8s2wc1750` (experiment id `20260320T233427Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l8s2wc1750`).
+- Final metrics from `logs/experiments/20260320T233427Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l8s2wc1750.json`:
+  - `status: invalid`
+  - `exact_final_val_bpb=1.22714286`
+  - `pre_quant_val_bpb=1.2576`
+  - `bytes_total=16,863,477` (`bytes_model=16,804,805`)
+  - `wallclock_seconds=2195.712353`, `step_stop=3157`
+  - `val_loss=2.07197950`
+- Interpretation: this is also invalid (bytes still above cap). Compared with prior frontier attempts, it is worse than current best frontier candidate and does not improve final bpb.
+
+### Artifact and state update
+- Synced artifacts from pod and pulled updated `results/results.tsv`:
+  - `logs/20260320T234000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l8s2wc1750.txt`
+  - `logs/launch_20260320T234000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l8s2wc1750.out`
+  - `logs/experiments/20260320T233427Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l8s2wc1750.{log,json,meta}`
+  - `results/results.tsv`
+- Reconciled via `python3 scripts/research_state.py reconcile --results-file results/results.tsv` after row ingest.
