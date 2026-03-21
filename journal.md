@@ -4120,3 +4120,53 @@ Why this mattered:
 - Initial artifacts:
   - `logs/experiments/20260321T084957Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1800_int35_mwd0012.{log,meta}`
   - `logs/experiments/launcher_20260321T084956Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1800_int35_mwd0012.{out,pid}`
+## 2026-03-21 02:23 PDT — Frontier warmdown extension mwd0011->mwd0012 completed and frontier score worsened on RunPod H100
+
+### Material update
+- Completed remote RunPod experiment `20260321T084957Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1800_int35_mwd0012` on the live `f5fbuhtz75bb5u`/`imaginative_tan_coyote` H100 lane with sliding-window exact eval and export verification.
+- Command context from synced meta/log artifacts:
+  - `NUM_LAYERS=11`, `MODEL_DIM=496`, `TIE_EMBEDDINGS=0`
+  - `MAX_WALLCLOCK_SECONDS=1750`, `VERIFY_EXPORT_ROUNDTRIP=1`, `FP16_TIED_EMBEDDING_EXPORT=1`
+  - `INT4_LAYERS=0,1,2,3,4,5,6,7,8`, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.0035`, `WARMDOWN_ITERS=1800`
+  - `torchrun --standalone --nproc_per_node=1 train_gpt.py`
+- Logged artifacts synced locally and appended to the ledger:
+  - `logs/experiments/20260321T084957Z_runpod_...mwd0012.log`
+  - `logs/experiments/20260321T084957Z_runpod_...mwd0012.meta`
+  - `logs/experiments/20260321T084957Z_runpod_...mwd0012.json`
+- Results appended to `results/results.tsv`:
+  - `exact_final_val_bpb=1.22773451`
+  - `pre_quant_val_bpb=1.2576`
+  - `bytes_total=15476410` (`bytes_model=15417738`, `bytes_code=58672`)
+  - `wallclock_seconds=2193.257607`, `step_stop=3094`, status `keep`
+- Interpretation: non-improvement versus current best frontier `1.22501069` (`mwd0003`), so continuation remains on frontier-adjacent orthogonal schedules/compression axes.
+- State reconciliation run: `python3 scripts/research_state.py reconcile --results-file results/results.tsv`.
+
+## 2026-03-21 03:10 PDT — RunPod H100 frontier control experiments completed and eval throughput test added
+
+### Material update
+- Completed `20260321T092826Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0013` on `pg-worker-repl2` (main RunPod H100 lane) with the frontier geometry and `WARMDOWN_ITERS=1000`.
+  - Artifacts synced: `logs/experiments/20260321T092826Z_runpod_...mwd0013.{log,json,meta}`.
+  - Final metrics:
+    - `exact_final_val_bpb=1.22673114`
+    - `pre_quant_val_bpb=1.2568`
+    - `step_stop=3128`
+    - `bytes_total=15,769,049`
+    - `wallclock_seconds=1750.12`
+  - Interpretation: no improvement over frontier baseline (`1.22501069`, mwd0003), and slightly worse than earlier warmdown-free `mwd0007`.
+- Immediately launched and completed `20260321T100547Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_bs64_int4l9s3wc1750_mwd0014` as an eval-throughput test (increased `EVAL_BATCH_SEQS` from 32 to 64).
+  - Artifacts synced: `logs/experiments/20260321T100547Z_runpod_...mwd0014.{log,json,meta}`.
+  - Final metrics:
+    - `exact_final_val_bpb=1.22667724`
+    - `pre_quant_val_bpb=1.2567`
+    - `step_stop=3146`
+    - `bytes_total=15,738,200`
+    - `wallclock_seconds=1750.191`
+  - Interpretation: slight step/throughput gain from larger eval batch, but still no frontier improvement.
+- Ledger updates:
+  - Appended both runs to `results/results.tsv`.
+  - Reconciled state with:
+    - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Next direction
+- Maintain frontier focus on eval/export mechanics before broad architecture sweeps.
+- Since increasing eval batch did not beat `1.22501069`, next useful tests are to vary `EVAL_BATCH_SEQS` near 48/80 and validate serialization/roundtrip settings for any byte or metric headroom.
