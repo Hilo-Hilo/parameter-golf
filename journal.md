@@ -3893,3 +3893,39 @@ Why this mattered:
 ### Interpretation and next direction
 - This run did not beat the best frontier point (`1.22501069` from `mwd0003`) and is therefore marked `keep` only for continuity.
 - Next plan remains near-frontier scheduling exploration and then either a fresh orthogonal axis (e.g., eval batch-seqs / warmdown) or architecture-independent quantization control, keeping sliding-window exact eval as the fixed backbone.
+
+## 2026-03-20 20:11 PDT — Precision frontier continuation at WD1750 with muon_decay=0.0025 completed (keep, non-improvement)
+
+### Material update
+- Completed `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0025` on the primary RunPod H100 lane (`imaginative_tan_coyote`, host `f5fbuhtz75bb5u`).
+- Final metrics from `logs/experiments/20260321T041029Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0025.json`:
+  - `exact_final_val_bpb=1.22745689`
+  - `pre_quant_val_bpb=1.2575`
+  - `final_val_loss=2.07250973`
+  - `bytes_total=15,736,716` (`bytes_model=15,678,044`)
+  - `wallclock_seconds=2202.221225`, `step_stop=3077`
+- Command context: `INT4_LAYERS=0,1,2,3,4,5,6,7,8`, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.0025`, `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=32`, verify roundtrip export on, FP16_TIED_EMBEDDING_EXPORT=1.
+- Synced artifacts from pod:
+  - `logs/experiments/20260321T041029Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0025.{log,meta,json}`
+  - `logs/20260321T041029Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0025.txt`
+- Reconciled `research_state` after ingesting this run:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Interpretation
+- This is a non-improvement relative to the best frontier run (`mwd0003`, `1.22501069`).
+- Continue near-frontier scheduling sweeps at 9-layer/int4_step=3 before changing compression geometry.
+
+## 2026-03-20 20:48 PDT — Precision frontier continuation at WD1750 with muon_decay=0.0028 launched
+
+### Material update
+- Launched `runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0006` on the primary RunPod H100 lane (`imaginative_tan_coyote`) with:
+  - `INT4_LAYERS=0,1,2,3,4,5,6,7,8`
+  - `INT4_STEP=3`
+  - `MUON_WEIGHT_DECAY=0.0028`
+  - `MAX_WALLCLOCK_SECONDS=1750`
+  - `EVAL_STRIDE=256`
+  - `EVAL_BATCH_SEQS=32`
+  - verify roundtrip export enabled
+  - FP16 tied embedding export enabled
+- Remote artifacts prepped for immediate sync on completion:
+  - `logs/experiments/20260321T044807Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc_..._mwd0006.{log,meta,txt}`
