@@ -4262,3 +4262,38 @@ Why this mattered:
 ### Next direction
 - Continue with active RunPod lane, prioritizing compression-aware knobs (quantization coverage, step size, low-bit placement) to regain byte compliance while holding the `~1.2238` loss trajectory.
 - Keep sliding-window exact eval enabled and verify export roundtrip controls on each next candidate.
+
+## 2026-03-21 08:18 PDT — RunPod compression-control mwd0022/mwd0023 roundtrip-compliant frontier check
+
+### Material update
+- Completed `20260321T135925Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s3wc1750_mwd0022` by continuing the active RunPod compression lane and logged final status in the tracker.
+  - Artifacts retained:
+    - `results/` row and local copies of `logs/experiments/20260321T135925Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s3wc1750_mwd0022.{log,json,meta}`
+  - Final metrics:
+    - `exact_final_val_bpb=1.22657876`
+    - `pre_quant_val_bpb=1.2569`
+    - `bytes_total=16,030,526`
+    - `step_stop=3110`
+    - `wallclock_seconds=2186.386598`
+  - Interpretation: this run improved toward frontier compression control but remained `invalid` due byte cap.
+- Completed `20260321T144128Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0023` as the next compression-aware step (more aggressive `INT4_STEP=4` on the same 0-6 layer subset).
+  - Artifacts synced locally:
+    - `logs/experiments/20260321T144128Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0023.{log,json,meta}`
+  - Final metrics:
+    - `exact_final_val_bpb=1.22658554`
+    - `pre_quant_val_bpb=1.2561`
+    - `bytes_total=15,570,217`
+    - `bytes_model=15,511,545`
+    - `bytes_code=58,672`
+    - `step_stop=3165`
+    - `wallclock_seconds=2188.147336`
+    - `status=keep`
+  - Interpretation: increased `INT4_STEP` successfully restored compliance under the 16,000,000 byte cap, confirming `INT4_STEP` as an effective compression lever, but exact score still above `1.22501069` frontier best and above baseline target `1.2244`.
+- Evidence capture:
+  - Appended both runs (`mwd0022`, `mwd0023`) to `results/results.tsv`.
+  - Reconciled durable state with `python3 scripts/research_state.py reconcile --results-file results/results.tsv`.
+  - Final remote command completed without crashes on the H100 pod.
+
+### Next direction
+- Keep RunPod compression-aware path as default.
+- Test lower coverage/int4 placement and additional quantization stride interactions that can reduce bytes without additional exact-score drift, while holding mandatory sliding-window exact eval and export roundtrip validation fixed.
