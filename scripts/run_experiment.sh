@@ -12,6 +12,10 @@ Options:
   --trainer PATH        Trainer path or label. Default: train_gpt.py
   --status STATUS       Requested status for successful valid runs: keep|discard|invalid|crash
   --notes TEXT          Short free-form note.
+  --eval-stride N       Override EVAL_STRIDE env var for train_gpt.py.
+  --eval-batch-seqs N   Override EVAL_BATCH_SEQS env var for train_gpt.py.
+  --eval-seq-len N      Override EVAL_SEQ_LEN env var for train_gpt.py.
+  --muon-weight-decay N Override MUON_WEIGHT_DECAY env var for train_gpt.py.
   --submission PATH     Optional submission.json to merge into parsed metrics.
   --results PATH        Results TSV path. Default: results/results.tsv
   --log-dir PATH        Log directory. Default: logs/experiments
@@ -24,6 +28,10 @@ track="local"
 trainer="train_gpt.py"
 status="discard"
 notes=""
+eval_stride=""
+eval_batch_seqs=""
+eval_seq_len=""
+muon_weight_decay=""
 submission=""
 results_tsv="results/results.tsv"
 log_dir="logs/experiments"
@@ -49,6 +57,22 @@ while [[ $# -gt 0 ]]; do
       ;;
     --notes)
       notes="${2:-}"
+      shift 2
+      ;;
+    --eval-stride)
+      eval_stride="${2:-}"
+      shift 2
+      ;;
+    --eval-batch-seqs)
+      eval_batch_seqs="${2:-}"
+      shift 2
+      ;;
+    --eval-seq-len)
+      eval_seq_len="${2:-}"
+      shift 2
+      ;;
+    --muon-weight-decay)
+      muon_weight_decay="${2:-}"
       shift 2
       ;;
     --submission)
@@ -111,6 +135,7 @@ stamp_compact=$(date -u +"%Y%m%dT%H%M%SZ")
 safe_name=$(printf '%s' "$name" | tr -cs 'A-Za-z0-9._-' '_')
 experiment_id="${stamp_compact}_${safe_name}"
 run_id="${RUN_ID:-$experiment_id}"
+venv_bin="$repo_root/.venv/bin"
 
 resolve_path() {
   case "$1" in
@@ -134,6 +159,13 @@ log_path="$resolved_log_dir/$experiment_id.log"
 meta_path="$resolved_log_dir/$experiment_id.meta"
 summary_path="$resolved_log_dir/$experiment_id.json"
 
+wallclock_now() {
+  python3 - <<'PY'
+import time
+print(f"{time.time():.6f}")
+PY
+}
+
 printf -v command_str '%q ' "$@"
 command_str="${command_str% }"
 
@@ -153,15 +185,40 @@ command_str="${command_str% }"
   printf 'notes=%s\n' "$notes"
 } >"$meta_path"
 
+wallclock_start=$(wallclock_now)
 set +e
 (
   cd "$repo_root"
-  RUN_ID="$run_id" "$@"
+  if [[ -d "$venv_bin" ]]; then
+    export PATH="$venv_bin:$PATH"
+  fi
+  if [[ -n "$eval_stride" ]]; then
+    export EVAL_STRIDE="$eval_stride"
+  fi
+  if [[ -n "$eval_batch_seqs" ]]; then
+    export EVAL_BATCH_SEQS="$eval_batch_seqs"
+  fi
+  if [[ -n "$eval_seq_len" ]]; then
+    export EVAL_SEQ_LEN="$eval_seq_len"
+  fi
+  if [[ -n "$muon_weight_decay" ]]; then
+    export MUON_WEIGHT_DECAY="$muon_weight_decay"
+  fi
+  RUN_ID="$run_id" PYTHONUNBUFFERED=1 "$@"
 ) >"$log_path" 2>&1
 exit_code=$?
 set -e
+wallclock_end=$(wallclock_now)
+process_wallclock_seconds=$(python3 - "$wallclock_start" "$wallclock_end" <<'PY'
+import sys
+start = float(sys.argv[1])
+end = float(sys.argv[2])
+print(f"{max(end - start, 0.0):.6f}")
+PY
+)
 
 printf 'exit_code=%s\n' "$exit_code" >>"$meta_path"
+printf 'process_wallclock_seconds=%s\n' "$process_wallclock_seconds" >>"$meta_path"
 
 python3 "$repo_root/scripts/parse_train_log.py" \
   "$log_path" \
@@ -176,6 +233,7 @@ python3 "$repo_root/scripts/parse_train_log.py" \
   --commit "$commit" \
   --status "$status" \
   --exit-code "$exit_code" \
+  --process-wallclock-seconds "$process_wallclock_seconds" \
   --notes "$notes" \
   --format json >"$summary_path"
 
@@ -192,6 +250,7 @@ python3 "$repo_root/scripts/parse_train_log.py" \
   --commit "$commit" \
   --status "$status" \
   --exit-code "$exit_code" \
+  --process-wallclock-seconds "$process_wallclock_seconds" \
   --notes "$notes" \
   --format tsv >>"$resolved_results_tsv"
 

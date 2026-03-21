@@ -31,17 +31,13 @@ def run_json(cmd: list[str], cwd: Path) -> dict:
     return payload
 
 
-def parse_iso8601(ts: str | None) -> datetime | None:
-    if not ts:
-        return None
-    try:
-        return datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
-    except ValueError:
-        return None
-
-
 def cooldown_elapsed(last_restart_at: str | None, cooldown_seconds: int) -> bool:
-    dt = parse_iso8601(last_restart_at)
+    dt = None
+    if last_restart_at:
+        try:
+            dt = datetime.strptime(last_restart_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            dt = None
     if dt is None:
         return True
     elapsed = (datetime.now(timezone.utc) - dt).total_seconds()
@@ -54,6 +50,7 @@ def main() -> int:
     parser.add_argument("--account-id", default="clawd4")
     parser.add_argument("--to", default="8173956648")
     parser.add_argument("--branch", default="research/continuous-mar18")
+    parser.add_argument("--research-state-file", default=None)
     args = parser.parse_args()
 
     repo_root = Path(__file__).resolve().parents[1]
@@ -68,15 +65,34 @@ def main() -> int:
         args.to,
         "--touch-healthy",
     ]
+    if args.research_state_file:
+        check_cmd.extend(["--research-state-file", args.research_state_file])
+
     check = run_json(check_cmd, repo_root)
     if not check.get("ok"):
         print(json.dumps({"action": "error", "reason": "check-failed", "check": check}, indent=2))
         return 0
 
     status = check.get("status")
+    should_restart = bool(check.get("shouldRestart", False))
     cooldown_seconds = int(check.get("restartCooldownSeconds", 1200))
+
     if status in {"healthy", "mismatch"}:
         print(json.dumps({"action": "noop", "status": status, "check": check}, indent=2))
+        return 0
+
+    if status in {"stale", "dead", "missing"} and not should_restart:
+        print(
+            json.dumps(
+                {
+                    "action": "noop",
+                    "status": status,
+                    "reason": "reconciliation-decision-no-restart",
+                    "check": check,
+                },
+                indent=2,
+            )
+        )
         return 0
 
     if status in {"dead", "stale", "missing"} and not cooldown_elapsed(check.get("lastRestartAt"), cooldown_seconds):
@@ -88,22 +104,36 @@ def main() -> int:
         if not stop.get("ok"):
             print(json.dumps({"action": "error", "reason": "stop-failed", "check": check, "stop": stop}, indent=2))
             return 0
-        start = run_json([
-            str(repo_root / "scripts" / "start_continuous_worker.sh"),
-            "--branch", args.branch,
-            "--channel", args.channel,
-            "--account-id", args.account_id,
-            "--to", args.to,
-            "--force-restart",
-        ], repo_root)
+        start = run_json(
+            [
+                str(repo_root / "scripts" / "start_continuous_worker.sh"),
+                "--branch",
+                args.branch,
+                "--channel",
+                args.channel,
+                "--account-id",
+                args.account_id,
+                "--to",
+                args.to,
+                "--force-restart",
+            ],
+            repo_root,
+        )
     else:
-        start = run_json([
-            str(repo_root / "scripts" / "start_continuous_worker.sh"),
-            "--branch", args.branch,
-            "--channel", args.channel,
-            "--account-id", args.account_id,
-            "--to", args.to,
-        ], repo_root)
+        start = run_json(
+            [
+                str(repo_root / "scripts" / "start_continuous_worker.sh"),
+                "--branch",
+                args.branch,
+                "--channel",
+                args.channel,
+                "--account-id",
+                args.account_id,
+                "--to",
+                args.to,
+            ],
+            repo_root,
+        )
 
     if not start.get("ok"):
         print(json.dumps({"action": "error", "reason": "start-failed", "check": check, "start": start}, indent=2))

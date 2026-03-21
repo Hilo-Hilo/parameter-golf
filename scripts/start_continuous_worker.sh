@@ -5,7 +5,7 @@ usage() {
   cat <<'EOF'
 Usage: scripts/start_continuous_worker.sh [--branch <name>] [--channel <id>] [--account-id <id>] [--to <id>] [--force-restart]
 
-Launch the detached continuous Parameter Golf Codex worker and write watchdog state.
+Launch the detached continuous continuous-worker and write watchdog state.
 EOF
 }
 
@@ -25,15 +25,19 @@ while [[ $# -gt 0 ]]; do
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown arg: $1" >&2; usage >&2; exit 2 ;;
   esac
+
 done
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 STATE_DIR="$REPO_ROOT/automation/state"
 LOG_DIR="$REPO_ROOT/automation/logs"
 STATE_FILE="$STATE_DIR/continuous_worker.json"
+RESEARCH_STATE_FILE="$STATE_DIR/research_state.json"
 LOCK_FILE="$STATE_DIR/continuous_worker.lock"
 LOG_FILE="$LOG_DIR/continuous_worker.log"
 PROMPT_FILE="$REPO_ROOT/automation/continuous_worker_prompt.md"
+JOURNAL_FILE="$REPO_ROOT/journal.md"
+RESULTS_FILE="$REPO_ROOT/results/results.tsv"
 
 mkdir -p "$STATE_DIR" "$LOG_DIR"
 : > "$LOCK_FILE"
@@ -66,13 +70,16 @@ else:
 PY
 )"
   if [[ -n "$EXISTING_PID" ]] && kill -0 "$EXISTING_PID" 2>/dev/null; then
-    STATE_FILE="$STATE_FILE" LOG_FILE="$LOG_FILE" EXISTING_PID="$EXISTING_PID" python3 - <<'PY'
-import json, os
+    STATE_FILE="$STATE_FILE" LOG_FILE="$LOG_FILE" BRANCH="$BRANCH" EXISTING_PID="$EXISTING_PID" python3 - <<'PY'
+import json
+import os
+from pathlib import Path
 print(json.dumps({
   "status": "already-running",
   "pid": int(os.environ["EXISTING_PID"]),
   "stateFile": os.environ["STATE_FILE"],
   "logFile": os.environ["LOG_FILE"],
+  "branch": os.environ["BRANCH"],
 }, indent=2))
 PY
     exit 0
@@ -103,16 +110,24 @@ if [[ ! -f "$STATE_FILE" ]]; then
   RESTART_COUNT=0
 fi
 
-REPO_ROOT="$REPO_ROOT" BRANCH="$BRANCH" PROMPT_FILE="$PROMPT_FILE" LOG_FILE="$LOG_FILE" LOCK_FILE="$LOCK_FILE" STATE_FILE="$STATE_FILE" OWNER_CHANNEL="$OWNER_CHANNEL" OWNER_ACCOUNT_ID="$OWNER_ACCOUNT_ID" OWNER_TO="$OWNER_TO" NOW="$NOW" PID="$PID" RESTART_COUNT="$RESTART_COUNT" python3 - <<'PY'
-import json, os
+REPO_ROOT="$REPO_ROOT" BRANCH="$BRANCH" PROMPT_FILE="$PROMPT_FILE" JOURNAL_FILE="$JOURNAL_FILE" LOG_FILE="$LOG_FILE" LOCK_FILE="$LOCK_FILE" STATE_FILE="$STATE_FILE" OWNER_CHANNEL="$OWNER_CHANNEL" OWNER_ACCOUNT_ID="$OWNER_ACCOUNT_ID" OWNER_TO="$OWNER_TO" NOW="$NOW" PID="$PID" RESTART_COUNT="$RESTART_COUNT" python3 - <<'PY'
+import os
 from pathlib import Path
+import json
+
 state = {
   "repoRoot": os.environ["REPO_ROOT"],
   "branch": os.environ["BRANCH"],
   "launcher": "scripts/start_continuous_worker.sh",
   "promptFile": os.environ["PROMPT_FILE"],
+  "journalFile": os.environ["JOURNAL_FILE"],
   "logFile": os.environ["LOG_FILE"],
   "lockFile": os.environ["LOCK_FILE"],
+  "operatingMode": "remote-first-24-7",
+  "preferredCompute": ["runpod", "dgx-spark", "local-mlx"],
+  "secondaryCompute": ["local-mlx"],
+  "researchStrategy": "direct-copy-winning-public-path",
+  "journalPolicy": "append-only",
   "pid": int(os.environ["PID"]),
   "owner": {
     "channel": os.environ["OWNER_CHANNEL"],
@@ -129,11 +144,18 @@ state = {
   "restartCooldownSeconds": 1200,
 }
 Path(os.environ["STATE_FILE"]).write_text(json.dumps(state, indent=2) + "\n")
+PY
+
+REPO_ROOT="$REPO_ROOT" RESEARCH_STATE_FILE="$RESEARCH_STATE_FILE" STATE_FILE="$STATE_FILE" JOURNAL_FILE="$JOURNAL_FILE" RESULTS_FILE="$RESULTS_FILE" LOG_FILE="$LOG_FILE" BRANCH="$BRANCH" PID="$PID" NOW="$NOW" python3 "$REPO_ROOT/scripts/research_state.py" bootstrap --repo-root "$REPO_ROOT" --research-state-file "$RESEARCH_STATE_FILE" --worker-state-file "$STATE_FILE" --journal-file "$JOURNAL_FILE" --results-file "$RESULTS_FILE" --branch "$BRANCH" --log-file "$LOG_FILE" --worker-pid "$PID" --now "$NOW" >/dev/null
+
+STATE_FILE="$STATE_FILE" LOG_FILE="$LOG_FILE" BRANCH="$BRANCH" python3 - <<'PY'
+import json, os
+from pathlib import Path
 print(json.dumps({
   "status": "started",
-  "pid": state["pid"],
+  "pid": int(os.environ["PID"]),
   "stateFile": os.environ["STATE_FILE"],
   "logFile": os.environ["LOG_FILE"],
-  "branch": state["branch"],
+  "branch": os.environ["BRANCH"],
 }, indent=2))
 PY

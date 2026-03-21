@@ -61,6 +61,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--commit", default="", help="Git commit hash.")
     parser.add_argument("--status", default="discard", choices=["keep", "discard", "invalid", "crash"])
     parser.add_argument("--exit-code", type=int, default=0, help="Exit code from the wrapped training command.")
+    parser.add_argument(
+        "--process-wallclock-seconds",
+        type=float,
+        help="Actual elapsed wallclock for the wrapped process, captured by the experiment runner.",
+    )
     parser.add_argument("--notes", default="", help="Free-form notes for the ledger row.")
     parser.add_argument("--max-bytes", type=int, default=16_000_000, help="Artifact size cap for invalidation.")
     parser.add_argument("--format", choices=["json", "tsv"], default="json")
@@ -202,6 +207,7 @@ def build_row(args: argparse.Namespace) -> dict[str, object]:
         bytes_model + bytes_code if bytes_model is not None and bytes_code is not None else None,
     )
     wallclock_seconds = choose(
+        to_float(args.process_wallclock_seconds),
         to_float(submission.get("wallclock_seconds")),
         to_float(parsed.get("wallclock_seconds")),
     )
