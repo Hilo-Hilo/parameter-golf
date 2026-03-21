@@ -4215,3 +4215,50 @@ Why this mattered:
 ### Next direction
 - Keep RunPod `runpod_h100` as primary lane and proceed with compression-aware schedule/quantization tuning rather than broad architecture shifts.
 - Use the still-free PR236 replica lane and/or upstream-informed frontier signals to test whether warmdown or quant-depth adjustments can beat the current `1.22501069` frontier best from `mwd0003`.
+## 2026-03-21 06:18 PDT — RunPod frontier: int4 step2 + fp16 tied export invalid on byte cap
+
+### Material update
+- Completed `20260321T124149Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_bs80_int4l9s2wc1750_mwd0019` on `imaginative_tan_coyote` (RunPod H100 main lane).
+- Run state:
+  - Artifacts synced locally under:
+    - `logs/experiments/20260321T124149Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_bs80_int4l9s2wc1750_mwd0019.{log,meta,json}`
+    - `logs/20260321T124149Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_bs80_int4l9s2wc1750_mwd0019.txt`
+- Final exact metrics:
+  - `exact_final_val_bpb=1.22415430` (from `final_int8_zlib_roundtrip_exact`)
+  - `pre_quant_val_bpb=1.2544`
+  - `step_stop=3289`
+  - `bytes_total=16485097` (`bytes_model=16426425`, `bytes_code=58672`)
+  - `wallclock_seconds=1750.175`
+- Interpretation: this run matches the frontier pressure trend and regains near-baseline behavior but remains above cap and stays `invalid` due `bytes_total>16000000`; this is still a useful control for `INT4_STEP=2` with fp16 tied export enabled.
+- Reconciliation:
+  - Added TSV row to `results/results.tsv`.
+  - Ran `python3 scripts/research_state.py reconcile --results-file results/results.tsv`.
+
+### Next direction
+- Continue on the active RunPod lane with compression-aware experiments that can reduce `bytes_total` while preserving this `VAL_bpb` region.
+- Preserve sliding-window exact eval and export verification as mandatory from this point onward.
+
+## 2026-03-21 06:59 PDT — RunPod frontier compression-control run `mwd0021` hits `1.2238` but remains byte-invalid
+
+### Material update
+- Completed `20260321T131910Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s2wc1750_mwd0021` on the live RunPod H100 lane (`imaginative_tan_coyote`).
+- Artifacts synced locally:
+  - `logs/experiments/20260321T131910Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s2wc1750_mwd0021.{log,meta,json}`
+  - `logs/20260321T131910Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s2wc1750_mwd0021.txt`
+- Final metrics observed:
+  - `exact_final_val_bpb=1.22384182` (`final_int8_zlib_roundtrip_exact`)
+  - `pre_quant_val_bpb=1.2543`
+  - `step_stop=3284`
+  - `bytes_total=16,948,237` (`bytes_model=16,889,565`, `bytes_code=58,672`)
+  - `wallclock_seconds=2186.198855`
+- Interpretation:
+  - This run improves exact final sliding-window score versus earlier frontier entries and lands near the baseline gate, but is `invalid` due `bytes_total>16,000,000` and therefore not comparable for final leaderboard progression.
+  - The key remaining blocker is compression headroom rather than train quality in this configuration.
+- Journal/state updates:
+  - Appended run row to `results/results.tsv` with status `invalid`.
+  - Reconciled state with:
+    - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Next direction
+- Continue with active RunPod lane, prioritizing compression-aware knobs (quantization coverage, step size, low-bit placement) to regain byte compliance while holding the `~1.2238` loss trajectory.
+- Keep sliding-window exact eval enabled and verify export roundtrip controls on each next candidate.
