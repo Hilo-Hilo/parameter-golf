@@ -3699,3 +3699,25 @@ Why this mattered:
   - `logs/launch_20260320T223000Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750wd600.out`
   - `logs/experiments/20260320T225636Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750wd600.{log,json,meta}`
 - Reconciled state via `python3 scripts/research_state.py reconcile --results-file results/results.tsv`; state now tracks this run as latest completed signature and marks `shouldRestart=true`.
+
+## 2026-03-20 17:09 PDT — Upstream-frontier + RunPod-focus steering reinforced
+
+### Directional change
+- Hanson explicitly said to chase the upstream frontier while also focusing RunPod.
+
+### Why this matters
+- The loop can drift in two bad directions:
+  1. losing contact with the strongest public frontier approaches
+  2. losing focus on the active RunPod execution lanes where those approaches should be tested
+- This steering reinforces that both must stay true at once.
+
+### Evidence / citations
+- Explicit Hanson steering in chat.
+- Existing upstream citations already tracked in the journal, including:
+  - `2026-03-19_SlidingWindowEval`
+  - `2026-03-19_10L_MixedPrecision`
+  - `2026-03-19_WarmdownQuantization`
+  - PR #236 on `openai/parameter-golf`
+
+### Operational effect
+- The worker prompt and live cron payload now explicitly tell the loop to chase the public upstream frontier aggressively while keeping RunPod as the main execution focus.
