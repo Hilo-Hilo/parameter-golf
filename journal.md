@@ -4399,3 +4399,25 @@ Why this mattered:
 - Retained local artifacts:
   - `logs/experiments/20260321T181813Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0030.{log,json,meta}`
 - Next step: with run complete and lane still warm, continue precision-aware control sweeps around this manifold (muon decay + warmdown coupling) rather than reverting to broad layer-width/int4-coverage sweeps.
+
+## 2026-03-21 11:54 PDT — Launched RunPod frontier run mwd0031
+- Started `20260321T185346Z_20260321T185300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0031` on `pg-worker-repl2` (H100) as the primary RunPod lane continuation of the frontier manifold.
+- Command controls: `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=80`, `INT4_LAYERS=0..6`, `INT4_STEP=4`, `MUON_WEIGHT_DECAY=0.0015`, `WARMDOWN_ITERS=1800`.
+- Run marker artifacts now present on remote (`/workspace/parameter-golf/logs/experiments/..._mwd0031.{log,meta}`); metrics pending capture on completion.
+
+## 2026-03-21 11:54 PDT — Completed RunPod frontier run mwd0031
+- Completed `20260321T185346Z_20260321T185300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0031` on the active primary RunPod lane `pg-worker-repl2`.
+- Final exact roundtrip metrics:
+  - `exact_final_val_bpb=1.23343581`
+  - `pre_quant_val_bpb=1.2612`
+  - `final_val_loss=2.08260488`
+  - `pre_quant_val_loss=2.1295`
+  - `step_stop=3455`
+  - `wallclock_seconds=1974.809656`
+  - `bytes_model=12,726,721`
+  - `bytes_total=12,785,393`
+- Run details: `MUON_WEIGHT_DECAY=0.0015`, `WARMDOWN_ITERS=1800` at `INT4_LAYERS=0..6`, `INT4_STEP=4`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=80`.
+- Status decision: `discard` (worse than `mwd0030` `1.23117214`, still above frontier and far from `<1.0`).
+- Local artifacts retained:
+  - `logs/experiments/20260321T185346Z_20260321T185300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0031.{log,json,meta}`
+- Next step: pivot to a different warmdown+optimizer coupling without changing int4 topology further (for example `MUON_WEIGHT_DECAY=0.004 + WARMDOWN_ITERS=1800`) to probe if lower decay worsens or improves early-stage regularization under fixed quantization.
