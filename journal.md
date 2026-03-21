@@ -3776,3 +3776,22 @@ Why this mattered:
 
 ### Current second-lane objective
 - Bring the PR #236 path back online on the fresh replacement H100 once data bootstrap completes.
+
+## 2026-03-20 17:38 PDT — Failed spare replacement pod stopped per Hanson instruction
+
+### Directional change
+- Hanson explicitly told me to remove the failed spare replacement pod after the second-lane bootstrap/recovery kept failing.
+
+### Why this changed now
+- The replacement spare pod `tremendous_crimson_marmoset` was burning time/cost without becoming a stable productive second lane.
+- Keeping a failed spare lane around conflicted with the existing cost-discipline rule.
+
+### Evidence / citations
+- Explicit Hanson steering in chat.
+- Prior automation failure alerts showed repeated SSH/session drop failures during the second-lane bootstrap.
+
+### Action taken
+- Stopped the failed spare replacement pod:
+  - pod: `tremendous_crimson_marmoset`
+  - id: `on39in84tsc1nq`
+- Left the active main RunPod lane untouched.
