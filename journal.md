@@ -4297,3 +4297,52 @@ Why this mattered:
 ### Next direction
 - Keep RunPod compression-aware path as default.
 - Test lower coverage/int4 placement and additional quantization stride interactions that can reduce bytes without additional exact-score drift, while holding mandatory sliding-window exact eval and export roundtrip validation fixed.
+
+## 2026-03-21 08:50 PDT — RunPod mwd0024 frontier-compression update with export-roundtrip exact eval
+
+### Material update
+- Completed `20260321T151842Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a8s4wc1750_mwd0024` as the active RunPod H100 lane continuation on `imaginative_tan_coyote`.
+- Artifacts retained locally:
+  - `logs/experiments/20260321T151842Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a8s4wc1750_mwd0024.{log,meta,json}`
+- Final exact roundtrip metrics:
+  - `exact_final_val_bpb=1.22703480` (`final_int8_zlib_roundtrip_exact`)
+  - `pre_quant_val_bpb=1.2561` (`val_bpb` before export checks)
+  - `pre_quant_step_stop=3170`
+  - `step_stop=3170`
+  - `bytes_total=15,211,814` (`bytes_model=15,153,142`, `bytes_code=58,672`)
+  - `wallclock_seconds=2187.1048`
+- Interpretation:
+  - The run remains `keep` and stays byte-compliant but did not improve beyond the current exact frontier (`mwd0023` is `1.22658554`) and is still above the target of `<1.0`.
+  - This confirms that the `INT4_STEP=4` int4-layer coverage (`0..7`) + `fp16_tied_embedding_export=False` remains a stable baseline, but moving from this score requires additional structural/quality improvements beyond this exact-compression profile.
+- Evidence capture:
+  - Added final row to `results/results.tsv`.
+  - Reconciled durable state from `results.tsv` after completion.
+
+### Next direction
+- Keep this RunPod lane active as primary execution.
+- Shift next frontier probe toward complementary precision-aware controls that might improve `exact_final_val_bpb` without regressing size (optimizer warmdown/learning-rate coupling, quant bit placement refinements, candidate eval/export tuning).
+
+## 2026-03-21 09:29 PDT — RunPod high-density int4 frontier candidate mwd0026 completed
+
+### Material update
+- Completed `20260321T155701Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750_nofp16_mwd0026` on the primary RunPod lane `pg-worker-repl2` (H100) as the active frontier-compression probe.
+- Final exact roundtrip metrics:
+  - `exact_final_val_bpb=1.23151324` (`final_int8_zlib_roundtrip_exact`)
+  - `pre_quant_val_bpb=1.2601`
+  - `pre_quant_step_stop=3379`
+  - `step_stop=3379`
+  - `bytes_total=13,368,283` (`bytes_model=13,309,611`, `bytes_code=58,672`)
+  - `wallclock_seconds=1975.073569`
+- Result status: `discard` (worse than prior frontier keeper `1.22703480`; still above target `<1.0`).
+- Log artifact retained:
+  - `/Users/hansonwen/Library/CloudStorage/GoogleDrive-wenhanson0@gmail.com/My Drive/Clawd Workspace/OpenAI Parameter Golf/parameter-golf/logs/experiments/20260321T155701Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750_nofp16_mwd0026.log`
+
+### Evidence
+- Added row to `results/results.tsv`:
+  - `20260321T155701Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s2wc1750_nofp16_mwd0026`
+- In-flight diagnostics show explicit final exact metrics:
+  - `final_int8_zlib_roundtrip val_loss:2.0794 val_bpb:1.2315`
+  - `final_int8_zlib_roundtrip_exact val_loss:2.07935870 val_bpb:1.23151324`
+
+### Next direction
+- Keep RunPod as primary lane; next tests should pivot from broader int4 coverage sweeps toward warmdown-schedule and precision-aware export/compression interactions.
