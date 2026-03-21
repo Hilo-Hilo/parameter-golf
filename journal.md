@@ -4442,3 +4442,8 @@ Why this mattered:
 - Local artifacts retained:
   - `logs/experiments/20260321T192842Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0032.{log,json,meta}`
 - Next direction: keep warmdown/optimizer coupling as active lever at this geometry and probe nearby points (`MUON_WEIGHT_DECAY=0.003/0.0025`, `WARMDOWN_ITERS=1500/2200`) before returning to wider topology changes.
+
+## 2026-03-21 01:20 PDT — Launched RunPod frontier run mwd0033
+- Started `20260321T200602Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l6s4wc1750_mwd0033` on `pg-worker-repl2` (H100) as the primary RunPod continuation of the warmdown frontier sweep.
+- Command controls: `MAX_WALLCLOCK_SECONDS=1750`, `EVAL_STRIDE=256`, `EVAL_BATCH_SEQS=80`, `INT4_LAYERS=0..6`, `INT4_STEP=4`, `MUON_WEIGHT_DECAY=0.003`, `WARMDOWN_ITERS=2200`.
+- Run launched via detached remote wrapper; metrics pending capture.
