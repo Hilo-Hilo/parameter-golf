@@ -4063,3 +4063,60 @@ Why this mattered:
   - verify roundtrip export + fp16 tied embedding export
 - Initial artifacts:
   - `logs/experiments/20260321T074300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s4wc1750_mwd0010.{log,meta,txt}`
+## 2026-03-21 01:14 PDT — Precision frontier step4 test completed on RunPod
+
+### Material update
+- Completed `20260321T073024Z_20260321T074300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s4wc1750_mwd0010` on the primary RunPod H100 lane (`pg-worker-repl2`, track `runpod_h100`) with `scripts/run_experiment.sh` launch context previously used for `mwd0009`.
+- Final metrics from `logs/experiments/20260321T073024Z_20260321T074300Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4a11s4wc1750_mwd0010.json`:
+  - `exact_final_val_bpb=1.23109826`
+  - `pre_quant_val_bpb=1.2589`
+  - `final_val_loss=2.07865803`
+  - `bytes_total=14,438,101` (`bytes_model=14,379,429`)
+  - `wallclock_seconds=1750.374`, `step_stop=3090`
+  - `status=keep`
+- Reconciled run state after artifact sync:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+- Interpretation: increasing to `INT4_STEP=4` across all 11 int4 layers was a clear non-improvement versus the best frontier (`1.22501069` at `mwd0003`), and it did not recover the `exact_final_val_bpb < 1.2244` target.
+
+### Next direction
+- Next RunPod frontier test will pivot to orthogonal levers per Hanson steering: quantization geometry + warmdown schedule around the best frontier topology (first 9 layers, `INT4_STEP=3`, `MUON_WEIGHT_DECAY=0.003`), rather than broader shape sweeps.
+
+## 2026-03-21 01:58 PDT — Precision frontier warmdown extension mwd0011 completed on RunPod
+
+### Material update
+- Completed `20260321T081240Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0011` on the primary RunPod H100 lane (`pg-worker-repl2`, remote `root@64.247.201.51:15402`) with `scripts/run_experiment.sh`.
+- Final metrics from `logs/experiments/20260321T081240Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0011.json`:
+  - `exact_final_val_bpb=1.22709176`
+  - `pre_quant_val_bpb=1.2571`
+  - `final_val_loss=2.07189321`
+  - `bytes_total=15,708,999` (`bytes_model=15,650,327`)
+  - `wallclock_seconds=2195.333508`, `step_stop=3091`
+- Command context:
+  - `NUM_LAYERS=11 MODEL_DIM=496 TIE_EMBEDDINGS=0`
+  - `INT4_LAYERS=0,1,2,3,4,5,6,7,8`
+  - `INT4_STEP=3`
+  - `MUON_WEIGHT_DECAY=0.003`
+  - `WARMDOWN_ITERS=1200`
+  - `MAX_WALLCLOCK_SECONDS=1750`
+  - `EVAL_STRIDE=256`
+  - `EVAL_BATCH_SEQS=32`
+  - `VERIFY_EXPORT_ROUNDTRIP=1`
+  - `FP16_TIED_EMBEDDING_EXPORT=1`
+- Synced artifacts:
+  - `logs/experiments/20260321T081240Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1750_mwd0011.{log,json,meta}`
+- Reconciled after completion:
+  - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Interpretation
+- This run is a non-improvement versus the best frontier (`1.22501069` at `mwd0003`) and also slightly worse than the nearby `mwd0007` point (`1.22647723`).
+- Trend supports low-prioritying more aggressive warmdown at the same step3/frontier geometry when `MUON_WEIGHT_DECAY=0.003`.
+
+### Material update (next launch)
+- Launched `20260321T084957Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1800_int35_mwd0012` on the same RunPod H100 lane with:
+  - same frontier geometry (`INT4_LAYERS=0..8`, `INT4_STEP=3`, verify/export, stride/batch)
+  - `MUON_WEIGHT_DECAY=0.0035`
+  - `WARMDOWN_ITERS=1800`
+  - `MAX_WALLCLOCK_SECONDS=1750`
+- Initial artifacts:
+  - `logs/experiments/20260321T084957Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1800_int35_mwd0012.{log,meta}`
+  - `logs/experiments/launcher_20260321T084956Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_int4l9s3wc1800_int35_mwd0012.{out,pid}`
