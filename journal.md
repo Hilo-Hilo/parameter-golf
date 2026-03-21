@@ -4192,3 +4192,26 @@ Why this mattered:
 
 ### Next direction
 - Next frontier candidate: keep `EVAL_BATCH_SEQS=80` and test higher `WARMDOWN_ITERS`/alternate `MUON_WEIGHT_DECAY` combinations only if no stronger compression lever is found from export settings, since exact bpb has not crossed `1.225` yet.
+
+## 2026-03-21 05:36 PDT — RunPod exact export ablation completed: FP16 tied export disable without frontier gain
+
+### Material update
+- Completed `20260321T115941Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_bs80_int4l9s3wc1750_nofp16_mwd0017` on `pg-worker-repl2` (main RunPod H100 lane) on the existing `--eval-batch 80` frontier geometry.
+  - Artifacts synced locally:
+    - `logs/experiments/20260321T115941Z_runpod_h100_1gpu_l11_d496_untied_verify_stride256_bs80_int4l9s3wc1750_nofp16_mwd0017.{log,meta,json}`.
+  - Final metrics:
+    - `exact_final_val_bpb=1.22620977`
+    - `pre_quant_val_bpb=1.2562`
+    - `step_stop=3183`
+    - `bytes_total=15408917` (`bytes_model=15350245`, `bytes_code=58672`)
+    - `wallclock_seconds=2188.556179`
+    - `status=keep`
+  - Interpretation: disabling fp16 tied export (non default) did not improve frontier and degraded vs earlier best `1.22604146` from `mwd0015`; result remains a useful control confirming that this export-path adjustment is not a primary gain lever for this geometry.
+- Ledger updates:
+  - Added run row to `results/results.tsv`.
+  - Reconciled state with:
+    - `python3 scripts/research_state.py reconcile --results-file results/results.tsv`
+
+### Next direction
+- Keep RunPod `runpod_h100` as primary lane and proceed with compression-aware schedule/quantization tuning rather than broad architecture shifts.
+- Use the still-free PR236 replica lane and/or upstream-informed frontier signals to test whether warmdown or quant-depth adjustments can beat the current `1.22501069` frontier best from `mwd0003`.
