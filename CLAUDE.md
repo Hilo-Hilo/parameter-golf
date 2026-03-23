@@ -35,16 +35,9 @@ Start an autonomous worker cycle for a specific branch node:
 scripts/branch_cycle.sh <node_id>
 ```
 
-This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree (`worktrees/<node_id>`). It enforces `--no-session-persistence` and strict `.claude/settings.json` permissions to keep runs concurrency-safe and side-effect free.
+This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree (`worktrees/<node_id>`). It enforces `--no-session-persistence` and strict `.claude/settings.json` permissions to keep runs concurrency-safe and side-effect free. 
 
-## Infrastructure
-
-### RunPod
-
-- Primary remote lane.
-- Use RunPod CLI to create, manage, and monitor pods.
-- Parameter Golf work should only run on pods with a `pg-` prefix.
-- There may be other pods on the account used by a friend; those are off-limits.
+**Note**: Branch creation, git upstream synchronization, and infrastructure execution are strictly handled by the shell wrapper. Do not attempt to run git branch/push/fetch commands or interact directly with remote infra in the worker cycle.
 
 ## Working Style
 

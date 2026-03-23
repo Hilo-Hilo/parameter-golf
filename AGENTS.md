@@ -7,6 +7,8 @@
 - Keep novel Parameter Golf experiments on dedicated `approach/<name>` branches; treat `main` as the shared integration baseline.
 - When the user asks to change git attribution on this machine (for example dropping Claude from co-authored trailers), follow that for local commits.
 - After substantive code or script changes, update the markdown that documents behavior so operators are not misled (only where such docs already exist and apply).
+- Prefer ephemeral, deterministic worker executions (short-lived, schema-bounded AI sessions managed by a shell controller) over long-lived persistent sessions to prevent context drift and enforce tight safety boundaries.
+- Delegate privileged operations (like git push/fetch or infrastructure provisioning) to the shell controller rather than having the AI execute them directly, ensuring strict adherence to permission models.
 
 ## Learned Workspace Facts
 
@@ -14,3 +16,4 @@
 - RunPod usage for Parameter Golf should target pods whose names start with `pg-`; avoid using unrelated pods on the account without explicit user approval.
 - Detached or non-TTY launches of `claude -p` should feed non-interactive stdin (for example `< /dev/null`) so the process does not block waiting for terminal input.
 - Default training layouts that write fixed artifact filenames under the repo root can collide when multiple runs share one checkout; isolate outputs per run when parallelism or overlapping experiments are possible.
+- Use file locking (e.g., `flock`) when concurrent processes or autonomous runs write to shared ledgers (like `results.tsv` or spooled records) to avoid race conditions.

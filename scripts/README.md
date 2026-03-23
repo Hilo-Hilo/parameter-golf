@@ -4,36 +4,20 @@ Experiment helpers and worker lifecycle for this repo.
 
 ## Files
 
-- `scripts/run_experiment.sh`: launch one run, capture a log, parse metrics, append one TSV row
+- `scripts/run_experiment.sh`: launch one run, capture a log, parse metrics, isolate output under `experiments/<run_id>`, and append a JSON summary to `registry/runs.jsonl`
 - `scripts/parse_train_log.py`: stdlib-only parser for `train.log` plus optional `submission.json`
-- `scripts/start_worker.sh`: launch the detached Claude Code research worker
-- `scripts/stop_worker.sh`: stop the worker
-- `scripts/worker_status.sh`: check if the worker is running
+- `scripts/branch_cycle.sh`: deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree
 - `scripts/smoke_sliding_eval.py`: CUDA smoke test for sliding-window eval path
 
-## Worker
+## Worker Lifecycle
 
-`worker_program.md` is the canonical operating program. The worker is a `claude -p` process running that program as its prompt.
-
-Start:
+Start an autonomous worker cycle for a specific branch node:
 
 ```bash
-scripts/start_worker.sh
+scripts/branch_cycle.sh <node_id>
 ```
 
-Status:
-
-```bash
-scripts/worker_status.sh
-```
-
-Stop:
-
-```bash
-scripts/stop_worker.sh
-```
-
-State: `automation/worker.pid` (PID file), `automation/worker.log` (output log). Both are gitignored.
+This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree (`worktrees/<node_id>`). It enforces `--no-session-persistence` and strict `.claude/settings.json` permissions to keep runs concurrency-safe and side-effect free.
 
 ## Typical Usage
 

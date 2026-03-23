@@ -13,4 +13,9 @@ logs/
 automation/worker.pid
 automation/worker.log
 
+# Housekeeping
+worktrees/
+experiments/
+registry/
+
 AGENTS.md

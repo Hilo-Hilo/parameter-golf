@@ -38,18 +38,20 @@ Previous state if any: $(cat "$STATE_FILE" 2>/dev/null || echo "{}")"
 
 claude -p "$PROMPT" \
   --bare \
+  --settings "$REPO_ROOT/.claude/settings.json" \
+  --mcp-config "$REPO_ROOT/.mcp.json" \
   --strict-mcp-config \
   --no-session-persistence \
   --output-format json \
   --json-schema "$REPO_ROOT/schemas/plan_schema.json" \
-  --allowedTools "Read,Edit,Bash" > phase_plan_output.json || true
+  --allowedTools "Read,Edit,Glob,Grep" > phase_plan_output.json || true
 
 cp phase_plan_output.json "$STATE_FILE"
 
 # Parse JSON
-PROPOSED_SLUG=$(jq -r '.proposed_slug // empty' phase_plan_output.json)
-NEXT_CMD=$(jq -r '.next_run_command // empty' phase_plan_output.json)
-CHANGED_AXES=$(jq -r '.changed_axes // empty' phase_plan_output.json)
+PROPOSED_SLUG=$(jq -r '.structured_output.proposed_slug // empty' phase_plan_output.json)
+NEXT_CMD=$(jq -r '.structured_output.next_run_command // empty' phase_plan_output.json)
+CHANGED_AXES=$(jq -r '.structured_output.changed_axes // empty' phase_plan_output.json)
 
 if [ -z "$PROPOSED_SLUG" ] || [ -z "$NEXT_CMD" ]; then
   echo "Error: Plan did not output valid proposed_slug or next_run_command."
@@ -59,6 +61,12 @@ fi
 echo "Proposed slug: $PROPOSED_SLUG"
 echo "Next command: $NEXT_CMD"
 
+# Ref-format check
+if ! git check-ref-format "refs/heads/$PROPOSED_SLUG"; then
+  echo "Governance Reject: Invalid branch name '$PROPOSED_SLUG'"
+  exit 1
+fi
+
 # ==============================================================================
 # GOVERNANCE: HYBRID NOVELTY CHECK
 # ==============================================================================
@@ -66,8 +74,9 @@ NODES_DB="$REPO_ROOT/registry/nodes.jsonl"
 touch "$NODES_DB"
 
 # 1. Deterministic Fast Check
-if grep -q "\"slug\":\"$PROPOSED_SLUG\"" "$NODES_DB" 2>/dev/null; then
-  echo "Governance Reject: Exact slug '$PROPOSED_SLUG' already exists in registry."
+FINGERPRINT=$(echo -n "${PROPOSED_SLUG}${CHANGED_AXES}${NEXT_CMD}" | shasum -a 256 | awk '{print $1}')
+if grep -q "\"fingerprint\":\"$FINGERPRINT\"" "$NODES_DB" 2>/dev/null; then
+  echo "Governance Reject: Fingerprint '$FINGERPRINT' already exists in registry."
   exit 1
 fi
 
@@ -79,20 +88,22 @@ Axes changed: $CHANGED_AXES
 Command: $NEXT_CMD
 
 Here is the registry of past runs:
-$(cat "$NODES_DB" | tail -n 50)
+$(tail -n 50 "$NODES_DB" 2>/dev/null || true)
 
 Is this proposed approach a semantic duplicate of a past run? Return JSON."
 
 claude -p "$GOV_PROMPT" \
   --bare \
+  --settings "$REPO_ROOT/.claude/settings.json" \
+  --mcp-config "$REPO_ROOT/.mcp.json" \
   --strict-mcp-config \
   --no-session-persistence \
   --output-format json \
   --json-schema "$REPO_ROOT/schemas/governance_schema.json" > gov_output.json || true
 
-IS_DUPLICATE=$(jq -r '.is_duplicate // "false"' gov_output.json)
+IS_DUPLICATE=$(jq -r '.structured_output.is_duplicate // "false"' gov_output.json)
 if [ "$IS_DUPLICATE" == "true" ]; then
-  REASON=$(jq -r '.reason // "No reason provided"' gov_output.json)
+  REASON=$(jq -r '.structured_output.reason // "No reason provided"' gov_output.json)
   echo "Governance Reject: Semantic duplicate detected. Reason: $REASON"
   exit 1
 fi
@@ -103,15 +114,34 @@ echo "Governance Check Passed. Creating child node..."
 # INFRA & EXECUTION
 # ==============================================================================
 CHILD_NODE_ID="${NODE_ID}_${PROPOSED_SLUG}"
+
 # The shell controller commits the changes that Claude made and creates the branch
 git checkout -b "approach/$CHILD_NODE_ID" || git checkout "approach/$CHILD_NODE_ID"
-git add -u
-git commit -m "chore: auto-commit for $CHILD_NODE_ID (plan phase)" || true
+git add .
+if ! git diff --staged --quiet; then
+  git commit -m "chore: auto-commit for $CHILD_NODE_ID (plan phase)"
+else
+  echo "No changes to commit for $CHILD_NODE_ID."
+fi
 
-echo "{\"parent\": \"$NODE_ID\", \"node_id\": \"$CHILD_NODE_ID\", \"slug\": \"$PROPOSED_SLUG\", \"status\": \"running\"}" >> "$NODES_DB"
+# Restore parent worktree branch
+git checkout "tree/$NODE_ID"
+
+echo "{\"parent\": \"$NODE_ID\", \"node_id\": \"$CHILD_NODE_ID\", \"slug\": \"$PROPOSED_SLUG\", \"fingerprint\": \"$FINGERPRINT\", \"status\": \"running\"}" >> "$NODES_DB"
+
+# Create a new isolated worktree for child
+CHILD_WORKTREE_DIR="$REPO_ROOT/worktrees/$CHILD_NODE_ID"
+if [ ! -d "$CHILD_WORKTREE_DIR" ]; then
+  mkdir -p "$REPO_ROOT/worktrees"
+  git worktree add "$CHILD_WORKTREE_DIR" "approach/$CHILD_NODE_ID"
+fi
+
+cd "$CHILD_WORKTREE_DIR"
 
 echo "Executing run command..."
-eval "$NEXT_CMD"
+echo "$NEXT_CMD" > run_child.sh
+chmod +x run_child.sh
+./run_child.sh
 
 # ==============================================================================
 # PHASE 2: DIAGNOSE
@@ -124,11 +154,13 @@ Output JSON."
 
 claude -p "$PROMPT" \
   --bare \
+  --settings "$REPO_ROOT/.claude/settings.json" \
+  --mcp-config "$REPO_ROOT/.mcp.json" \
   --strict-mcp-config \
   --no-session-persistence \
   --output-format json \
   --json-schema "$REPO_ROOT/schemas/diagnose_schema.json" \
-  --allowedTools "Read,Edit,Bash" > phase_diagnose_output.json || true
+  --allowedTools "Read,Edit,Glob,Grep" > phase_diagnose_output.json || true
 
 # ==============================================================================
 # PHASE 3: REFLECT
@@ -141,14 +173,16 @@ Output JSON."
 
 claude -p "$PROMPT" \
   --bare \
+  --settings "$REPO_ROOT/.claude/settings.json" \
+  --mcp-config "$REPO_ROOT/.mcp.json" \
   --strict-mcp-config \
   --no-session-persistence \
   --output-format json \
   --json-schema "$REPO_ROOT/schemas/reflect_schema.json" \
-  --allowedTools "Read,Edit,Bash" > phase_reflect_output.json || true
+  --allowedTools "Read,Edit,Glob,Grep" > phase_reflect_output.json || true
 
 # Update node status based on reflection
-ACTION=$(jq -r '.recommended_action // "discard"' phase_reflect_output.json)
-echo "{\"parent\": \"$NODE_ID\", \"node_id\": \"$CHILD_NODE_ID\", \"slug\": \"$PROPOSED_SLUG\", \"status\": \"$ACTION\"}" >> "$NODES_DB"
+ACTION=$(jq -r '.structured_output.recommended_action // "discard"' phase_reflect_output.json)
+echo "{\"parent\": \"$NODE_ID\", \"node_id\": \"$CHILD_NODE_ID\", \"slug\": \"$PROPOSED_SLUG\", \"fingerprint\": \"$FINGERPRINT\", \"status\": \"$ACTION\"}" >> "$NODES_DB"
 
 echo "Branch cycle complete for $CHILD_NODE_ID. Action determined: $ACTION."

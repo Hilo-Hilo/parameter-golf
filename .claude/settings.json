@@ -1,7 +1,13 @@
 {
   "bypassPermissions": false,
+  "disableBypassPermissionsMode": "disable",
+  "fsAccess": {
+    "allowedPaths": [
+      "."
+    ]
+  },
   "permissions": {
-    "bash": {
+    "Bash": {
       "deny": [
         "git push",
         "git fetch",
@@ -14,13 +20,23 @@
   "hooks": {
     "PreToolUse": [
       {
-        "tool": "bash",
-        "command": "if echo \"$TOOL_ARGS\" | grep -qE 'git push|git fetch|git worktree|runpodctl|ssh'; then echo 'Blocked by PreToolUse hook'; exit 1; fi"
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if echo \"$TOOL_ARGS\" | grep -qE 'git push|git fetch|git worktree|runpodctl|ssh'; then exit 1; fi"
+          }
+        ]
       }
     ],
     "Stop": [
       {
-        "command": "echo '{\"status\": \"stopped\"}' > registry/spool/${CLAUDE_RUN_ID:-unknown}_final_state.json || true"
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '{\"status\": \"stopped\"}' > registry/spool/${CLAUDE_RUN_ID:-unknown}_final_state.json || true"
+          }
+        ]
       }
     ]
   }
