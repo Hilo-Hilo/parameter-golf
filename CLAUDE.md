@@ -23,13 +23,9 @@ Read these first:
 
 ## Standard Start Sequence
 
-1. Confirm branch and git state.
-2. Sync from `upstream` (`https://github.com/openai/parameter-golf`).
-3. Check what is currently running on RunPod. Do not use pods that are not explicitly named with a `pg-` prefix.
-4. If a Parameter Golf task is already running on a `pg-*` pod, inspect its ETA before launching anything new.
-5. If a task finished, record the outcome, compare with best legal frontier, discard if worse.
-6. If a new direction is needed, check upstream PRs or other novel approaches before falling back to repetitive sweeps.
-7. If nothing useful is active, choose one bounded hypothesis from the compressed frontier or from a novel upstream approach.
+1. Read `registry/nodes.jsonl` and `registry/runs.jsonl` to understand the current research frontier.
+2. If a new direction is needed, check upstream PRs or other novel approaches before falling back to repetitive sweeps.
+3. Propose a single bounded hypothesis via the `plan` phase JSON schema. The shell controller will manage the git branching, execution, and validation.
 
 ## Worker Lifecycle
 
@@ -54,11 +50,10 @@ This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnos
 
 ### Git
 
-1. Edit locally.
-2. Each experimental approach gets its own `approach/<name>` branch. Never commit experiments to `main` or `research/*`.
-3. Commit locally when asked or when the task explicitly requires it.
-4. `git push`, then sync remote machines with `git pull` if needed.
-5. Do not edit repo files directly over SSH.
+1. The shell controller handles all worktree creation, branching, and commits during autonomous runs.
+2. If working manually, each experimental approach gets its own `approach/<name>` branch. Never commit experiments to `main` or `research/*`.
+3. The worker agent must not run `git push`, `git fetch`, or `git worktree`.
+4. Do not edit repo files directly over SSH.
 
 ### Research
 

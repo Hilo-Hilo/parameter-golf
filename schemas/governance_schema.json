@@ -1,0 +1,16 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "is_duplicate": {
+      "type": "boolean",
+      "description": "True if the proposed slug, diff, or axes are semantically identical to a previous run in the registry."
+    },
+    "reason": {
+      "type": "string",
+      "description": "Explanation for why it is or isn't a duplicate."
+    }
+  },
+  "required": ["is_duplicate", "reason"],
+  "additionalProperties": false
+}

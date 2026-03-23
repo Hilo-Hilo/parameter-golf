@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "reflection_notes": {
+      "type": "string",
+      "description": "Overall summary of the attempt and its outcome."
+    },
+    "is_success": {
+      "type": "boolean",
+      "description": "True if the experiment was a success and improved the metric or provided clear value."
+    },
+    "recommended_action": {
+      "type": "string",
+      "enum": ["keep", "discard", "branch"],
+      "description": "The recommended next step for the controller."
+    }
+  },
+  "required": ["reflection_notes", "is_success", "recommended_action"],
+  "additionalProperties": false
+}

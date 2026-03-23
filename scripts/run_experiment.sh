@@ -235,5 +235,14 @@ python3 "$repo_root/scripts/parse_train_log.py" \
 
 cp "$summary_path" "$spool_path"
 
+runs_ledger="$repo_root/registry/runs.jsonl"
+mkdir -p "$repo_root/registry"
+touch "$runs_ledger"
+(
+  flock -x 200
+  cat "$summary_path" >> "$runs_ledger"
+  echo "" >> "$runs_ledger"
+) 200>"$repo_root/registry/.runs.lock"
+
 printf 'log=%s\nsummary=%s\nspool=%s\n' "$log_path" "$summary_path" "$spool_path"
 exit "$exit_code"

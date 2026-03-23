@@ -1,0 +1,21 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "diagnosis_notes": {
+      "type": "string",
+      "description": "Analysis of the current code/experiment state and any issues found."
+    },
+    "issues_found": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "List of specific issues, bugs, or anomalies discovered."
+    },
+    "next_steps": {
+      "type": "string",
+      "description": "What to do next based on the diagnosis."
+    }
+  },
+  "required": ["diagnosis_notes", "issues_found", "next_steps"],
+  "additionalProperties": false
+}

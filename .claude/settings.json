@@ -20,7 +20,7 @@
     ],
     "Stop": [
       {
-        "command": "echo '{\"status\": \"stopped\"}' > registry/spool/final_state.json || true"
+        "command": "echo '{\"status\": \"stopped\"}' > registry/spool/${CLAUDE_RUN_ID:-unknown}_final_state.json || true"
       }
     ]
   }
