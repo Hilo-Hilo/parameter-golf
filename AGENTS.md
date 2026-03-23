@@ -10,7 +10,7 @@
 
 ## Learned Workspace Facts
 
-- `git push` to GitHub for this project commonly uses SSH; GitHub CLI OAuth alone does not replace SSH key or agent setup for that remote unless remotes and credentials are explicitly reconfigured.
+- Use GitHub CLI for GitHub auth and Git credential helper: run `gh auth login` (HTTPS) and `gh auth setup-git` so `git push`/`git pull` to `github.com` use `gh` tokens; prefer `gh` for PRs and repo browser workflows; keep `origin` as HTTPS.
 - RunPod usage for Parameter Golf should target pods whose names start with `pg-`; avoid using unrelated pods on the account without explicit user approval.
 - Detached or non-TTY launches of `claude -p` should feed non-interactive stdin (for example `< /dev/null`) so the process does not block waiting for terminal input.
 - Default training layouts that write fixed artifact filenames under the repo root can collide when multiple runs share one checkout; isolate outputs per run when parallelism or overlapping experiments are possible.

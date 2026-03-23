@@ -12,3 +12,5 @@ logs/
 .cursor/hooks/state/
 automation/worker.pid
 automation/worker.log
+
+AGENTS.md
