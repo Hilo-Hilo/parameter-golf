@@ -8,7 +8,7 @@ Usage:
 
 Options:
   --name NAME           Human-readable experiment label. Required.
-  --track LABEL         Track label recorded in results.tsv. Default: local
+  --track LABEL         Track label recorded. Default: local
   --trainer PATH        Trainer path or label. Default: train_gpt.py
   --status STATUS       Requested status for successful valid runs: keep|discard|invalid|crash
   --notes TEXT          Short free-form note.
@@ -17,8 +17,6 @@ Options:
   --eval-seq-len N      Override EVAL_SEQ_LEN env var for train_gpt.py.
   --muon-weight-decay N Override MUON_WEIGHT_DECAY env var for train_gpt.py.
   --submission PATH     Optional submission.json to merge into parsed metrics.
-  --results PATH        Results TSV path. Default: results/results.tsv
-  --log-dir PATH        Log directory. Default: logs/experiments
   --code-path PATH      Path used to compute code bytes. Default: same as --trainer
 EOF
 }
@@ -33,8 +31,6 @@ eval_batch_seqs=""
 eval_seq_len=""
 muon_weight_decay=""
 submission=""
-results_tsv="results/results.tsv"
-log_dir="logs/experiments"
 code_path=""
 
 while [[ $# -gt 0 ]]; do
@@ -77,14 +73,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --submission)
       submission="${2:-}"
-      shift 2
-      ;;
-    --results)
-      results_tsv="${2:-}"
-      shift 2
-      ;;
-    --log-dir)
-      log_dir="${2:-}"
       shift 2
       ;;
     --code-path)
@@ -145,19 +133,26 @@ resolve_path() {
 }
 
 code_path="${code_path:-$trainer}"
-resolved_log_dir=$(resolve_path "$log_dir")
-resolved_results_tsv=$(resolve_path "$results_tsv")
 resolved_code_path=$(resolve_path "$code_path")
 resolved_submission=""
 if [[ -n "$submission" ]]; then
   resolved_submission=$(resolve_path "$submission")
 fi
 
-mkdir -p "$resolved_log_dir" "$(dirname "$resolved_results_tsv")"
+experiment_dir="$repo_root/experiments/$run_id"
+mkdir -p "$experiment_dir"
+mkdir -p "$repo_root/registry/spool"
 
-log_path="$resolved_log_dir/$experiment_id.log"
-meta_path="$resolved_log_dir/$experiment_id.meta"
-summary_path="$resolved_log_dir/$experiment_id.json"
+log_path="$experiment_dir/$experiment_id.log"
+meta_path="$experiment_dir/$experiment_id.meta"
+summary_path="$experiment_dir/$experiment_id.json"
+spool_path="$repo_root/registry/spool/${run_id}.json"
+
+git -C "$repo_root" diff > "$experiment_dir/dirty.patch"
+env > "$experiment_dir/env.txt"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi -L > "$experiment_dir/nvidia_smi.txt" || true
+fi
 
 wallclock_now() {
   python3 - <<'PY'
@@ -204,6 +199,7 @@ set +e
   if [[ -n "$muon_weight_decay" ]]; then
     export MUON_WEIGHT_DECAY="$muon_weight_decay"
   fi
+  export OUTPUT_DIR="$experiment_dir"
   RUN_ID="$run_id" PYTHONUNBUFFERED=1 "$@"
 ) >"$log_path" 2>&1
 exit_code=$?
@@ -237,22 +233,7 @@ python3 "$repo_root/scripts/parse_train_log.py" \
   --notes "$notes" \
   --format json >"$summary_path"
 
-python3 "$repo_root/scripts/parse_train_log.py" \
-  "$log_path" \
-  --submission "$resolved_submission" \
-  --code-path "$resolved_code_path" \
-  --ts-utc "$timestamp" \
-  --experiment-id "$experiment_id" \
-  --run-id "$run_id" \
-  --track "$track" \
-  --trainer "$trainer" \
-  --branch "$branch" \
-  --commit "$commit" \
-  --status "$status" \
-  --exit-code "$exit_code" \
-  --process-wallclock-seconds "$process_wallclock_seconds" \
-  --notes "$notes" \
-  --format tsv >>"$resolved_results_tsv"
+cp "$summary_path" "$spool_path"
 
-printf 'log=%s\nsummary=%s\nresults=%s\n' "$log_path" "$summary_path" "$resolved_results_tsv"
+printf 'log=%s\nsummary=%s\nspool=%s\n' "$log_path" "$summary_path" "$spool_path"
 exit "$exit_code"

@@ -17,16 +17,16 @@ Pre-quant validation metrics are diagnostic only.
 Read before taking action:
 
 - `CLAUDE.md`, `README.md`, `PLAN.md`
-- `journal.md`, `results/results.tsv`
+- `journal.md`, `registry/spool/`
 - `train_gpt.py`, `train_gpt_mlx.py`
 
-`journal.md` and `results/results.tsv` are compressed startup memory, not full archives. Use git history only when a summary line is insufficient.
+`journal.md` and spool records are compressed startup memory, not full archives. Use git history only when a summary line is insufficient.
 
 ## Repo Reality
 
 - Trainers: `train_gpt.py` (CUDA/PyTorch), `train_gpt_mlx.py` (Apple Silicon MLX).
 - Run wrapper: `scripts/run_experiment.sh`.
-- Results ledger: `results/results.tsv`.
+- Results ledger: spooled to `registry/spool/<run_id>.json` by wrapper.
 - This repo does not use `prepare.py`, `train.py`, or `uv run train.py`.
 
 ## Branching
@@ -47,7 +47,7 @@ Never commit experimental changes directly to `main` or `research/*` branches. E
 2. Sync from `upstream` before committing to an old direction.
 3. Create an approach-specific branch (see Branching above).
 4. Check RunPod; only use pods with a `pg-` prefix.
-5. Reconcile `journal.md` and `results/results.tsv` before choosing work.
+5. Reconcile `journal.md` and spool records before choosing work.
 6. Pick one bounded hypothesis with one changed axis.
 
 ## Status Semantics
@@ -77,9 +77,9 @@ scripts/run_experiment.sh \
 2. Choose one small hypothesis.
 3. Make the minimum code/config change.
 4. Launch one wrapped run with `scripts/run_experiment.sh`.
-5. Review log, summary JSON, and appended results row.
+5. Review log and summary JSON from `experiments/<run_id>`.
 6. Decide `keep` / `discard` / `invalid` / `crash`.
-7. Append a short journal update.
+7. Update state and pass context to next branch cycle phase.
 
 ## Runtime Constraints
 
@@ -87,7 +87,7 @@ scripts/run_experiment.sh \
 - Use `scripts/run_experiment.sh` for comparable runs.
 - Work one bounded hypothesis at a time.
 - Only use Parameter Golf pods with a `pg-` prefix.
-- Append material updates to `journal.md`.
+- Update local branch state (do NOT directly edit shared `journal.md` or `results.tsv` inside a branch cycle).
 - Commit and push your branch regularly.
 
 ## Hygiene
@@ -95,4 +95,4 @@ scripts/run_experiment.sh \
 - `journal.md` is append-only from this reset onward.
 - Preserve exact metric and byte accounting for important runs.
 - Prefer cheap, comparable runs over broad sweeps.
-- Compress journal/results again when they stop being useful startup memory.
+- Compress journal and spool records again when they stop being useful startup memory.

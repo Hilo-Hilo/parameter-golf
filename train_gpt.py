@@ -103,6 +103,7 @@ class Hyperparameters:
     ttt_cosine = bool(int(os.environ.get("TTT_COSINE", "1")))
     ttt_perlayer = bool(int(os.environ.get("TTT_PERLAYER", "1")))
     ttt_freeze_embeds = bool(int(os.environ.get("TTT_FREEZE_EMBEDS", "1")))
+    output_dir = os.environ.get("OUTPUT_DIR", ".")
 
 # -----------------------------
 # MUON OPTIMIZER
@@ -1063,8 +1064,8 @@ def main() -> None:
 
     logfile = None
     if master_process:
-        os.makedirs("logs", exist_ok=True)
-        logfile = f"logs/{args.run_id}.txt"
+        os.makedirs(args.output_dir, exist_ok=True)
+        logfile = os.path.join(args.output_dir, f"{args.run_id}.txt")
         print(logfile)
 
     def log0(msg: str, console: bool = True) -> None:
@@ -1360,8 +1361,9 @@ def main() -> None:
 
     # SERIALIZATION + ROUNDTRIP VALIDATION
     if master_process:
-        torch.save(base_model.state_dict(), "final_model.pt")
-        model_bytes = os.path.getsize("final_model.pt")
+        out_pt_path = os.path.join(args.output_dir, "final_model.pt")
+        torch.save(base_model.state_dict(), out_pt_path)
+        model_bytes = os.path.getsize(out_pt_path)
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
@@ -1386,16 +1388,18 @@ def main() -> None:
     else:
         quant_blob = zlib.compress(quant_raw, 9)
     if master_process:
-        with open("final_model.int8.ptz", "wb") as f:
+        out_ptz_path = os.path.join(args.output_dir, "final_model.int8.ptz")
+        with open(out_ptz_path, "wb") as f:
             f.write(quant_blob)
-        quant_file_bytes = os.path.getsize("final_model.int8.ptz")
+        quant_file_bytes = os.path.getsize(out_ptz_path)
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model int6+{_COMPRESSOR}: {quant_file_bytes} bytes")
         log0(f"Total submission size int8+zlib: {quant_file_bytes + code_bytes} bytes")
 
     if distributed:
         dist.barrier()
-    with open("final_model.int8.ptz", "rb") as f:
+    out_ptz_path = os.path.join(args.output_dir, "final_model.int8.ptz")
+    with open(out_ptz_path, "rb") as f:
         quant_blob_disk = f.read()
     if _COMPRESSOR == "zstd":
         decompressed = zstandard.ZstdDecompressor().decompress(quant_blob_disk)

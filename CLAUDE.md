@@ -16,9 +16,10 @@ Read these first:
 
 1. `worker_program.md`
 2. `journal.md`
-3. `results/results.tsv`
+3. `registry/spool/*.json`
 4. `PLAN.md`
 5. `README.md`
+6. `AGENTS.md` (durable preferences and workspace facts; updated via continual-learning)
 
 ## Standard Start Sequence
 
@@ -32,25 +33,13 @@ Read these first:
 
 ## Worker Lifecycle
 
-Start the autonomous worker:
+Start an autonomous worker cycle for a specific branch node:
 
 ```bash
-scripts/start_worker.sh
+scripts/branch_cycle.sh <node_id>
 ```
 
-Check status:
-
-```bash
-scripts/worker_status.sh
-```
-
-Stop:
-
-```bash
-scripts/stop_worker.sh
-```
-
-The worker runs `claude -p` with `worker_program.md` as the prompt. State is a PID file at `automation/worker.pid`, output logs to `automation/worker.log`.
+This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree (`worktrees/<node_id>`). It enforces `--no-session-persistence` and strict `.claude/settings.json` permissions to keep runs concurrency-safe and side-effect free.
 
 ## Infrastructure
 
@@ -75,11 +64,11 @@ The worker runs `claude -p` with `worker_program.md` as the prompt. State is a P
 
 - `worker_program.md` is the canonical autonomous operating program.
 - `journal.md` is the compressed bootstrap journal and is append-only from this reset onward.
-- `results/results.tsv` is the live frontier ledger, not the full archive.
+- Run metadata is spooled to `registry/spool/<run_id>.json`, not a shared full archive.
 - Avoid repeating stale work; reconcile state before launching runs.
 - Prefer one bounded hypothesis per run.
 - Preserve exact metric and byte accounting on materially important runs.
-- When the live journal or results file becomes noisy, compress it again.
+- When the live journal or spooled results become noisy, compress them again.
 
 ### Quality
 

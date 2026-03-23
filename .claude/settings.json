@@ -1,0 +1,27 @@
+{
+  "bypassPermissions": false,
+  "permissions": {
+    "bash": {
+      "deny": [
+        "git push",
+        "git fetch",
+        "git worktree",
+        "runpodctl",
+        "ssh"
+      ]
+    }
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "tool": "bash",
+        "command": "if echo \"$TOOL_ARGS\" | grep -qE 'git push|git fetch|git worktree|runpodctl|ssh'; then echo 'Blocked by PreToolUse hook'; exit 1; fi"
+      }
+    ],
+    "Stop": [
+      {
+        "command": "echo '{\"status\": \"stopped\"}' > registry/spool/final_state.json || true"
+      }
+    ]
+  }
+}

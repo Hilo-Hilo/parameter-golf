@@ -94,7 +94,7 @@ class Hyperparameters:
     muon_momentum_warmup_steps: int = int(os.environ.get("MUON_MOMENTUM_WARMUP_STEPS", 500))
     grad_clip_norm: float = float(os.environ.get("GRAD_CLIP_NORM", 0.0))
 
-    out_dir: str = os.environ.get("OUT_DIR", "logs")
+    out_dir: str = os.environ.get("OUTPUT_DIR", ".")
 
     @property
     def train_files(self) -> str:

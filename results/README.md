@@ -1,8 +1,8 @@
 # Results Ledger
 
-`results/results.tsv` is the live experiment ledger for this repo.
+`registry/spool/*.json` acts as the live experiment ledger for this repo via per-run spools.
 
-The file currently starts from a compressed frontier snapshot rather than the full raw project history. New runs append to that seed state.
+Runs are output individually by `scripts/run_experiment.sh` into JSON files instead of a single appended TSV. This ensures safer concurrency across parallel branches.
 
 ## Canonical Fields
 
@@ -25,8 +25,7 @@ The file currently starts from a compressed frontier snapshot rather than the fu
 ## Workflow
 
 1. Launch runs through `scripts/run_experiment.sh`.
-2. Let the wrapper append one TSV row and store the raw log under `logs/experiments/`.
+2. Let the wrapper spool the summary to `registry/spool/<run_id>.json` and save artifacts to `experiments/<run_id>`.
 3. Upgrade a run from `discard` to `keep` only when it is meaningfully informative.
 
-The TSV is intentionally plain text so it stays easy to diff, grep, and review in PRs.
-When the file grows large enough to become noisy startup context, compress it again instead of preserving every historical row in the live worker view.
+When the spooled runs grow large enough to become noisy startup context, compress them into a summarized format instead of preserving every historical file in the live worker view.
