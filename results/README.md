@@ -1,6 +1,8 @@
 # Results Ledger
 
-`results/results.tsv` is the lightweight experiment ledger for this repo. Each row is one run outcome, whether it was useful or not.
+`results/results.tsv` is the live experiment ledger for this repo.
+
+The file currently starts from a compressed frontier snapshot rather than the full raw project history. New runs append to that seed state.
 
 ## Canonical Fields
 
@@ -27,3 +29,4 @@
 3. Upgrade a run from `discard` to `keep` only when it is meaningfully informative.
 
 The TSV is intentionally plain text so it stays easy to diff, grep, and review in PRs.
+When the file grows large enough to become noisy startup context, compress it again instead of preserving every historical row in the live worker view.

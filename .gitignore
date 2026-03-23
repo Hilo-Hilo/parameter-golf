@@ -9,6 +9,6 @@ data/docs_selected.jsonl
 .mypy_cache/
 .venv
 logs/
-
-# Claude Code project context (personal to this machine)
-CLAUDE.md
+.cursor/hooks/state/
+automation/worker.pid
+automation/worker.log
