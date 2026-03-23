@@ -18,15 +18,33 @@
       "type": "string",
       "description": "Explanation of why this approach is novel and not a duplicate of past attempts in the registry."
     },
-    "next_run_command": {
-      "type": "string",
-      "description": "The exact shell command to execute the proposed experiment (e.g. scripts/run_experiment.sh ...)"
+    "experiment_spec": {
+      "type": "object",
+      "description": "The structured spec for running the experiment.",
+      "properties": {
+        "env_keys": {
+          "type": "object",
+          "description": "Environment variables to pass to the run_experiment script.",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "run_command": {
+          "type": "array",
+          "description": "The command arguments to pass after the -- in run_experiment.sh (e.g. ['torchrun', '--standalone', 'train_gpt.py']).",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": ["env_keys", "run_command"],
+      "additionalProperties": false
     },
     "plan_notes": {
       "type": "string",
       "description": "Any additional reasoning or notes for the plan."
     }
   },
-  "required": ["parent_node", "proposed_slug", "changed_axes", "duplication_justification", "next_run_command", "plan_notes"],
+  "required": ["parent_node", "proposed_slug", "changed_axes", "duplication_justification", "experiment_spec", "plan_notes"],
   "additionalProperties": false
 }

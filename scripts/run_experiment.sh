@@ -116,6 +116,7 @@ case "$status" in
 esac
 
 repo_root=$(git rev-parse --show-toplevel)
+MAIN_CHECKOUT="$(cd "$(git -C "$repo_root" rev-parse --git-common-dir)/.." && pwd)"
 branch=$(git -C "$repo_root" branch --show-current)
 commit=$(git -C "$repo_root" rev-parse HEAD)
 timestamp=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
@@ -139,14 +140,14 @@ if [[ -n "$submission" ]]; then
   resolved_submission=$(resolve_path "$submission")
 fi
 
-experiment_dir="$repo_root/experiments/$run_id"
+experiment_dir="$MAIN_CHECKOUT/experiments/$run_id"
 mkdir -p "$experiment_dir"
-mkdir -p "$repo_root/registry/spool"
+mkdir -p "$MAIN_CHECKOUT/registry/spool"
 
 log_path="$experiment_dir/$experiment_id.log"
 meta_path="$experiment_dir/$experiment_id.meta"
 summary_path="$experiment_dir/$experiment_id.json"
-spool_path="$repo_root/registry/spool/${run_id}.json"
+spool_path="$MAIN_CHECKOUT/registry/spool/${run_id}.json"
 
 git -C "$repo_root" diff > "$experiment_dir/dirty.patch"
 env > "$experiment_dir/env.txt"
@@ -235,14 +236,14 @@ python3 "$repo_root/scripts/parse_train_log.py" \
 
 cp "$summary_path" "$spool_path"
 
-runs_ledger="$repo_root/registry/runs.jsonl"
-mkdir -p "$repo_root/registry"
+runs_ledger="$MAIN_CHECKOUT/registry/runs.jsonl"
+mkdir -p "$MAIN_CHECKOUT/registry"
 touch "$runs_ledger"
 (
   flock -x 200
   cat "$summary_path" >> "$runs_ledger"
   echo "" >> "$runs_ledger"
-) 200>"$repo_root/registry/.runs.lock"
+) 200>"$MAIN_CHECKOUT/registry/.runs.lock"
 
 printf 'log=%s\nsummary=%s\nspool=%s\n' "$log_path" "$summary_path" "$spool_path"
 exit "$exit_code"

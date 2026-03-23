@@ -1,21 +1,17 @@
 {
-  "bypassPermissions": false,
-  "disableBypassPermissionsMode": "disable",
-  "fsAccess": {
-    "allowedPaths": [
-      "."
-    ]
+  "sandbox": {
+    "filesystem": {
+      "allowWrite": ["."]
+    }
   },
   "permissions": {
-    "Bash": {
-      "deny": [
-        "git push",
-        "git fetch",
-        "git worktree",
-        "runpodctl",
-        "ssh"
-      ]
-    }
+    "deny": [
+      "Bash(git push*)",
+      "Bash(git fetch*)",
+      "Bash(git worktree*)",
+      "Bash(runpodctl*)",
+      "Bash(ssh*)"
+    ]
   },
   "hooks": {
     "PreToolUse": [
@@ -24,7 +20,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if echo \"$TOOL_ARGS\" | grep -qE 'git push|git fetch|git worktree|runpodctl|ssh'; then exit 1; fi"
+            "command": "COMMAND=$(jq -r '.tool_input.command'); if echo \"$COMMAND\" | grep -qE 'git push|git fetch|git worktree|runpodctl|ssh'; then exit 1; fi"
           }
         ]
       }
@@ -34,7 +30,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '{\"status\": \"stopped\"}' > registry/spool/${CLAUDE_RUN_ID:-unknown}_final_state.json || true"
+            "command": "MAIN_CHECKOUT=\"$(cd \"$(git rev-parse --git-common-dir 2>/dev/null || echo .)/..\" && pwd)\"; echo '{\"status\": \"stopped\"}' > \"$MAIN_CHECKOUT/registry/spool/${CLAUDE_RUN_ID:-unknown}_final_state.json\" || true"
           }
         ]
       }
