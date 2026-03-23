@@ -30,3 +30,31 @@ Use git history if a summarized point needs more detail.
 
 ### Append-only rule from reset onward
 - From this reset forward, append new material updates here instead of rebuilding full historical narration.
+
+## 2026-03-22 — SOTA adoption + TTT approach
+
+### Upstream recon
+- Upstream main has no new commits since last sync.
+- Leaderboard leader: thwu1 at 1.1428 bpb (10L, mixed int5/int6, BigramHash(10240), SWA(0.4), WD=0.04).
+- Key gap vs our best (1.225): missing BigramHash, SmearGate, 3x MLP, mixed int5/int6 quant, SWA, zstd-22, extended warmdown.
+- Unmerged PRs show TTT (Test-Time Training) as dominant lever:
+  - PR #486: 1.0887 (TrigramHash + ValueResidual + GradQuant + Cosine TTT)
+  - PR #481: 1.0970 (Cosine TTT + per-layer LR)
+  - PR #508: 1.1215 (GPTQ + Early QAT + Legal TTT)
+- TTT alone adds ~0.03-0.05 bpb improvement over non-TTT approaches.
+
+### Extended baseline run (killed before completion)
+- Pod `pg-sota-repro` (1xH100 NVL) ran stock baseline `train_gpt.py` from upstream main with MAX_WALLCLOCK_SECONDS=8550.
+- Stopped at step 7529 after wallclock cap.
+- Pre-quant val_bpb at step 7500: 1.1496.
+- int6+zstd model: 15,897,453 bytes, total submission: 15,950,620 bytes.
+- Killed during sliding window eval (969K windows) to free GPU.
+- Status: invalid (not challenge-comparable, extended wallclock, no final roundtrip metric captured).
+
+### Approach: cosine-ttt
+- Branch: `approach/cosine-ttt`.
+- Base: SOTA #1 entry code (thwu1, 1.1428 bpb).
+- Change: added chunk-by-chunk TTT with cosine LR, per-layer LR (3x MLP output, 0.5x input), EMA scoring, embedding freeze.
+- Fix: manually expand KV heads for GQA (PyTorch 2.4 on pod lacks enable_gqa kwarg).
+- First run `cosine_ttt_v1` launched on `pg-sota-repro` (1xH100 NVL, 600s wallclock).
+- Hypothesis: TTT will improve SOTA #1's post-quant roundtrip bpb by 0.02-0.05.
