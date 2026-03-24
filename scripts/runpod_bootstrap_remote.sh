@@ -16,6 +16,7 @@ COMMIT_SHA="$3"
 WORKSPACE="/workspace"
 PG_REPO="$WORKSPACE/parameter-golf"
 JOB_DIR="$WORKSPACE/jobs/$JOB_ID"
+REPO_URL="${RUNPOD_REPO_URL:-https://github.com/Hilo-Hilo/parameter-golf.git}"
 
 # Ensure essential tools
 if ! command -v jq >/dev/null || ! command -v tmux >/dev/null || ! command -v rsync >/dev/null; then
@@ -27,15 +28,18 @@ cd "$WORKSPACE"
 
 if [ ! -d "$PG_REPO" ]; then
   echo "Cloning repository..."
-  # Use https for public repo pull-only
-  git clone https://github.com/Hilo-Hilo/parameter-golf.git "$PG_REPO"
+  git clone "$REPO_URL" "$PG_REPO"
 fi
 
 cd "$PG_REPO"
+git remote set-url origin "$REPO_URL"
 echo "Fetching origin..."
 git fetch origin --prune
 
 echo "Creating detached worktree for $JOB_ID..."
+if [ -d "$JOB_DIR" ]; then
+  git worktree remove -f "$JOB_DIR" 2>/dev/null || rm -rf "$JOB_DIR"
+fi
 git worktree add --detach -f "$JOB_DIR" "$COMMIT_SHA"
 
 cd "$JOB_DIR"

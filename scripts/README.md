@@ -21,12 +21,12 @@ There are two canonical execution lanes:
 
 ### Pod Lifecycle & Dispatch (Mac Side)
 - `scripts/runpod_pool.sh`: Manage pod clusters using local `runpodctl` (`get`, `create`, `start`, `stop`, `terminate`).
-- `scripts/runpod_dispatch.sh`: Reads a job spec JSON, finds or provisions an appropriate pod, and connects via SSH over public IP (TCP 22) to deploy the bootstrapping scripts and launch the job.
-- `scripts/runpod_collect.sh`: Connects to the pod via SSH to `rsync` back metrics, logs, and artifacts, and securely appends the results to `registry/runs.jsonl`.
+- `scripts/runpod_dispatch.sh`: Reads a job spec JSON, finds or provisions an appropriate pod, resolves the SSH endpoint with `runpodctl ssh connect`, and launches the remote job. Set `RUNPOD_POD_ID` to pin the dispatch to a specific pod during smoke tests.
+- `scripts/runpod_collect.sh`: Connects to the pod via SSH and port-aware `rsync` to pull back the canonical experiment directory, wrapper logs, and spool summary, then securely appends the results to `registry/runs.jsonl` with a macOS/Linux-safe file lock.
 
 ### Remote Execution (RunPod Side)
 These scripts are deployed and executed on the pod by the Mac controller over SSH:
-- `scripts/runpod_bootstrap_remote.sh`: Fetches the repository (`git fetch origin --prune`), creates a detached worktree at the exact designated commit SHA, and verifies the SHA matches.
+- `scripts/runpod_bootstrap_remote.sh`: Normalizes `origin` to the tracked GitHub repo, fetches it (`git fetch origin --prune`), creates a detached worktree at the exact designated commit SHA, and verifies the SHA matches.
 - `scripts/runpod_run_remote.sh`: Validates hardware (exact GPU count and model), applies an outer timeout, and starts the `run_experiment.sh` invocation inside `tmux`.
 
 ## Execution Wrapper
