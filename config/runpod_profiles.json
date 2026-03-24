@@ -2,6 +2,10 @@
   "pg-exp": {
     "gpu_count": 1,
     "gpu_type": "NVIDIA H100 80GB HBM3",
+    "gpu_type_candidates": [
+      "NVIDIA H100 80GB HBM3",
+      "NVIDIA H100 NVL"
+    ],
     "idle_grace_minutes": 30,
     "idle_action": "stop",
     "failure_action": "terminate",

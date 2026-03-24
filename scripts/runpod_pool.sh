@@ -30,6 +30,31 @@ require_cmd() {
   fi
 }
 
+resolve_gpu_candidates() {
+  local profile_key="$1"
+
+  python3 - "$PROFILE_FILE" "$profile_key" <<'PY'
+import json
+import pathlib
+import sys
+
+profile_path = pathlib.Path(sys.argv[1])
+profile_key = sys.argv[2]
+payload = json.loads(profile_path.read_text(encoding="utf-8"))
+profile = payload.get(profile_key, {})
+
+candidates = profile.get("gpu_type_candidates")
+if isinstance(candidates, list) and candidates:
+    for item in candidates:
+        if item:
+            print(item)
+else:
+    gpu_type = profile.get("gpu_type")
+    if gpu_type:
+        print(gpu_type)
+PY
+}
+
 resolve_template_image_name() {
   local template_id="$1"
 
@@ -116,9 +141,14 @@ case "$ACTION" in
     PROFILE_KEY="$(profile_key_for_name "$NAME")"
     GPU_COUNT="$(jq -r --arg key "$PROFILE_KEY" '.[$key].gpu_count' "$PROFILE_FILE")"
     GPU_TYPE="$(jq -r --arg key "$PROFILE_KEY" '.[$key].gpu_type' "$PROFILE_FILE")"
+    GPU_CANDIDATES="$(resolve_gpu_candidates "$PROFILE_KEY")"
 
     if [ -z "$GPU_COUNT" ] || [ "$GPU_COUNT" = "null" ] || [ -z "$GPU_TYPE" ] || [ "$GPU_TYPE" = "null" ]; then
       echo "Error: invalid profile configuration for $PROFILE_KEY in $PROFILE_FILE" >&2
+      exit 1
+    fi
+    if [ -z "$GPU_CANDIDATES" ]; then
+      echo "Error: unable to resolve GPU candidates for $PROFILE_KEY in $PROFILE_FILE" >&2
       exit 1
     fi
 
@@ -138,27 +168,47 @@ case "$ACTION" in
       exit 1
     fi
 
-    echo "Creating pod $NAME ($GPU_COUNT x $GPU_TYPE)..."
+    last_output=""
+    while IFS= read -r candidate_gpu_type; do
+      [ -n "$candidate_gpu_type" ] || continue
+      echo "Creating pod $NAME ($GPU_COUNT x $candidate_gpu_type)..."
 
-    create_args=(
-      create pod
-      --name "$NAME"
-      --gpuCount "$GPU_COUNT"
-      --gpuType "$GPU_TYPE"
-      --containerDiskSize 50
-      --volumeSize 50
-      --volumePath "/workspace"
-      --ports "22/tcp"
-      --startSSH
-      --templateId "$RUNPOD_TEMPLATE_ID"
-      --imageName "$TEMPLATE_IMAGE_NAME"
-    )
+      create_args=(
+        create pod
+        --name "$NAME"
+        --gpuCount "$GPU_COUNT"
+        --gpuType "$candidate_gpu_type"
+        --containerDiskSize 50
+        --volumeSize 50
+        --volumePath "/workspace"
+        --ports "22/tcp"
+        --startSSH
+        --templateId "$RUNPOD_TEMPLATE_ID"
+        --imageName "$TEMPLATE_IMAGE_NAME"
+      )
 
-    if [ -n "${RUNPOD_CONTAINER_ARGS:-}" ]; then
-      create_args+=(--args "$RUNPOD_CONTAINER_ARGS")
-    fi
+      if [ -n "${RUNPOD_CONTAINER_ARGS:-}" ]; then
+        create_args+=(--args "$RUNPOD_CONTAINER_ARGS")
+      fi
 
-    runpodctl "${create_args[@]}"
+      if last_output="$(runpodctl "${create_args[@]}" 2>&1)"; then
+        printf '%s\n' "$last_output"
+        exit 0
+      fi
+
+      printf '%s\n' "$last_output" >&2
+      case "$last_output" in
+        *"no longer any instances available"*|*"There are no longer any instances available"*|*"insufficient capacity"*)
+          echo "Capacity unavailable for $candidate_gpu_type; trying next candidate if available..." >&2
+          ;;
+        *)
+          exit 1
+          ;;
+      esac
+    done <<< "$GPU_CANDIDATES"
+
+    echo "Error: unable to create pod $NAME from any configured GPU candidates." >&2
+    exit 1
     ;;
   start)
     if [ $# -lt 1 ]; then

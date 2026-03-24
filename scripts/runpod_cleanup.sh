@@ -72,6 +72,32 @@ log_event() {
   "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
 }
 
+pod_status_from_output() {
+  python3 - <<'PY'
+import sys
+
+text = sys.stdin.read()
+lines = [line for line in text.splitlines() if line.strip()]
+if len(lines) < 2:
+    print("MISSING")
+    raise SystemExit(0)
+
+header = [cell.strip() for cell in lines[0].split("\t")]
+row = [cell.strip() for cell in lines[1].split("\t")]
+
+try:
+    idx = header.index("STATUS")
+except ValueError:
+    print("MISSING")
+    raise SystemExit(0)
+
+if idx >= len(row):
+    print("MISSING")
+else:
+    print(row[idx] or "MISSING")
+PY
+}
+
 lease_file="$REPO_ROOT/registry/spool/${job_id}_lease.json"
 pod_id=""
 profile_key=""
@@ -114,7 +140,7 @@ case "$action" in
 esac
 
 pod_info_before="$(runpodctl get pod "$pod_id" --allfields 2>/dev/null || true)"
-pod_status_before="$(printf '%s\n' "$pod_info_before" | awk 'NR == 2 { print $5 }')"
+pod_status_before="$(printf '%s' "$pod_info_before" | pod_status_from_output)"
 pod_status_before="${pod_status_before:-MISSING}"
 action_applied="$action"
 
@@ -152,7 +178,7 @@ if [[ "$dry_run" -eq 0 ]]; then
 fi
 
 pod_info_after="$(runpodctl get pod "$pod_id" --allfields 2>/dev/null || true)"
-pod_status_after="$(printf '%s\n' "$pod_info_after" | awk 'NR == 2 { print $5 }')"
+pod_status_after="$(printf '%s' "$pod_info_after" | pod_status_from_output)"
 pod_status_after="${pod_status_after:-MISSING}"
 released_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 

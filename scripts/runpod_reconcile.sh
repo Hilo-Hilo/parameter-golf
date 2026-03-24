@@ -57,6 +57,32 @@ log_event() {
   "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
 }
 
+pod_status_from_output() {
+  python3 - <<'PY'
+import sys
+
+text = sys.stdin.read()
+lines = [line for line in text.splitlines() if line.strip()]
+if len(lines) < 2:
+    print("MISSING")
+    raise SystemExit(0)
+
+header = [cell.strip() for cell in lines[0].split("\t")]
+row = [cell.strip() for cell in lines[1].split("\t")]
+
+try:
+    idx = header.index("STATUS")
+except ValueError:
+    print("MISSING")
+    raise SystemExit(0)
+
+if idx >= len(row):
+    print("MISSING")
+else:
+    print(row[idx] or "MISSING")
+PY
+}
+
 lease_epoch() {
   python3 - "$1" <<'PY'
 from datetime import datetime, timezone
@@ -103,7 +129,7 @@ for lease_file in "${lease_files[@]}"; do
   expiry_epoch="$(lease_epoch "$lease_expires_at")"
 
   pod_info="$(runpodctl get pod "$pod_id" --allfields 2>/dev/null || true)"
-  pod_status="$(printf '%s\n' "$pod_info" | awk 'NR == 2 { print $5 }')"
+  pod_status="$(printf '%s' "$pod_info" | pod_status_from_output)"
   pod_status="${pod_status:-MISSING}"
 
   echo "Reconciling $job_id on pod $pod_id (status=$pod_status)..."
