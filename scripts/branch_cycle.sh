@@ -9,6 +9,7 @@ fi
 NODE_ID="$1"
 REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 MAIN_CHECKOUT="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir)/.." && pwd)"
+SAFE_NODE_ID="$(printf '%s' "$NODE_ID" | tr -cs 'A-Za-z0-9._-' '_')"
 
 export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
 export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
@@ -18,19 +19,91 @@ mkdir -p "$MAIN_CHECKOUT/registry/spool"
 STATE_FILE="$MAIN_CHECKOUT/registry/spool/${NODE_ID}_state.json"
 NODES_DB="$MAIN_CHECKOUT/registry/nodes.jsonl"
 NODES_LOCK_FILE="$MAIN_CHECKOUT/registry/.nodes.lock"
+NODE_LOCK_ROOT="$MAIN_CHECKOUT/registry/node_locks"
+NODE_LOCK_DIR="$NODE_LOCK_ROOT/$SAFE_NODE_ID"
 touch "$NODES_DB"
 
 SCRATCH_DIR=$(mktemp -d)
-PLAN_WORKTREE="$MAIN_CHECKOUT/worktrees/scratch_$$"
+SCRATCH_REF="scratch_${SAFE_NODE_ID}_$$"
+PLAN_WORKTREE="$MAIN_CHECKOUT/worktrees/$SCRATCH_REF"
+JOB_DISPATCHED=0
+POD_CLEANED=0
+CHILD_NODE_ID=""
+
+acquire_node_lock() {
+  mkdir -p "$NODE_LOCK_ROOT"
+
+  while true; do
+    if mkdir "$NODE_LOCK_DIR" 2>/dev/null; then
+      printf '%s\n' "$$" > "$NODE_LOCK_DIR/pid"
+      return
+    fi
+
+    if [ -f "$NODE_LOCK_DIR/pid" ]; then
+      owner_pid="$(cat "$NODE_LOCK_DIR/pid" 2>/dev/null || echo "")"
+      if [ -n "$owner_pid" ] && ! kill -0 "$owner_pid" 2>/dev/null; then
+        rm -rf "$NODE_LOCK_DIR"
+        continue
+      fi
+    fi
+
+    echo "Error: node $NODE_ID is already being processed." >&2
+    exit 1
+  done
+}
+
+release_node_lock() {
+  rm -rf "$NODE_LOCK_DIR" 2>/dev/null || true
+}
 
 cleanup() {
+  local rc=$?
+  trap - EXIT INT TERM
+
+  if [ "$JOB_DISPATCHED" -eq 1 ] && [ "$POD_CLEANED" -eq 0 ] && [ -n "$CHILD_NODE_ID" ]; then
+    cd "$MAIN_CHECKOUT"
+    scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "controller_exit" >/dev/null 2>&1 || true
+  fi
+
+  release_node_lock
   rm -rf "$SCRATCH_DIR"
   if [ -d "$PLAN_WORKTREE" ]; then
     git worktree remove -f "$PLAN_WORKTREE" 2>/dev/null || true
-    git branch -D "scratch_$$" 2>/dev/null || true
+    git branch -D "$SCRATCH_REF" 2>/dev/null || true
   fi
+  exit "$rc"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
+
+controller_ttl_epoch() {
+  local lease_file="$1"
+
+  python3 - "$lease_file" <<'PY'
+from datetime import datetime, timezone
+import json
+import pathlib
+import sys
+
+lease_path = pathlib.Path(sys.argv[1])
+if not lease_path.exists():
+    print("0")
+    raise SystemExit(0)
+
+try:
+    payload = json.loads(lease_path.read_text(encoding="utf-8"))
+except json.JSONDecodeError:
+    print("0")
+    raise SystemExit(0)
+
+lease_expires_at = payload.get("lease_expires_at")
+if not lease_expires_at:
+    print("0")
+    raise SystemExit(0)
+
+deadline = datetime.strptime(lease_expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+print(int(deadline.timestamp()))
+PY
+}
 
 fingerprint_exists() {
   local fingerprint="$1"
@@ -131,8 +204,12 @@ else:
 PY
 }
 
+acquire_node_lock
+cd "$MAIN_CHECKOUT"
+scripts/runpod_reconcile.sh >/dev/null 2>&1 || true
+
 mkdir -p "$MAIN_CHECKOUT/worktrees"
-git worktree add -B "scratch_$$" "$PLAN_WORKTREE" "tree/$NODE_ID"
+git worktree add -B "$SCRATCH_REF" "$PLAN_WORKTREE" "tree/$NODE_ID"
 cd "$PLAN_WORKTREE"
 
 # ==============================================================================
@@ -271,27 +348,50 @@ jq --arg branch "$BRANCH_NAME" \
 echo "Dispatching job to RunPod..."
 cd "$MAIN_CHECKOUT"
 scripts/runpod_dispatch.sh "$JOB_SPEC"
+JOB_DISPATCHED=1
 
-# Wait for completion (poll for the result file in remote or just a timeout/heartbeat mechanism)
-# In this architecture, tmux runs it in the background on the pod.
-# We will poll SSH to see if tmux session is still running.
 SSH_TARGET=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_target.txt" || echo "")
+SSH_PORT=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_port.txt" || echo "22")
 if [ -z "$SSH_TARGET" ]; then
   echo "Error: SSH target not saved by dispatch."
   exit 1
 fi
 
-echo "Waiting for remote job to complete on $SSH_TARGET..."
+LEASE_FILE="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_lease.json"
+CONTROLLER_TTL_EPOCH="$(controller_ttl_epoch "$LEASE_FILE")"
+
+echo "Waiting for remote job to complete on $SSH_TARGET:$SSH_PORT..."
 while true; do
-  if ! ssh -o StrictHostKeyChecking=no "$SSH_TARGET" "tmux has-session -t job_${CHILD_NODE_ID} 2>/dev/null"; then
+  if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT" "$SSH_TARGET" "tmux has-session -t job_${CHILD_NODE_ID} 2>/dev/null" >/dev/null 2>&1; then
+    :
+  elif ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT" "$SSH_TARGET" "true" >/dev/null 2>&1; then
     echo "Tmux session ended. Job complete."
     break
+  else
+    echo "Remote SSH check failed for $CHILD_NODE_ID; retrying."
   fi
+
+  if [ "$CONTROLLER_TTL_EPOCH" -gt 0 ] && [ "$(date -u +%s)" -ge "$CONTROLLER_TTL_EPOCH" ]; then
+    echo "Controller TTL exceeded for $CHILD_NODE_ID. Triggering failure cleanup."
+    if scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "controller_ttl_exceeded" >/dev/null 2>&1; then
+      POD_CLEANED=1
+    fi
+    exit 1
+  fi
+
   sleep 60
 done
 
 echo "Collecting artifacts from remote..."
-scripts/runpod_collect.sh "$SSH_TARGET" "$CHILD_NODE_ID"
+if ! scripts/runpod_collect.sh "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID"; then
+  if scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "collect_failed" >/dev/null 2>&1; then
+    POD_CLEANED=1
+  fi
+  exit 1
+fi
+
+scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "job_complete"
+POD_CLEANED=1
 
 # Clean up final child worktree if we created one, but we don't need local worktree for execution anymore
 # The plan worktree is cleaned up by the trap.

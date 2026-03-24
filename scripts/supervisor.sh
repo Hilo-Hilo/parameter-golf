@@ -8,6 +8,9 @@ LOCK_FILE="$REPO_ROOT/registry/.supervisor.lock"
 mkdir -p "$REPO_ROOT/registry"
 touch "$NODES_DB"
 
+echo "Reconciling stale RunPod leases..."
+"$REPO_ROOT/scripts/runpod_reconcile.sh" || true
+
 echo "Checking for pending nodes..."
 
 PENDING_NODE="$(

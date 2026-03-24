@@ -37,7 +37,7 @@ Start an autonomous worker cycle for a specific branch node:
 scripts/branch_cycle.sh <node_id>
 ```
 
-This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree (`worktrees/<node_id>`). It enforces `--no-session-persistence` and strict `.claude/settings.json` permissions to keep runs concurrency-safe and side-effect free. 
+This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree (`worktrees/<node_id>`). The controller still owns the shared `registry/` and `experiments/` ledgers, pod leases, cleanup, and crash recovery. It enforces `--no-session-persistence` and strict `.claude/settings.json` permissions to keep runs concurrency-safe and side-effect free. 
 
 **Note**: Branch creation, git upstream synchronization, and infrastructure execution are strictly handled by the shell wrapper. Do not attempt to run git branch/push/fetch commands or interact directly with remote infra in the worker cycle.
 
@@ -51,7 +51,7 @@ This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnos
 4. Do not edit repo files directly over SSH.
 
 ### Controller
-Pods are dumb executors. Claude never touches RunPod directly. The local controller owns branch pushes, job queueing, pod selection, and remote launch.
+Pods are dumb executors. Claude never touches RunPod directly. The local controller owns branch pushes, the shared registry, job queueing, pod selection, remote launch, artifact collection, and post-run stop/terminate decisions.
 
 ### Research
 

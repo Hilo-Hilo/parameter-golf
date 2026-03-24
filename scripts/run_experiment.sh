@@ -198,6 +198,63 @@ print(f"{time.time():.6f}")
 PY
 }
 
+resolve_timeout_cmd() {
+  if command -v timeout >/dev/null 2>&1; then
+    printf 'timeout\n'
+  elif command -v gtimeout >/dev/null 2>&1; then
+    printf 'gtimeout\n'
+  else
+    printf '\n'
+  fi
+}
+
+cleanup_heartbeat() {
+  if [[ -n "${heartbeat_pid:-}" ]]; then
+    kill "$heartbeat_pid" 2>/dev/null || true
+    wait "$heartbeat_pid" 2>/dev/null || true
+    heartbeat_pid=""
+  fi
+
+  if [[ -n "${heartbeat_file:-}" ]]; then
+    rm -f "$heartbeat_file"
+  fi
+}
+
+write_final_state() {
+  local final_exit_code="$1"
+
+  if [[ -z "$job_id" ]]; then
+    return 0
+  fi
+
+  python3 - "$MAIN_CHECKOUT/registry/spool/${job_id}_final_state.json" "$job_id" "$run_id" "$final_exit_code" <<'PY'
+from datetime import datetime, timezone
+import json
+import pathlib
+import sys
+
+state_path = pathlib.Path(sys.argv[1])
+job_id = sys.argv[2]
+run_id = sys.argv[3]
+exit_code = int(sys.argv[4])
+
+state_path.parent.mkdir(parents=True, exist_ok=True)
+payload = {
+    "job_id": job_id,
+    "run_id": run_id,
+    "exit_code": exit_code,
+    "timestamp": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+state_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+on_exit() {
+  local rc=$?
+  cleanup_heartbeat
+  write_final_state "$rc"
+}
+
 printf -v command_str '%q ' "$@"
 command_str="${command_str% }"
 
@@ -253,9 +310,16 @@ if [[ -n "$heartbeat_seconds" && -n "$job_id" ]]; then
   heartbeat_pid=$!
 fi
 
+trap on_exit EXIT
+
 base_cmd=("$@")
 if [[ -n "$outer_timeout_seconds" ]]; then
-  base_cmd=(timeout -k 30s "$outer_timeout_seconds" "${base_cmd[@]}")
+  timeout_cmd="$(resolve_timeout_cmd)"
+  if [[ -n "$timeout_cmd" ]]; then
+    base_cmd=("$timeout_cmd" -k 30s "$outer_timeout_seconds" "${base_cmd[@]}")
+  else
+    base_cmd=("python3" "$repo_root/scripts/timeout_exec.py" "--kill-after" "30" "$outer_timeout_seconds" "--" "${base_cmd[@]}")
+  fi
 fi
 
 wallclock_start=$(wallclock_now)
@@ -284,9 +348,7 @@ exit_code=$?
 set -e
 wallclock_end=$(wallclock_now)
 
-if [[ -n "$heartbeat_pid" ]]; then
-  kill "$heartbeat_pid" 2>/dev/null || true
-fi
+cleanup_heartbeat
 process_wallclock_seconds=$(python3 - "$wallclock_start" "$wallclock_end" <<'PY'
 import sys
 start = float(sys.argv[1])

@@ -3,6 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
+PROFILE_FILE="$REPO_ROOT/config/runpod_profiles.json"
 
 usage() {
   echo "Usage: $0 <job_spec.json>" >&2
@@ -32,6 +33,34 @@ require_cmd runpodctl
 require_cmd ssh
 require_cmd scp
 
+active_leased_pods() {
+  python3 - "$REPO_ROOT/registry/spool" <<'PY'
+import json
+import pathlib
+import sys
+
+spool_dir = pathlib.Path(sys.argv[1])
+if not spool_dir.exists():
+    raise SystemExit(0)
+
+leased = set()
+for lease_path in spool_dir.glob("*_lease.json"):
+    try:
+        payload = json.loads(lease_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        continue
+    cleanup = payload.get("cleanup", {})
+    if cleanup.get("released_at"):
+        continue
+    pod_id = payload.get("pod_id")
+    if pod_id:
+        leased.add(pod_id)
+
+for pod_id in sorted(leased):
+    print(pod_id)
+PY
+}
+
 BRANCH="$(jq -r '.branch' "$JOB_SPEC")"
 COMMIT_SHA="$(jq -r '.commit_sha' "$JOB_SPEC")"
 JOB_ID="$(jq -r '.job_id' "$JOB_SPEC")"
@@ -58,13 +87,48 @@ POD_PREFIX="pg-exp"
 if [ "$REQ_GPU_COUNT" = "8" ]; then
   POD_PREFIX="pg-rec"
 fi
+PROFILE_KEY="$POD_PREFIX"
+
+IDLE_ACTION="$(jq -r --arg key "$PROFILE_KEY" '.[$key].idle_action // "stop"' "$PROFILE_FILE")"
+FAILURE_ACTION="$(jq -r --arg key "$PROFILE_KEY" '.[$key].failure_action // "terminate"' "$PROFILE_FILE")"
+IDLE_GRACE_MINUTES="$(jq -r --arg key "$PROFILE_KEY" '.[$key].idle_grace_minutes // 30' "$PROFILE_FILE")"
+LEASE_TTL_MINUTES="$(jq -r --arg key "$PROFILE_KEY" '.[$key].lease_ttl_minutes // 45' "$PROFILE_FILE")"
+POD_ID=""
+
+dispatch_cleanup() {
+  local rc=$?
+  if [ "$rc" -ne 0 ] && [ -n "$POD_ID" ]; then
+    echo "Dispatch failed for $JOB_ID; cleaning up pod $POD_ID with action $FAILURE_ACTION." >&2
+    case "$FAILURE_ACTION" in
+      terminate)
+        runpodctl remove pod "$POD_ID" >/dev/null 2>&1 || true
+        ;;
+      stop)
+        runpodctl stop pod "$POD_ID" >/dev/null 2>&1 || true
+        ;;
+    esac
+  fi
+}
+
+trap dispatch_cleanup EXIT
 
 if [ -n "${RUNPOD_POD_ID:-}" ]; then
   POD_ID="$RUNPOD_POD_ID"
 else
+  ACTIVE_LEASED_PODS="$(active_leased_pods)"
   POD_ID="$(
     runpodctl get pod \
-      | awk -v prefix="$POD_PREFIX" 'NR > 1 && $2 ~ ("^" prefix) { print $1; exit }'
+      | awk -v prefix="$POD_PREFIX" -v leased="$ACTIVE_LEASED_PODS" '
+          BEGIN {
+            split(leased, rows, "\n")
+            for (i in rows) {
+              if (rows[i] != "") {
+                busy[rows[i]] = 1
+              }
+            }
+          }
+          NR > 1 && $2 ~ ("^" prefix) && !busy[$1] { print $1; exit }
+        '
   )"
 fi
 
@@ -147,5 +211,55 @@ mkdir -p "$REPO_ROOT/registry/spool"
 printf '%s\n' "$SSH_HOST" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_target.txt"
 printf '%s\n' "$SSH_PORT" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_port.txt"
 printf '%s\n' "$POD_ID" > "$REPO_ROOT/registry/spool/${JOB_ID}_pod_id.txt"
+POD_NAME="$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null | awk 'NR == 2 { print $2 }')"
+DISPATCHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+LEASE_EXPIRES_AT="$(python3 - "$DISPATCHED_AT" "$LEASE_TTL_MINUTES" <<'PY'
+from datetime import datetime, timedelta, timezone
+import sys
 
+dispatched_at = datetime.strptime(sys.argv[1], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+lease_ttl_minutes = int(sys.argv[2])
+print((dispatched_at + timedelta(minutes=lease_ttl_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ"))
+PY
+)"
+
+jq -n \
+  --arg job_id "$JOB_ID" \
+  --arg branch "$BRANCH" \
+  --arg commit_sha "$COMMIT_SHA" \
+  --arg pod_id "$POD_ID" \
+  --arg pod_name "$POD_NAME" \
+  --arg profile_key "$PROFILE_KEY" \
+  --arg ssh_host "$SSH_HOST" \
+  --argjson ssh_port "$SSH_PORT" \
+  --arg dispatched_at "$DISPATCHED_AT" \
+  --arg lease_expires_at "$LEASE_EXPIRES_AT" \
+  --arg idle_action "$IDLE_ACTION" \
+  --arg failure_action "$FAILURE_ACTION" \
+  --argjson idle_grace_minutes "$IDLE_GRACE_MINUTES" \
+  --argjson lease_ttl_minutes "$LEASE_TTL_MINUTES" \
+  --argjson run_argv "$RUN_ARGV_JSON" \
+  '{
+    job_id: $job_id,
+    branch: $branch,
+    commit_sha: $commit_sha,
+    pod_id: $pod_id,
+    pod_name: $pod_name,
+    profile_key: $profile_key,
+    ssh: {
+      host: $ssh_host,
+      port: $ssh_port
+    },
+    dispatched_at: $dispatched_at,
+    lease_expires_at: $lease_expires_at,
+    run_argv: $run_argv,
+    cleanup: {
+      default_action: $idle_action,
+      failure_action: $failure_action,
+      idle_grace_minutes: $idle_grace_minutes,
+      lease_ttl_minutes: $lease_ttl_minutes
+    }
+  }' > "$REPO_ROOT/registry/spool/${JOB_ID}_lease.json"
+
+trap - EXIT
 echo "Job dispatched successfully."

@@ -43,35 +43,79 @@ if ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_HOST" "[ -f \"$REMOTE_SP
   rsync -avz -e "ssh -o StrictHostKeyChecking=no -p $SSH_PORT" "$SSH_HOST:$REMOTE_SPOOL_JSON" "$LOCAL_RESULTS_DIR/"
 fi
 
-# After collecting, append summary to locked runs.jsonl
-# The pod's run_experiment.sh generated a $JOB_ID.json in the output directory
-# BUT wait! run_experiment.sh creates the summary path as `$experiment_id.json`, and run_id might be `$JOB_ID`.
-# Let's find the json file in the pulled directory.
+# After collecting, append the canonical summary to locked runs.jsonl.
+SUMMARY_FILE="$(
+  python3 - "$LOCAL_RESULTS_DIR" <<'PY'
+import json
+import pathlib
+import sys
 
-SUMMARY_FILES=("$LOCAL_RESULTS_DIR"/*.json)
-if [ ${#SUMMARY_FILES[@]} -gt 0 ] && [ -f "${SUMMARY_FILES[0]}" ]; then
-  SUMMARY_FILE="${SUMMARY_FILES[0]}"
+results_dir = pathlib.Path(sys.argv[1])
+
+for candidate in sorted(results_dir.glob("*.json")):
+    try:
+        payload = json.loads(candidate.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        continue
+    if isinstance(payload, dict) and payload.get("run_id"):
+        print(str(candidate))
+        break
+PY
+)"
+
+if [ -n "$SUMMARY_FILE" ] && [ -f "$SUMMARY_FILE" ]; then
   RUNS_LEDGER="$REPO_ROOT/registry/runs.jsonl"
+  RUNS_LOCK="$REPO_ROOT/registry/.runs.lock"
   mkdir -p "$REPO_ROOT/registry"
 
-  python3 - "$RUNS_LEDGER" "$SUMMARY_FILE" <<'PY'
+  APPEND_RESULT="$(python3 - "$RUNS_LEDGER" "$RUNS_LOCK" "$SUMMARY_FILE" <<'PY'
 import fcntl
+import json
 import pathlib
 import sys
 
 ledger_path = pathlib.Path(sys.argv[1])
-summary_path = pathlib.Path(sys.argv[2])
+lock_path = pathlib.Path(sys.argv[2])
+summary_path = pathlib.Path(sys.argv[3])
 
 ledger_path.parent.mkdir(parents=True, exist_ok=True)
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+summary_text = summary_path.read_text(encoding="utf-8").strip()
+summary_payload = json.loads(summary_text)
+run_id = summary_payload.get("run_id")
 
-with ledger_path.open("a+", encoding="utf-8") as ledger, summary_path.open(encoding="utf-8") as summary:
-    fcntl.flock(ledger.fileno(), fcntl.LOCK_EX)
-    ledger.write(summary.read())
-    ledger.write("\n")
-    ledger.flush()
-    fcntl.flock(ledger.fileno(), fcntl.LOCK_UN)
+with lock_path.open("a+", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    existing_run_ids = set()
+    if ledger_path.exists():
+        for raw_line in ledger_path.read_text(encoding="utf-8").splitlines():
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                payload = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            existing_run_ids.add(payload.get("run_id"))
+
+    if run_id and run_id in existing_run_ids:
+        print("skipped")
+    else:
+        with ledger_path.open("a+", encoding="utf-8") as ledger:
+            ledger.write(summary_text)
+            ledger.write("\n")
+            ledger.flush()
+        print("appended")
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 PY
-  echo "Appended summary to runs.jsonl."
+)"
+
+  if [ "$APPEND_RESULT" = "skipped" ]; then
+    echo "Summary already present in runs.jsonl; skipping duplicate append."
+  else
+    echo "Appended summary to runs.jsonl."
+  fi
 else
   echo "Warning: No summary JSON found in $LOCAL_RESULTS_DIR"
 fi
