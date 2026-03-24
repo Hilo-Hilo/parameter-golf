@@ -19,8 +19,8 @@ JOB_DIR="$WORKSPACE/jobs/$JOB_ID"
 
 cd "$JOB_DIR"
 
-export DATA_PATH="${DATA_PATH:-$WORKSPACE/data/datasets/fineweb10B_sp1024}"
-export TOKENIZER_PATH="${TOKENIZER_PATH:-$WORKSPACE/data/tokenizers/fineweb_1024_bpe.model}"
+export DATA_PATH="${DATA_PATH:-$WORKSPACE/parameter-golf/data/datasets/fineweb10B_sp1024}"
+export TOKENIZER_PATH="${TOKENIZER_PATH:-$WORKSPACE/parameter-golf/data/tokenizers/fineweb_1024_bpe.model}"
 export OUTPUT_DIR="$JOB_DIR/experiments/$JOB_ID"
 export RUN_ID="$JOB_ID"
 
