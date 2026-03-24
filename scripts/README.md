@@ -2,54 +2,42 @@
 
 Experiment helpers and worker lifecycle for this repo.
 
-## Files
+## Architecture
 
-- `scripts/run_experiment.sh`: launch one run, capture a log, parse metrics, isolate output under `experiments/<run_id>`, and append a JSON summary to `registry/runs.jsonl`
-- `scripts/parse_train_log.py`: stdlib-only parser for `train.log` plus optional `submission.json`
-- `scripts/branch_cycle.sh`: deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree
-- `scripts/smoke_sliding_eval.py`: CUDA smoke test for sliding-window eval path
+This project operates on a split architecture:
+- **Mac Mini (Controller):** Local machine running Claude and maintaining the Git system of record.
+- **RunPod (Workers):** Remote pods executing the actual 1xH100 exploration and 8xH100 record lanes.
+- **GitHub:** Intermediary layer to sync code between Mac and RunPod.
 
-## Worker Lifecycle
+## Core Lifecycle
 
-Start an autonomous worker cycle for a specific branch node:
+### Controller Commands
+- `scripts/branch_cycle.sh <node_id>`: Deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree.
+- `scripts/push_branch_for_job.sh`: Commits and pushes branch, generating a job spec for the pod queue.
+- `scripts/run_record_candidate.sh`: The official lane for creating candidates on 8xH100 hardware.
+- `scripts/sync_upstream_context.sh`: Syncs issues, PRs, and frontier status from the official OpenAI repository.
 
-```bash
-scripts/branch_cycle.sh <node_id>
-```
+### Pod Lifecycle & Queue
+- `scripts/runpod_pool.sh`: Manage pod clusters (`list`, `create`, `stop`, `terminate`).
+- `scripts/runpod_dispatch.py`: Read the job queue and dispatch work to idle pods.
+- `scripts/runpod_reconcile.py`: Sync state between pods and queue.
+- `scripts/runpod_status.sh`: Get an overview of queue depth and pod health.
 
-This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree (`worktrees/<node_id>`). It enforces `--no-session-persistence` and strict `.claude/settings.json` permissions to keep runs concurrency-safe and side-effect free.
+### Remote Execution
+These scripts run *on the pod* via SSH and are managed by the Mac:
+- `scripts/runpod_bootstrap_remote.sh`: Fetches repo, ensures `jq`/`tmux`/`rsync`, prepares `data/` volume.
+- `scripts/runpod_prepare_worktree_remote.sh`: Creates a detached git worktree from the designated commit.
+- `scripts/runpod_launch_remote.sh`: Validates GPUs, applies timeouts, and starts the `run_experiment.sh` invocation inside `tmux`.
+- `scripts/runpod_collect_remote.sh` (executed locally): Connects to the pod to `rsync` back metrics, logs, and `registry/runs.jsonl` summaries.
+- `scripts/runpod_cancel_remote.sh`: Kills active tmux sessions.
 
-## Typical Usage
-
-PyTorch run:
-
-```bash
-scripts/run_experiment.sh \
-  --name baseline_1gpu_smoke \
-  --track local-smoke \
-  --trainer train_gpt.py \
-  --notes "1 GPU smoke with short wallclock" \
-  -- \
-  env RUN_ID=baseline_sp1024 \
-      MAX_WALLCLOCK_SECONDS=30 \
-      torchrun --standalone --nproc_per_node=1 train_gpt.py
-```
-
-MLX local run:
-
-```bash
-scripts/run_experiment.sh \
-  --name mlx_smoke \
-  --track mac-smoke \
-  --trainer train_gpt_mlx.py \
-  --notes "short local sanity run" \
-  -- \
-  env ITERATIONS=200 TRAIN_BATCH_TOKENS=8192 VAL_LOSS_EVERY=0 VAL_BATCH_SIZE=8192 python3 train_gpt_mlx.py
-```
+## Local & Pod Runner Wrapper
+`scripts/run_experiment.sh` is used inside pods to execute runs:
+- Isolates outputs under `experiments/<run_id>`
+- Validates `--required-gpu-count` and hardware strings
+- Emits heartbeat JSON updates during run
+- Writes structured JSON metrics to the global `registry/runs.jsonl` under `flock`
 
 ## Notes
-
-- The experiment wrapper defaults successful runs to `discard`. Pass `--status keep` only when you already know the run should be retained.
-- If the command exits non-zero, the row is recorded as `crash`.
-- If the exact final roundtrip metric is missing, or the artifact exceeds `16,000,000` bytes, the row is recorded as `invalid`.
-- `submission.json` is optional. When provided, parser fields from the JSON take precedence over log-derived values.
+- To debug a remote pod, connect via SSH and `tmux attach -t job_<job_id>`.
+- The controller never runs heavy processes; all execution logic MUST pass through the queue and RunPod.

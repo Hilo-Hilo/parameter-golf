@@ -1,0 +1,20 @@
+{
+  "explore_h100x1": {
+    "gpu_count": 1,
+    "gpu_type": "H100",
+    "idle_grace_minutes": 30,
+    "idle_action": "stop"
+  },
+  "candidate_h100x8": {
+    "gpu_count": 8,
+    "gpu_type": "H100",
+    "idle_grace_minutes": 10,
+    "idle_action": "terminate"
+  },
+  "record_h100x8_3seed": {
+    "gpu_count": 8,
+    "gpu_type": "H100",
+    "idle_grace_minutes": 5,
+    "idle_action": "terminate"
+  }
+}

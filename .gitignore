@@ -17,5 +17,7 @@ automation/worker.log
 worktrees/
 experiments/
 registry/
+context/upstream/cache/
+tmp/
 
 AGENTS.md

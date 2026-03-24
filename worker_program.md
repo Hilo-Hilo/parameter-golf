@@ -9,13 +9,15 @@ Optimize exact final roundtrip `val_bpb` under challenge constraints:
 - Primary metric: `exact_final_val_bpb` from `final_int8_zlib_roundtrip_exact`
 - Hard artifact cap: `16,000,000` total bytes (`bytes_total`)
 - Canonical track: reproducible 10-minute training on `8xH100`
+- Legality rules: eval budget is separate, no network calls during evaluation, backward-looking TTT is allowed, pre-eval adaptation on validation is not allowed, val tokens cannot be stored in the artifact. Serious SOTA claims should plan for 3-seed significance checks.
 
 ## Required Context
 
 Read before taking action:
 
 - `CLAUDE.md`, `README.md`, `PLAN.md`
-- `journal.md`, `registry/nodes.jsonl`, `registry/runs.jsonl`, `registry/spool/`
+- `context/upstream/frontier_digest.md`, `context/upstream/issue_140.md`, `context/upstream/pr_index.json`
+- `journal.md`, `registry/jobs.jsonl`, `registry/runs.jsonl`, `registry/spool/`
 - `train_gpt.py`, `train_gpt_mlx.py`
 
 ## Role & Constraints
@@ -23,7 +25,7 @@ Read before taking action:
 1. **Innovation:** You read history, read code, and propose code changes.
 2. **Deterministic Output:** When executing a phase (`plan`, `diagnose`, `reflect`), your primary output must be a strict JSON object matching the requested schema. 
 3. **No Direct Branching:** You do not create branches or worktrees. You edit files locally in your given worktree, then output your proposed hypothesis slug in JSON. The shell controller will commit your edits and branch them if it passes the novelty check.
-4. **No Privilege Escalation:** Do not use SSH or RunPod CLI. The shell will run the experiment command you propose.
+4. **No Privilege Escalation:** Do not use SSH or RunPod CLI. The shell will run the experiment command you propose. Pods are dumb executors. Claude never touches RunPod directly. The local controller owns branch pushes, job queueing, pod selection, and remote launch.
 
 ## Experiment Lifecycle
 

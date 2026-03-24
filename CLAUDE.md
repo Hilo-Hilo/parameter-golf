@@ -7,6 +7,7 @@ Project-specific operating context for this repo.
 - Goal: best language model under the `16,000,000`-byte artifact cap and 10-minute `8xH100` train/eval budget.
 - Canonical metric: exact final roundtrip `val_bpb`.
 - Stretch target: sub-1.0 exact final `val_bpb`.
+- Legality rules: eval budget is separate, no network calls during evaluation, backward-looking TTT is allowed, pre-eval adaptation on validation is not allowed, val tokens cannot be stored in the artifact. Serious SOTA claims should plan for 3-seed significance checks.
 - Official repo: `https://github.com/openai/parameter-golf`
 - Tracked repo: `https://github.com/Hilo-Hilo/parameter-golf`
 
@@ -23,7 +24,8 @@ Read these first:
 
 ## Standard Start Sequence
 
-1. Read `registry/nodes.jsonl` and `registry/runs.jsonl` to understand the current research frontier.
+1. Read `context/upstream/frontier_digest.md`, `context/upstream/issue_140.md`, `context/upstream/pr_index.json`.
+2. Read `registry/jobs.jsonl` and `registry/runs.jsonl` to understand the current research frontier.
 2. If a new direction is needed, check upstream PRs or other novel approaches before falling back to repetitive sweeps.
 3. Propose a single bounded hypothesis via the `plan` phase JSON schema. The shell controller will manage the git branching, execution, and validation.
 
@@ -47,6 +49,9 @@ This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnos
 2. If working manually, each experimental approach gets its own `approach/<name>` branch. Never commit experiments to `main` or `research/*`.
 3. The worker agent must not run `git push`, `git fetch`, or `git worktree`.
 4. Do not edit repo files directly over SSH.
+
+### Controller
+Pods are dumb executors. Claude never touches RunPod directly. The local controller owns branch pushes, job queueing, pod selection, and remote launch.
 
 ### Research
 

@@ -18,6 +18,11 @@ Options:
   --muon-weight-decay N Override MUON_WEIGHT_DECAY env var for train_gpt.py.
   --submission PATH     Optional submission.json to merge into parsed metrics.
   --code-path PATH      Path used to compute code bytes. Default: same as --trainer
+  --required-gpu-count N    Require exactly N GPUs.
+  --required-gpu-substring STR Require GPU model name to contain STR.
+  --outer-timeout-seconds N Wrap command in strict timeout.
+  --job-id ID               Remote job ID.
+  --heartbeat-seconds N     Write heartbeat JSON every N seconds.
 EOF
 }
 
@@ -32,6 +37,11 @@ eval_seq_len=""
 muon_weight_decay=""
 submission=""
 code_path=""
+required_gpu_count=""
+required_gpu_substring=""
+outer_timeout_seconds=""
+job_id=""
+heartbeat_seconds=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -77,6 +87,26 @@ while [[ $# -gt 0 ]]; do
       ;;
     --code-path)
       code_path="${2:-}"
+      shift 2
+      ;;
+    --required-gpu-count)
+      required_gpu_count="${2:-}"
+      shift 2
+      ;;
+    --required-gpu-substring)
+      required_gpu_substring="${2:-}"
+      shift 2
+      ;;
+    --outer-timeout-seconds)
+      outer_timeout_seconds="${2:-}"
+      shift 2
+      ;;
+    --job-id)
+      job_id="${2:-}"
+      shift 2
+      ;;
+    --heartbeat-seconds)
+      heartbeat_seconds="${2:-}"
       shift 2
       ;;
     --help|-h)
@@ -181,6 +211,47 @@ command_str="${command_str% }"
   printf 'notes=%s\n' "$notes"
 } >"$meta_path"
 
+if [[ -n "$required_gpu_count" ]]; then
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "Error: nvidia-smi not found but --required-gpu-count specified" >&2
+    exit 2
+  fi
+  actual_count=$(nvidia-smi -L | wc -l | tr -d ' ')
+  if [[ "$actual_count" -ne "$required_gpu_count" ]]; then
+    echo "Error: Expected $required_gpu_count GPUs, found $actual_count" >&2
+    exit 2
+  fi
+fi
+
+if [[ -n "$required_gpu_substring" ]]; then
+  if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "Error: nvidia-smi not found but --required-gpu-substring specified" >&2
+    exit 2
+  fi
+  if ! nvidia-smi -L | grep -qi "$required_gpu_substring"; then
+    echo "Error: GPU does not match $required_gpu_substring" >&2
+    exit 2
+  fi
+fi
+
+heartbeat_pid=""
+if [[ -n "$heartbeat_seconds" && -n "$job_id" ]]; then
+  mkdir -p "$MAIN_CHECKOUT/registry/heartbeats"
+  heartbeat_file="$MAIN_CHECKOUT/registry/heartbeats/${job_id}.json"
+  (
+    while true; do
+      echo "{\"job_id\": \"$job_id\", \"timestamp\": \"$(date -u +"%Y-%m-%dT%H:%M:%SZ")\"}" > "$heartbeat_file"
+      sleep "$heartbeat_seconds"
+    done
+  ) &
+  heartbeat_pid=$!
+fi
+
+base_cmd=("$@")
+if [[ -n "$outer_timeout_seconds" ]]; then
+  base_cmd=(timeout "$outer_timeout_seconds" "${base_cmd[@]}")
+fi
+
 wallclock_start=$(wallclock_now)
 set +e
 (
@@ -201,11 +272,15 @@ set +e
     export MUON_WEIGHT_DECAY="$muon_weight_decay"
   fi
   export OUTPUT_DIR="$experiment_dir"
-  RUN_ID="$run_id" PYTHONUNBUFFERED=1 "$@"
+  RUN_ID="$run_id" PYTHONUNBUFFERED=1 "${base_cmd[@]}"
 ) >"$log_path" 2>&1
 exit_code=$?
 set -e
 wallclock_end=$(wallclock_now)
+
+if [[ -n "$heartbeat_pid" ]]; then
+  kill "$heartbeat_pid" 2>/dev/null || true
+fi
 process_wallclock_seconds=$(python3 - "$wallclock_start" "$wallclock_end" <<'PY'
 import sys
 start = float(sys.argv[1])
