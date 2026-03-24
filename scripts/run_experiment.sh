@@ -23,6 +23,7 @@ Options:
   --outer-timeout-seconds N Wrap command in strict timeout.
   --job-id ID               Remote job ID.
   --heartbeat-seconds N     Write heartbeat JSON every N seconds.
+    --runs-ledger-dir PATH  Directory to append runs.jsonl (defaults to registry/)
 EOF
 }
 
@@ -42,6 +43,7 @@ required_gpu_substring=""
 outer_timeout_seconds=""
 job_id=""
 heartbeat_seconds=""
+runs_ledger_dir=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -107,6 +109,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --heartbeat-seconds)
       heartbeat_seconds="${2:-}"
+      shift 2
+      ;;
+    --runs-ledger-dir)
+      runs_ledger_dir="${2:-}"
       shift 2
       ;;
     --help|-h)
@@ -249,7 +255,7 @@ fi
 
 base_cmd=("$@")
 if [[ -n "$outer_timeout_seconds" ]]; then
-  base_cmd=(timeout "$outer_timeout_seconds" "${base_cmd[@]}")
+  base_cmd=(timeout -k 30s "$outer_timeout_seconds" "${base_cmd[@]}")
 fi
 
 wallclock_start=$(wallclock_now)
@@ -311,14 +317,18 @@ python3 "$repo_root/scripts/parse_train_log.py" \
 
 cp "$summary_path" "$spool_path"
 
-runs_ledger="$MAIN_CHECKOUT/registry/runs.jsonl"
-mkdir -p "$MAIN_CHECKOUT/registry"
+if [[ -z "$runs_ledger_dir" ]]; then
+  runs_ledger_dir="$MAIN_CHECKOUT/registry"
+fi
+runs_ledger="$runs_ledger_dir/runs.jsonl"
+runs_lock="$runs_ledger_dir/.runs.lock"
+mkdir -p "$runs_ledger_dir"
 touch "$runs_ledger"
 (
   flock -x 200
   cat "$summary_path" >> "$runs_ledger"
   echo "" >> "$runs_ledger"
-) 200>"$MAIN_CHECKOUT/registry/.runs.lock"
+) 200>"$runs_lock"
 
 printf 'log=%s\nsummary=%s\nspool=%s\n' "$log_path" "$summary_path" "$spool_path"
 exit "$exit_code"

@@ -1,16 +1,12 @@
 {
-  "sandbox": {
-    "filesystem": {
-      "allowWrite": ["."]
-    }
-  },
+  "disableBypassPermissionsMode": "disable",
   "permissions": {
     "deny": [
-      "Bash(git push*)",
-      "Bash(git fetch*)",
-      "Bash(git worktree*)",
-      "Bash(runpodctl*)",
-      "Bash(ssh*)"
+      "Bash(git push:*)",
+      "Bash(git fetch:*)",
+      "Bash(git worktree:*)",
+      "Bash(runpodctl:*)",
+      "Bash(ssh:*)"
     ]
   },
   "hooks": {
@@ -20,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "COMMAND=$(jq -r '.tool_input.command'); if echo \"$COMMAND\" | grep -qE 'git push|git fetch|git worktree|runpodctl|ssh'; then exit 1; fi"
+            "command": "COMMAND=$(jq -r '.tool_input.command'); if echo \"$COMMAND\" | grep -qE 'git push|git fetch|git worktree|runpodctl|ssh'; then echo \"Permission denied for command\"; exit 1; fi"
           }
         ]
       }

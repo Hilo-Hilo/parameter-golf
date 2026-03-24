@@ -24,10 +24,10 @@ Read these first:
 
 ## Standard Start Sequence
 
-1. Read `context/upstream/frontier_digest.md`, `context/upstream/issue_140.md`, `context/upstream/pr_index.json`.
+1. **HARD REQUIREMENT**: Read `context/upstream/issue_140.md`, `context/upstream/pr_digest.md`, and `context/upstream/frontier_digest.md` to understand the true current SOTA and legality rules. You MUST do this before planning a new approach.
 2. Read `registry/jobs.jsonl` and `registry/runs.jsonl` to understand the current research frontier.
-2. If a new direction is needed, check upstream PRs or other novel approaches before falling back to repetitive sweeps.
-3. Propose a single bounded hypothesis via the `plan` phase JSON schema. The shell controller will manage the git branching, execution, and validation.
+3. If a new direction is needed, check upstream PRs or other novel approaches before falling back to repetitive sweeps.
+4. Propose a single bounded hypothesis via the `plan` phase JSON schema. The shell controller will manage the git branching, pushing to GitHub, execution via RunPod, and validation.
 
 ## Worker Lifecycle
 

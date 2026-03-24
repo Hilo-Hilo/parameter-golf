@@ -5,39 +5,37 @@ Experiment helpers and worker lifecycle for this repo.
 ## Architecture
 
 This project operates on a split architecture:
-- **Mac Mini (Controller):** Local machine running Claude and maintaining the Git system of record.
-- **RunPod (Workers):** Remote pods executing the actual 1xH100 exploration and 8xH100 record lanes.
+- **Mac Mini (Controller):** Local machine running Claude and maintaining the Git system of record. It manages branch creation, planning, dispatch, and final diagnosis/reflection.
+- **RunPod (Workers):** Remote pods acting purely as pull-only executors.
 - **GitHub:** Intermediary layer to sync code between Mac and RunPod.
+
+There are two canonical execution lanes:
+- `pg-exp-*` (1xH100) for exploration
+- `pg-rec-*` (8xH100) for candidate/record checks
 
 ## Core Lifecycle
 
 ### Controller Commands
-- `scripts/branch_cycle.sh <node_id>`: Deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree.
-- `scripts/push_branch_for_job.sh`: Commits and pushes branch, generating a job spec for the pod queue.
-- `scripts/run_record_candidate.sh`: The official lane for creating candidates on 8xH100 hardware.
-- `scripts/sync_upstream_context.sh`: Syncs issues, PRs, and frontier status from the official OpenAI repository.
+- `scripts/branch_cycle.sh <node_id>`: Deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree. The script handles creating the local worktree, running the plan phase, committing local changes, pushing to GitHub, dispatching to RunPod, polling for completion, collecting artifacts, and running the diagnosis/reflection phases.
+- `scripts/sync_upstream_context.sh`: Syncs issues, PRs, and frontier status from the official OpenAI repository using the `gh` CLI. 
 
-### Pod Lifecycle & Queue
-- `scripts/runpod_pool.sh`: Manage pod clusters (`list`, `create`, `stop`, `terminate`).
-- `scripts/runpod_dispatch.py`: Read the job queue and dispatch work to idle pods.
-- `scripts/runpod_reconcile.py`: Sync state between pods and queue.
-- `scripts/runpod_status.sh`: Get an overview of queue depth and pod health.
+### Pod Lifecycle & Dispatch (Mac Side)
+- `scripts/runpod_pool.sh`: Manage pod clusters using local `runpodctl` (`get`, `create`, `start`, `stop`, `terminate`).
+- `scripts/runpod_dispatch.sh`: Reads a job spec JSON, finds or provisions an appropriate pod, and connects via SSH over public IP (TCP 22) to deploy the bootstrapping scripts and launch the job.
+- `scripts/runpod_collect.sh`: Connects to the pod via SSH to `rsync` back metrics, logs, and artifacts, and securely appends the results to `registry/runs.jsonl`.
 
-### Remote Execution
-These scripts run *on the pod* via SSH and are managed by the Mac:
-- `scripts/runpod_bootstrap_remote.sh`: Fetches repo, ensures `jq`/`tmux`/`rsync`, prepares `data/` volume.
-- `scripts/runpod_prepare_worktree_remote.sh`: Creates a detached git worktree from the designated commit.
-- `scripts/runpod_launch_remote.sh`: Validates GPUs, applies timeouts, and starts the `run_experiment.sh` invocation inside `tmux`.
-- `scripts/runpod_collect_remote.sh` (executed locally): Connects to the pod to `rsync` back metrics, logs, and `registry/runs.jsonl` summaries.
-- `scripts/runpod_cancel_remote.sh`: Kills active tmux sessions.
+### Remote Execution (RunPod Side)
+These scripts are deployed and executed on the pod by the Mac controller over SSH:
+- `scripts/runpod_bootstrap_remote.sh`: Fetches the repository (`git fetch origin --prune`), creates a detached worktree at the exact designated commit SHA, and verifies the SHA matches.
+- `scripts/runpod_run_remote.sh`: Validates hardware (exact GPU count and model), applies an outer timeout, and starts the `run_experiment.sh` invocation inside `tmux`.
 
-## Local & Pod Runner Wrapper
+## Execution Wrapper
 `scripts/run_experiment.sh` is used inside pods to execute runs:
 - Isolates outputs under `experiments/<run_id>`
-- Validates `--required-gpu-count` and hardware strings
-- Emits heartbeat JSON updates during run
-- Writes structured JSON metrics to the global `registry/runs.jsonl` under `flock`
+- Validates `--required-gpu-count` and hardware strings via `nvidia-smi -L`
+- Enforces an outer `timeout -k 30s` wrap around the training command
+- Writes structured JSON metrics to be collected by the Mac controller
 
 ## Notes
-- To debug a remote pod, connect via SSH and `tmux attach -t job_<job_id>`.
-- The controller never runs heavy processes; all execution logic MUST pass through the queue and RunPod.
+- The controller never runs heavy processes locally; all execution logic MUST pass through the queue and RunPod.
+- RunPod executors use the official Parameter Golf environment and are strictly pull-only. They will checkout an exact commit SHA for deterministic reproduction.

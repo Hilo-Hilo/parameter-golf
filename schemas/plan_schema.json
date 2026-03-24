@@ -2,49 +2,69 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "type": "object",
   "properties": {
-    "parent_node": {
-      "type": "string",
-      "description": "The ID of the parent node being branched from."
-    },
     "proposed_slug": {
       "type": "string",
       "description": "A short descriptive name for this new approach/hypothesis."
+    },
+    "parent_node": {
+      "type": "string",
+      "description": "The ID of the parent node being branched from."
     },
     "changed_axes": {
       "type": "string",
       "description": "A summary of what parameters or code approaches are being changed compared to the parent."
     },
-    "duplication_justification": {
+    "why_not_duplicate": {
       "type": "string",
       "description": "Explanation of why this approach is novel and not a duplicate of past attempts in the registry."
     },
-    "experiment_spec": {
+    "resource_profile": {
       "type": "object",
-      "description": "The structured spec for running the experiment.",
+      "description": "The requested resource profile.",
       "properties": {
-        "env_keys": {
-          "type": "object",
-          "description": "Environment variables to pass to the run_experiment script.",
-          "additionalProperties": {
-            "type": "string"
-          }
+        "gpu_count": {
+          "type": "integer"
         },
-        "run_command": {
-          "type": "array",
-          "description": "The command arguments to pass after the -- in run_experiment.sh (e.g. ['torchrun', '--standalone', 'train_gpt.py']).",
-          "items": {
-            "type": "string"
-          }
+        "gpu_type": {
+          "type": "string"
         }
       },
-      "required": ["env_keys", "run_command"],
+      "required": ["gpu_count", "gpu_type"],
       "additionalProperties": false
     },
-    "plan_notes": {
+    "run_argv": {
+      "type": "array",
+      "description": "The command arguments to pass after the -- in run_experiment.sh (e.g. ['torchrun', '--standalone', 'train_gpt.py']).",
+      "items": {
+        "type": "string"
+      }
+    },
+    "env_overrides": {
+      "type": "object",
+      "description": "Environment variables to pass to the run_experiment script.",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "expected_track": {
       "type": "string",
-      "description": "Any additional reasoning or notes for the plan."
+      "description": "The track this experiment falls under, e.g. remote or runpod_h100."
+    },
+    "success_criteria": {
+      "type": "string",
+      "description": "The conditions under which this run will be considered successful."
     }
   },
-  "required": ["parent_node", "proposed_slug", "changed_axes", "duplication_justification", "experiment_spec", "plan_notes"],
+  "required": [
+    "proposed_slug",
+    "parent_node",
+    "changed_axes",
+    "why_not_duplicate",
+    "resource_profile",
+    "run_argv",
+    "env_overrides",
+    "expected_track",
+    "success_criteria"
+  ],
   "additionalProperties": false
 }

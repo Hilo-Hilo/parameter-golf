@@ -1,30 +1,51 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="https://github.com/Hilo-Hilo/parameter-golf"
+# scripts/runpod_bootstrap_remote.sh
+# Runs ON the pod to bootstrap the worktree at an exact commit SHA.
+
+if [ "$#" -lt 3 ]; then
+  echo "Usage: $0 <job_id> <branch> <commit_sha>" >&2
+  exit 1
+fi
+
+JOB_ID="$1"
+BRANCH="$2"
+COMMIT_SHA="$3"
+
 WORKSPACE="/workspace"
-PG_REPO="$WORKSPACE/pgrepo"
+PG_REPO="$WORKSPACE/parameter-golf"
+JOB_DIR="$WORKSPACE/jobs/$JOB_ID"
 
-echo "Bootstrapping remote environment in $WORKSPACE..."
-
-# Ensure tools
-if ! command -v jq &> /dev/null || ! command -v tmux &> /dev/null || ! command -v rsync &> /dev/null; then
+# Ensure essential tools
+if ! command -v jq >/dev/null || ! command -v tmux >/dev/null || ! command -v rsync >/dev/null; then
   apt-get update && apt-get install -y jq tmux rsync
 fi
 
-mkdir -p "$WORKSPACE"
+mkdir -p "$WORKSPACE/jobs"
 cd "$WORKSPACE"
 
 if [ ! -d "$PG_REPO" ]; then
   echo "Cloning repository..."
-  git clone "$REPO_URL" "$PG_REPO"
-else
-  echo "Repository exists. Fetching latest..."
-  cd "$PG_REPO"
-  git fetch --all --prune
+  # Use https for public repo pull-only
+  git clone https://github.com/Hilo-Hilo/parameter-golf.git "$PG_REPO"
 fi
 
-# Ensure data path exists
+cd "$PG_REPO"
+echo "Fetching origin..."
+git fetch origin --prune
+
+echo "Creating detached worktree for $JOB_ID..."
+git worktree add --detach -f "$JOB_DIR" "$COMMIT_SHA"
+
+cd "$JOB_DIR"
+ACTUAL_SHA=$(git rev-parse HEAD)
+if [ "$ACTUAL_SHA" != "$COMMIT_SHA" ]; then
+  echo "Error: Worktree SHA ($ACTUAL_SHA) does not match requested ($COMMIT_SHA)" >&2
+  exit 1
+fi
+
+# Ensure data path exists for potential datasets
 mkdir -p "$WORKSPACE/data"
 
-echo "Bootstrap complete."
+echo "Bootstrap complete for $JOB_ID at $COMMIT_SHA."

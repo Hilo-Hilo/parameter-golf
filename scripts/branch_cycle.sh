@@ -77,34 +77,20 @@ if ! git check-ref-format "refs/heads/$PROPOSED_SLUG"; then
   exit 1
 fi
 
-echo "#!/usr/bin/env bash" > "$SCRATCH_DIR/run_child.sh"
-echo "set -euo pipefail" >> "$SCRATCH_DIR/run_child.sh"
-
-jq -r '(.structured_output.experiment_spec.env_keys // {}) | to_entries | .[] | "export \(.key)=\(.value|@sh)"' "$SCRATCH_DIR/phase_plan_output.json" >> "$SCRATCH_DIR/run_child.sh" || true
-
-ARGS_JSON=$(jq -c '.structured_output.experiment_spec.run_command // []' "$SCRATCH_DIR/phase_plan_output.json")
-python3 -c "
+# ==============================================================================
+# GOVERNANCE: HYBRID NOVELTY CHECK
+# ==============================================================================
+# The run command array is parsed into a single string for fingerprinting
+ARGS_JSON=$(jq -c '.structured_output.run_argv // []' "$SCRATCH_DIR/phase_plan_output.json")
+NEXT_CMD=$(python3 -c "
 import sys, json, shlex
 try:
     args = json.loads(sys.argv[1])
     print(' '.join(shlex.quote(a) for a in args))
 except:
     print('')
-" "$ARGS_JSON" > "$SCRATCH_DIR/run_args.txt" || echo "" > "$SCRATCH_DIR/run_args.txt"
+" "$ARGS_JSON" || echo "")
 
-RUN_ARGS=$(cat "$SCRATCH_DIR/run_args.txt")
-if [ -z "$RUN_ARGS" ]; then
-  echo "Error: Plan did not output a valid experiment_spec.run_command array."
-  exit 1
-fi
-
-NEXT_CMD="$MAIN_CHECKOUT/scripts/run_experiment.sh --name \"$PROPOSED_SLUG\" --track \"autonomous\" -- $RUN_ARGS"
-echo "$NEXT_CMD" >> "$SCRATCH_DIR/run_child.sh"
-chmod +x "$SCRATCH_DIR/run_child.sh"
-
-# ==============================================================================
-# GOVERNANCE: HYBRID NOVELTY CHECK
-# ==============================================================================
 FINGERPRINT=$(echo -n "${PROPOSED_SLUG}${CHANGED_AXES}${NEXT_CMD}" | shasum -a 256 | awk '{print $1}')
 
 exec 200>"$MAIN_CHECKOUT/registry/.nodes.lock"
@@ -152,42 +138,78 @@ fi
 echo "Governance Check Passed. Creating child node..."
 
 # ==============================================================================
-# INFRA & EXECUTION
+# INFRA & EXECUTION: BRANCH, PUSH, JOB DISPATCH
 # ==============================================================================
 CHILD_NODE_ID="${NODE_ID}_${PROPOSED_SLUG}"
+BRANCH_NAME="approach/$CHILD_NODE_ID"
 
-git checkout -b "approach/$CHILD_NODE_ID"
+git checkout -b "$BRANCH_NAME"
 git add .
 if ! git diff --staged --quiet; then
   git commit -m "chore: auto-commit for $CHILD_NODE_ID (plan phase)"
 fi
 
+# Push the branch to origin
+echo "Pushing branch $BRANCH_NAME to origin..."
+git push origin "$BRANCH_NAME"
+
+COMMIT_SHA=$(git rev-parse HEAD)
+
+# Write to NODES_DB
 echo "{\"parent\": \"$NODE_ID\", \"node_id\": \"$CHILD_NODE_ID\", \"slug\": \"$PROPOSED_SLUG\", \"fingerprint\": \"$FINGERPRINT\", \"status\": \"running\"}" >> "$NODES_DB"
 flock -u 200
 
-# Set up final child worktree
-cd "$MAIN_CHECKOUT"
-CHILD_WORKTREE_DIR="$MAIN_CHECKOUT/worktrees/$CHILD_NODE_ID"
+# Create Job Spec JSON
+JOB_SPEC="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_job.json"
+jq --arg branch "$BRANCH_NAME" \
+   --arg commit "$COMMIT_SHA" \
+   --arg job_id "$CHILD_NODE_ID" \
+   '.structured_output + {branch: $branch, commit_sha: $commit, job_id: $job_id}' \
+   "$SCRATCH_DIR/phase_plan_output.json" > "$JOB_SPEC"
 
-if [ ! -d "$CHILD_WORKTREE_DIR" ]; then
-  git worktree add --lock "$CHILD_WORKTREE_DIR" "approach/$CHILD_NODE_ID"
+echo "Dispatching job to RunPod..."
+cd "$MAIN_CHECKOUT"
+scripts/runpod_dispatch.sh "$JOB_SPEC"
+
+# Wait for completion (poll for the result file in remote or just a timeout/heartbeat mechanism)
+# In this architecture, tmux runs it in the background on the pod.
+# We will poll SSH to see if tmux session is still running.
+SSH_TARGET=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_target.txt" || echo "")
+if [ -z "$SSH_TARGET" ]; then
+  echo "Error: SSH target not saved by dispatch."
+  exit 1
 fi
 
-cd "$CHILD_WORKTREE_DIR"
-cp "$SCRATCH_DIR/run_child.sh" .
+echo "Waiting for remote job to complete on $SSH_TARGET..."
+while true; do
+  if ! ssh -o StrictHostKeyChecking=no "$SSH_TARGET" "tmux has-session -t job_${CHILD_NODE_ID} 2>/dev/null"; then
+    echo "Tmux session ended. Job complete."
+    break
+  fi
+  sleep 60
+done
 
-echo "Executing run command..."
-./run_child.sh
+echo "Collecting artifacts from remote..."
+scripts/runpod_collect.sh "$SSH_TARGET" "$CHILD_NODE_ID"
+
+# Clean up final child worktree if we created one, but we don't need local worktree for execution anymore
+# The plan worktree is cleaned up by the trap.
 
 # ==============================================================================
 # PHASE 2: DIAGNOSE
 # ==============================================================================
 echo "=== Phase: diagnose ==="
+# We need to run diagnose in the context of the results.
+# Let's read the pulled logs into a scratch file or just point Claude to them.
+LOG_FILE="$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID/run.log"
+
 PROMPT="$(cat "$PROMPT_FILE")
 Current Phase: diagnose
-The experiment has finished. Please analyze the logs and summarize any issues.
+The remote experiment has finished. Logs are at $LOG_FILE.
+Please analyze the logs and summarize any issues.
 Output JSON."
 
+cd "$PLAN_WORKTREE"
 claude -p "$PROMPT" \
   --model claude-3-7-sonnet-20250219 \
   --max-turns 10 \
@@ -229,12 +251,9 @@ claude -p "$PROMPT" \
 exec 200>"$MAIN_CHECKOUT/registry/.nodes.lock"
 flock -x 200
 ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$SCRATCH_DIR/phase_reflect_output.json")
+# Update the existing record or append a final status
 echo "{\"parent\": \"$NODE_ID\", \"node_id\": \"$CHILD_NODE_ID\", \"slug\": \"$PROPOSED_SLUG\", \"fingerprint\": \"$FINGERPRINT\", \"status\": \"$ACTION\"}" >> "$NODES_DB"
 flock -u 200
 
 echo "Branch cycle complete for $CHILD_NODE_ID. Action determined: $ACTION."
-
-# Cleanup final child worktree as requested
 cd "$MAIN_CHECKOUT"
-git worktree unlock "$CHILD_WORKTREE_DIR" || true
-git worktree remove -f "$CHILD_WORKTREE_DIR" || true
