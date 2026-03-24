@@ -30,6 +30,7 @@ interval_minutes=5
 label="com.parameter-golf.runpod-reconcile"
 log_file="$REPO_ROOT/logs/reconcile.log"
 dry_run=0
+launchd_path="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -102,6 +103,11 @@ install_launchd() {
   <string>${REPO_ROOT}</string>
   <key>RunAtLoad</key>
   <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>${launchd_path}</string>
+  </dict>
   <key>StartInterval</key>
   <integer>${start_interval}</integer>
   <key>StandardOutPath</key>

@@ -70,6 +70,7 @@ COMMIT_SHA="$(jq -r '.commit_sha' "$JOB_SPEC")"
 JOB_ID="$(jq -r '.job_id' "$JOB_SPEC")"
 REQ_GPU_COUNT="$(jq -r '.resource_profile.gpu_count // empty' "$JOB_SPEC")"
 REQ_GPU_SUBSTRING="$(jq -r '.resource_profile.gpu_type // "H100"' "$JOB_SPEC")"
+ENV_OVERRIDES_JSON="$(jq -c '.env_overrides // {}' "$JOB_SPEC")"
 
 RUN_ARGV_JSON="$(jq -c '.run_argv // []' "$JOB_SPEC")"
 RUN_ARGV_SH="$(python3 - "$RUN_ARGV_JSON" <<'PY'
@@ -79,6 +80,22 @@ import sys
 
 argv = json.loads(sys.argv[1])
 print(" ".join(shlex.quote(arg) for arg in argv))
+PY
+)"
+
+REMOTE_ENV_SH="$(python3 - "$ENV_OVERRIDES_JSON" <<'PY'
+import json
+import re
+import shlex
+import sys
+
+payload = json.loads(sys.argv[1])
+parts = []
+for key, value in sorted(payload.items()):
+    if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+        raise SystemExit(f"invalid env override key: {key}")
+    parts.append(f"{key}={shlex.quote(str(value))}")
+print(" ".join(parts))
 PY
 )"
 
@@ -227,10 +244,17 @@ scp_to_remote "$SCRIPT_DIR/runpod_bootstrap_remote.sh" "/workspace/scripts/runpo
 ssh_remote "chmod +x /workspace/scripts/runpod_bootstrap_remote.sh"
 
 echo "Bootstrapping exact commit $COMMIT_SHA..."
-ssh_remote "/workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
+BOOTSTRAP_CMD="/workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
+if [ -n "$REMOTE_ENV_SH" ]; then
+  BOOTSTRAP_CMD="$REMOTE_ENV_SH $BOOTSTRAP_CMD"
+fi
+ssh_remote "$BOOTSTRAP_CMD"
 
 REMOTE_RUN_SCRIPT="/workspace/jobs/$JOB_ID/scripts/runpod_run_remote.sh"
 REMOTE_RUN_CMD="$REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
+if [ -n "$REMOTE_ENV_SH" ]; then
+  REMOTE_RUN_CMD="$REMOTE_ENV_SH $REMOTE_RUN_CMD"
+fi
 
 echo "Launching remote job..."
 ssh_remote "$REMOTE_RUN_CMD"

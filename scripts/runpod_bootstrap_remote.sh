@@ -18,6 +18,9 @@ PG_REPO="$WORKSPACE/parameter-golf"
 JOB_DIR="$WORKSPACE/jobs/$JOB_ID"
 REPO_URL="${RUNPOD_REPO_URL:-https://github.com/Hilo-Hilo/parameter-golf.git}"
 ALLOW_APT_FALLBACK="${RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK:-0}"
+FINEWEB_VARIANT="${RUNPOD_FINEWEB_VARIANT:-sp1024}"
+FINEWEB_TRAIN_SHARDS="${RUNPOD_FINEWEB_TRAIN_SHARDS:-80}"
+DATA_ROOT="${RUNPOD_DATA_ROOT:-$WORKSPACE/data}"
 
 missing_tools=()
 for tool in git jq tmux rsync; do
@@ -70,5 +73,25 @@ fi
 
 # Ensure data path exists for potential datasets
 mkdir -p "$WORKSPACE/data"
+
+case "$FINEWEB_VARIANT" in
+  sp[0-9]*)
+    FINEWEB_DATASET_DIR="$DATA_ROOT/datasets/fineweb10B_${FINEWEB_VARIANT}"
+    FINEWEB_TOKENIZER_PATH="$DATA_ROOT/tokenizers/fineweb_${FINEWEB_VARIANT#sp}_bpe.model"
+    ;;
+  *)
+    echo "Error: unsupported RUNPOD_FINEWEB_VARIANT=$FINEWEB_VARIANT for controller bootstrap." >&2
+    echo "Use an sp<VOCAB_SIZE> variant or override DATA_PATH/TOKENIZER_PATH explicitly for the run." >&2
+    exit 1
+    ;;
+esac
+
+if [ ! -d "$FINEWEB_DATASET_DIR" ] || [ ! -f "$FINEWEB_TOKENIZER_PATH" ]; then
+  echo "Preparing FineWeb cache for $FINEWEB_VARIANT (train_shards=$FINEWEB_TRAIN_SHARDS)..."
+  (
+    cd "$PG_REPO"
+    python3 data/cached_challenge_fineweb.py --variant "$FINEWEB_VARIANT" --train-shards "$FINEWEB_TRAIN_SHARDS"
+  )
+fi
 
 echo "Bootstrap complete for $JOB_ID at $COMMIT_SHA."
