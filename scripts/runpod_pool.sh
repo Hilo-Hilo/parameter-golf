@@ -19,6 +19,7 @@ Notes:
   - create uses config/runpod_profiles.json for GPU selection
   - RUNPOD_TEMPLATE_ID must be set for create
   - RUNPOD_TEMPLATE_IMAGE_NAME can override template image lookup if needed
+  - RUNPOD_CONTAINER_ARGS is optional; leave it unset to preserve template startup
 EOF
 }
 
@@ -149,10 +150,13 @@ case "$ACTION" in
       --volumePath "/workspace"
       --ports "22/tcp"
       --startSSH
-      --args "sleep infinity"
       --templateId "$RUNPOD_TEMPLATE_ID"
       --imageName "$TEMPLATE_IMAGE_NAME"
     )
+
+    if [ -n "${RUNPOD_CONTAINER_ARGS:-}" ]; then
+      create_args+=(--args "$RUNPOD_CONTAINER_ARGS")
+    fi
 
     runpodctl "${create_args[@]}"
     ;;

@@ -40,6 +40,11 @@ fi
 mkdir -p "$WORKSPACE/jobs"
 cd "$WORKSPACE"
 
+if [ -d "$PG_REPO" ] && ! git -C "$PG_REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  echo "Existing $PG_REPO is not a git repository; removing it before clone..."
+  rm -rf "$PG_REPO"
+fi
+
 if [ ! -d "$PG_REPO" ]; then
   echo "Cloning repository..."
   git clone "$REPO_URL" "$PG_REPO"
