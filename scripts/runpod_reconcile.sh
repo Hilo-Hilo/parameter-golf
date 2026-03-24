@@ -58,10 +58,10 @@ log_event() {
 }
 
 pod_status_from_output() {
-  python3 - <<'PY'
+  python3 - "${1:-}" <<'PY'
 import sys
 
-text = sys.stdin.read()
+text = sys.argv[1]
 lines = [line for line in text.splitlines() if line.strip()]
 if len(lines) < 2:
     print("MISSING")
@@ -129,7 +129,7 @@ for lease_file in "${lease_files[@]}"; do
   expiry_epoch="$(lease_epoch "$lease_expires_at")"
 
   pod_info="$(runpodctl get pod "$pod_id" --allfields 2>/dev/null || true)"
-  pod_status="$(printf '%s' "$pod_info" | pod_status_from_output)"
+  pod_status="$(pod_status_from_output "$pod_info")"
   pod_status="${pod_status:-MISSING}"
 
   echo "Reconciling $job_id on pod $pod_id (status=$pod_status)..."

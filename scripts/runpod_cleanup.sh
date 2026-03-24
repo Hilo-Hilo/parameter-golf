@@ -73,10 +73,10 @@ log_event() {
 }
 
 pod_status_from_output() {
-  python3 - <<'PY'
+  python3 - "${1:-}" <<'PY'
 import sys
 
-text = sys.stdin.read()
+text = sys.argv[1]
 lines = [line for line in text.splitlines() if line.strip()]
 if len(lines) < 2:
     print("MISSING")
@@ -140,7 +140,7 @@ case "$action" in
 esac
 
 pod_info_before="$(runpodctl get pod "$pod_id" --allfields 2>/dev/null || true)"
-pod_status_before="$(printf '%s' "$pod_info_before" | pod_status_from_output)"
+pod_status_before="$(pod_status_from_output "$pod_info_before")"
 pod_status_before="${pod_status_before:-MISSING}"
 action_applied="$action"
 
@@ -178,7 +178,7 @@ if [[ "$dry_run" -eq 0 ]]; then
 fi
 
 pod_info_after="$(runpodctl get pod "$pod_id" --allfields 2>/dev/null || true)"
-pod_status_after="$(printf '%s' "$pod_info_after" | pod_status_from_output)"
+pod_status_after="$(pod_status_from_output "$pod_info_after")"
 pod_status_after="${pod_status_after:-MISSING}"
 released_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
