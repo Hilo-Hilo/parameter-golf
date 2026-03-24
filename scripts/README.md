@@ -17,11 +17,12 @@ There are two canonical execution lanes:
 
 ### Controller Commands
 - `scripts/branch_cycle.sh <node_id>`: Deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree. The script handles creating the local worktree, running the plan phase, committing local changes, pushing to GitHub, dispatching to RunPod, polling for completion, collecting artifacts, and running the diagnosis/reflection phases.
+- `scripts/supervisor.sh`: Claims the first pending node from `registry/nodes.jsonl` under a portable local lock and launches one `branch_cycle.sh` execution for unattended queue draining.
 - `scripts/sync_upstream_context.sh`: Syncs issues, PRs, and frontier status from the official OpenAI repository using the `gh` CLI. 
 
 ### Pod Lifecycle & Dispatch (Mac Side)
-- `scripts/runpod_pool.sh`: Manage pod clusters using local `runpodctl` (`get`, `create`, `start`, `stop`, `terminate`).
-- `scripts/runpod_dispatch.sh`: Reads a job spec JSON, finds or provisions an appropriate pod, resolves the SSH endpoint with `runpodctl ssh connect`, and launches the remote job. Set `RUNPOD_POD_ID` to pin the dispatch to a specific pod during smoke tests.
+- `scripts/runpod_pool.sh`: Manage pod clusters using local `runpodctl` (`get`, `create`, `start`, `stop`, `terminate`) and the hardware settings in `config/runpod_profiles.json`.
+- `scripts/runpod_dispatch.sh`: Reads a job spec JSON, finds or provisions an appropriate pod, resolves the SSH endpoint with `runpodctl ssh connect`, persists host/port metadata under `registry/spool/`, and launches the remote job. Set `RUNPOD_POD_ID` to pin the dispatch to a specific pod during smoke tests.
 - `scripts/runpod_collect.sh`: Connects to the pod via SSH and port-aware `rsync` to pull back the canonical experiment directory, wrapper logs, and spool summary, then securely appends the results to `registry/runs.jsonl` with a macOS/Linux-safe file lock.
 
 ### Remote Execution (RunPod Side)
@@ -39,3 +40,4 @@ These scripts are deployed and executed on the pod by the Mac controller over SS
 ## Notes
 - The controller never runs heavy processes locally; all execution logic MUST pass through the queue and RunPod.
 - RunPod executors use the official Parameter Golf environment and are strictly pull-only. They will checkout an exact commit SHA for deterministic reproduction.
+- Controller-side queue and ledger updates use portable local file locks so the same scripts work on this macOS controller and Linux workers.

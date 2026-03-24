@@ -23,7 +23,7 @@ Options:
   --outer-timeout-seconds N Wrap command in strict timeout.
   --job-id ID               Remote job ID.
   --heartbeat-seconds N     Write heartbeat JSON every N seconds.
-    --runs-ledger-dir PATH  Directory to append runs.jsonl (defaults to registry/)
+  --runs-ledger-dir PATH    Directory to append runs.jsonl (defaults to registry/)
 EOF
 }
 
@@ -324,11 +324,26 @@ runs_ledger="$runs_ledger_dir/runs.jsonl"
 runs_lock="$runs_ledger_dir/.runs.lock"
 mkdir -p "$runs_ledger_dir"
 touch "$runs_ledger"
-(
-  flock -x 200
-  cat "$summary_path" >> "$runs_ledger"
-  echo "" >> "$runs_ledger"
-) 200>"$runs_lock"
+python3 - "$runs_ledger" "$runs_lock" "$summary_path" <<'PY'
+import fcntl
+import pathlib
+import sys
+
+ledger_path = pathlib.Path(sys.argv[1])
+lock_path = pathlib.Path(sys.argv[2])
+summary_path = pathlib.Path(sys.argv[3])
+
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+ledger_path.parent.mkdir(parents=True, exist_ok=True)
+
+with lock_path.open("a+", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+    with ledger_path.open("a+", encoding="utf-8") as ledger, summary_path.open(encoding="utf-8") as summary:
+        ledger.write(summary.read())
+        ledger.write("\n")
+        ledger.flush()
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+PY
 
 printf 'log=%s\nsummary=%s\nspool=%s\n' "$log_path" "$summary_path" "$spool_path"
 exit "$exit_code"

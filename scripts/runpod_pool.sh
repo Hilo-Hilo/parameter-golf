@@ -1,23 +1,42 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# scripts/runpod_pool.sh
-# Manage RunPod lifecycle using local runpodctl
-
-# Official Parameter Golf RunPod template ID (update this with actual ID from RunPod if known)
-# If using a custom template, supply it via env var.
-TEMPLATE_ID="${RUNPOD_TEMPLATE_ID:-tjb4f8a8g0}" # A placeholder if needed, though upstream says use official PG template.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(git -C "$SCRIPT_DIR/.." rev-parse --show-toplevel)"
+PROFILE_FILE="$REPO_ROOT/config/runpod_profiles.json"
 
 usage() {
-  echo "Usage: $0 {get|create|start|stop|terminate} <pod_id_or_profile_name> [options]"
-  echo ""
-  echo "Examples:"
-  echo "  $0 get [pod_id]"
-  echo "  $0 create pg-exp-01"
-  echo "  $0 create pg-rec-01"
-  echo "  $0 start <pod_id>"
-  echo "  $0 stop <pod_id>"
-  echo "  $0 terminate <pod_id>"
+  cat <<'EOF'
+Usage:
+  scripts/runpod_pool.sh get [pod_id]
+  scripts/runpod_pool.sh create <pod_name>
+  scripts/runpod_pool.sh start <pod_id>
+  scripts/runpod_pool.sh stop <pod_id>
+  scripts/runpod_pool.sh terminate <pod_id>
+
+Notes:
+  - pod_name must start with pg-exp- or pg-rec-
+  - create uses config/runpod_profiles.json for GPU selection
+  - set RUNPOD_TEMPLATE_ID to force a specific template
+EOF
+}
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Error: missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+profile_key_for_name() {
+  case "$1" in
+    pg-exp-*) printf 'pg-exp\n' ;;
+    pg-rec-*) printf 'pg-rec\n' ;;
+    *)
+      echo "Error: pod name must start with pg-exp- or pg-rec-" >&2
+      exit 1
+      ;;
+  esac
 }
 
 if [ $# -lt 1 ]; then
@@ -25,67 +44,76 @@ if [ $# -lt 1 ]; then
   exit 1
 fi
 
+require_cmd runpodctl
+require_cmd jq
+
 ACTION="$1"
 shift
 
 case "$ACTION" in
   get)
     if [ $# -eq 1 ]; then
-      runpodctl get pod "$1"
+      runpodctl get pod "$1" --allfields
     else
-      runpodctl get pods
+      runpodctl get pod
     fi
     ;;
   create)
     if [ $# -lt 1 ]; then
-      echo "Error: Must provide pod name, e.g., pg-exp-01"
+      echo "Error: must provide pod name" >&2
       exit 1
     fi
+
     NAME="$1"
-    
-    # Determine profile from prefix
-    if [[ "$NAME" == pg-exp-* ]]; then
-      GPU_COUNT=1
-      GPU_TYPE="NVIDIA H100 80GB HBM3"
-    elif [[ "$NAME" == pg-rec-* ]]; then
-      GPU_COUNT=8
-      GPU_TYPE="NVIDIA H100 80GB HBM3"
-    else
-      echo "Error: Name must start with pg-exp- or pg-rec-"
+    PROFILE_KEY="$(profile_key_for_name "$NAME")"
+    GPU_COUNT="$(jq -r --arg key "$PROFILE_KEY" '.[$key].gpu_count' "$PROFILE_FILE")"
+    GPU_TYPE="$(jq -r --arg key "$PROFILE_KEY" '.[$key].gpu_type' "$PROFILE_FILE")"
+
+    if [ -z "$GPU_COUNT" ] || [ "$GPU_COUNT" = "null" ] || [ -z "$GPU_TYPE" ] || [ "$GPU_TYPE" = "null" ]; then
+      echo "Error: invalid profile configuration for $PROFILE_KEY in $PROFILE_FILE" >&2
       exit 1
     fi
-    
-    # Create pod using the PG template.
-    # Note: Using an idle command so it stays running for SSH.
+
     echo "Creating pod $NAME ($GPU_COUNT x $GPU_TYPE)..."
-    runpodctl create pod \
-      --name "$NAME" \
-      --image "runpod/pytorch:2.2.0-py3.10-cuda12.1.1-devel-ubuntu22.04" \
-      --gpuCount "$GPU_COUNT" \
-      --gpuType "$GPU_TYPE" \
-      --volumeInGb 100 \
-      --containerDiskInGb 100 \
-      --ports "22/tcp" \
-      --dockerArgs "sleep infinity"
-    # Note: --templateId <id> could be used instead of image/dockerArgs if we know the PG template ID
+
+    create_args=(
+      create pod
+      --name "$NAME"
+      --gpuCount "$GPU_COUNT"
+      --gpuType "$GPU_TYPE"
+      --containerDiskSize 50
+      --volumeSize 50
+      --volumePath "/workspace"
+      --ports "22/tcp"
+      --startSSH
+      --args "sleep infinity"
+    )
+
+    if [ -n "${RUNPOD_TEMPLATE_ID:-}" ]; then
+      create_args+=(--templateId "$RUNPOD_TEMPLATE_ID")
+    else
+      create_args+=(--imageName "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04")
+    fi
+
+    runpodctl "${create_args[@]}"
     ;;
   start)
     if [ $# -lt 1 ]; then
-      echo "Error: Must provide pod ID"
+      echo "Error: must provide pod ID" >&2
       exit 1
     fi
     runpodctl start pod "$1"
     ;;
   stop)
     if [ $# -lt 1 ]; then
-      echo "Error: Must provide pod ID"
+      echo "Error: must provide pod ID" >&2
       exit 1
     fi
     runpodctl stop pod "$1"
     ;;
   terminate)
     if [ $# -lt 1 ]; then
-      echo "Error: Must provide pod ID"
+      echo "Error: must provide pod ID" >&2
       exit 1
     fi
     runpodctl remove pod "$1"

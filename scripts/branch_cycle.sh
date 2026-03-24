@@ -17,6 +17,7 @@ export CLAUDE_CODE_DISABLE_CRON=1
 mkdir -p "$MAIN_CHECKOUT/registry/spool"
 STATE_FILE="$MAIN_CHECKOUT/registry/spool/${NODE_ID}_state.json"
 NODES_DB="$MAIN_CHECKOUT/registry/nodes.jsonl"
+NODES_LOCK_FILE="$MAIN_CHECKOUT/registry/.nodes.lock"
 touch "$NODES_DB"
 
 SCRATCH_DIR=$(mktemp -d)
@@ -30,6 +31,105 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+
+fingerprint_exists() {
+  local fingerprint="$1"
+
+  python3 - "$NODES_DB" "$fingerprint" <<'PY'
+import json
+import pathlib
+import sys
+
+db_path = pathlib.Path(sys.argv[1])
+fingerprint = sys.argv[2]
+exists = False
+
+if db_path.exists():
+    for raw_line in db_path.read_text(encoding="utf-8").splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            row = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("fingerprint") == fingerprint:
+            exists = True
+            break
+
+print("true" if exists else "false")
+PY
+}
+
+append_node_record() {
+  local status="$1"
+  local enforce_unique="${2:-0}"
+
+  python3 - "$NODES_DB" "$NODES_LOCK_FILE" "$NODE_ID" "$CHILD_NODE_ID" "$PROPOSED_SLUG" "$FINGERPRINT" "$status" "$enforce_unique" <<'PY'
+import fcntl
+import json
+import pathlib
+import sys
+
+db_path = pathlib.Path(sys.argv[1])
+lock_path = pathlib.Path(sys.argv[2])
+parent_node = sys.argv[3]
+node_id = sys.argv[4]
+slug = sys.argv[5]
+fingerprint = sys.argv[6]
+status = sys.argv[7]
+enforce_unique = sys.argv[8] == "1"
+
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+db_path.parent.mkdir(parents=True, exist_ok=True)
+
+with lock_path.open("a+", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    if enforce_unique and db_path.exists():
+        for raw_line in db_path.read_text(encoding="utf-8").splitlines():
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            try:
+                row = json.loads(raw_line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("fingerprint") == fingerprint:
+                raise SystemExit(3)
+
+    record = {
+        "parent": parent_node,
+        "node_id": node_id,
+        "slug": slug,
+        "fingerprint": fingerprint,
+        "status": status,
+    }
+    with db_path.open("a", encoding="utf-8") as db_file:
+        db_file.write(json.dumps(record))
+        db_file.write("\n")
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+PY
+}
+
+resolve_diagnose_log() {
+  local results_dir="$1"
+
+  python3 - "$results_dir" <<'PY'
+import pathlib
+import sys
+
+results_dir = pathlib.Path(sys.argv[1])
+log_candidates = list(results_dir.glob("*.log"))
+
+if log_candidates:
+    newest = max(log_candidates, key=lambda path: path.stat().st_mtime)
+    print(str(newest))
+else:
+    print(str(results_dir / "wrapper" / "run.log"))
+PY
+}
 
 mkdir -p "$MAIN_CHECKOUT/worktrees"
 git worktree add -B "scratch_$$" "$PLAN_WORKTREE" "tree/$NODE_ID"
@@ -93,12 +193,8 @@ except:
 
 FINGERPRINT=$(echo -n "${PROPOSED_SLUG}${CHANGED_AXES}${NEXT_CMD}" | shasum -a 256 | awk '{print $1}')
 
-exec 200>"$MAIN_CHECKOUT/registry/.nodes.lock"
-flock -x 200
-
-if grep -q "\"fingerprint\":\"$FINGERPRINT\"" "$NODES_DB" 2>/dev/null; then
+if [ "$(fingerprint_exists "$FINGERPRINT")" = "true" ]; then
   echo "Governance Reject: Fingerprint '$FINGERPRINT' already exists in registry."
-  flock -u 200
   exit 1
 fi
 
@@ -131,7 +227,6 @@ IS_DUPLICATE=$(jq -r '.structured_output.is_duplicate // "false"' "$SCRATCH_DIR/
 if [ "$IS_DUPLICATE" == "true" ]; then
   REASON=$(jq -r '.structured_output.reason // "No reason provided"' "$SCRATCH_DIR/gov_output.json")
   echo "Governance Reject: Semantic duplicate detected. Reason: $REASON"
-  flock -u 200
   exit 1
 fi
 
@@ -156,8 +251,14 @@ git push origin "$BRANCH_NAME"
 COMMIT_SHA=$(git rev-parse HEAD)
 
 # Write to NODES_DB
-echo "{\"parent\": \"$NODE_ID\", \"node_id\": \"$CHILD_NODE_ID\", \"slug\": \"$PROPOSED_SLUG\", \"fingerprint\": \"$FINGERPRINT\", \"status\": \"running\"}" >> "$NODES_DB"
-flock -u 200
+if ! append_node_record "running" "1"; then
+  rc=$?
+  if [ "$rc" -eq 3 ]; then
+    echo "Governance Reject: Fingerprint '$FINGERPRINT' already exists in registry."
+    exit 1
+  fi
+  exit "$rc"
+fi
 
 # Create Job Spec JSON
 JOB_SPEC="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_job.json"
@@ -199,9 +300,7 @@ scripts/runpod_collect.sh "$SSH_TARGET" "$CHILD_NODE_ID"
 # PHASE 2: DIAGNOSE
 # ==============================================================================
 echo "=== Phase: diagnose ==="
-# We need to run diagnose in the context of the results.
-# Let's read the pulled logs into a scratch file or just point Claude to them.
-LOG_FILE="$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID/run.log"
+LOG_FILE="$(resolve_diagnose_log "$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID")"
 
 PROMPT="$(cat "$PROMPT_FILE")
 Current Phase: diagnose
@@ -248,12 +347,8 @@ claude -p "$PROMPT" \
   > "$SCRATCH_DIR/phase_reflect_output.json" || true
 
 # Update node status based on reflection
-exec 200>"$MAIN_CHECKOUT/registry/.nodes.lock"
-flock -x 200
 ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$SCRATCH_DIR/phase_reflect_output.json")
-# Update the existing record or append a final status
-echo "{\"parent\": \"$NODE_ID\", \"node_id\": \"$CHILD_NODE_ID\", \"slug\": \"$PROPOSED_SLUG\", \"fingerprint\": \"$FINGERPRINT\", \"status\": \"$ACTION\"}" >> "$NODES_DB"
-flock -u 200
+append_node_record "$ACTION" "0"
 
 echo "Branch cycle complete for $CHILD_NODE_ID. Action determined: $ACTION."
 cd "$MAIN_CHECKOUT"

@@ -25,12 +25,21 @@ export RUN_ID="$JOB_ID"
 
 mkdir -p "$OUTPUT_DIR"
 
-# Provide arguments for run_experiment.sh
-# The outer timeout is strictly enforced by run_experiment.sh via --outer-timeout-seconds
-# We just launch it in tmux so SSH can disconnect
-
 echo "Launching job $JOB_ID under tmux..."
-# Notice we just pass all arguments to scripts/run_experiment.sh
-tmux new-session -d -s "job_${JOB_ID}" "scripts/run_experiment.sh --name \"$JOB_ID\" --track remote --job-id \"$JOB_ID\" --required-gpu-count \"$REQ_GPU_COUNT\" --required-gpu-substring \"$REQ_GPU_NAME\" --outer-timeout-seconds 660 -- \"\$@\" > $OUTPUT_DIR/run.log 2>&1"
+
+printf -v tmux_cmd '%q ' \
+  "./scripts/run_experiment.sh" \
+  "--name" "$JOB_ID" \
+  "--track" "remote" \
+  "--job-id" "$JOB_ID" \
+  "--heartbeat-seconds" "30" \
+  "--required-gpu-count" "$REQ_GPU_COUNT" \
+  "--required-gpu-substring" "$REQ_GPU_NAME" \
+  "--outer-timeout-seconds" "660" \
+  "--" \
+  "$@"
+tmux_cmd="${tmux_cmd% }"
+
+tmux new-session -d -s "job_${JOB_ID}" "$tmux_cmd > \"$OUTPUT_DIR/run.log\" 2>&1"
 
 echo "Job launched. Use 'tmux attach -t job_${JOB_ID}' to view if connected manually."

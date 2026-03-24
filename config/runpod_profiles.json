@@ -1,13 +1,13 @@
 {
   "pg-exp": {
     "gpu_count": 1,
-    "gpu_type": "H100 PCIe",
+    "gpu_type": "NVIDIA H100 80GB HBM3",
     "idle_grace_minutes": 30,
     "idle_action": "stop"
   },
   "pg-rec": {
     "gpu_count": 8,
-    "gpu_type": "H100 PCIe",
+    "gpu_type": "NVIDIA H100 80GB HBM3",
     "idle_grace_minutes": 10,
     "idle_action": "terminate"
   }
