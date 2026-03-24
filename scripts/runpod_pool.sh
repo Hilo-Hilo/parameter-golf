@@ -18,6 +18,7 @@ Notes:
   - pod_name must start with pg-exp- or pg-rec-
   - create uses config/runpod_profiles.json for GPU selection
   - RUNPOD_TEMPLATE_ID must be set for create
+  - RUNPOD_TEMPLATE_IMAGE_NAME can override template image lookup if needed
 EOF
 }
 
@@ -26,6 +27,52 @@ require_cmd() {
     echo "Error: missing required command: $1" >&2
     exit 1
   fi
+}
+
+resolve_template_image_name() {
+  local template_id="$1"
+
+  python3 - "$template_id" <<'PY'
+import json
+import os
+import pathlib
+import sys
+import urllib.parse
+import urllib.request
+
+template_id = sys.argv[1]
+api_key = os.environ.get("RUNPOD_API_KEY", "").strip()
+
+if not api_key:
+    config_path = pathlib.Path.home() / ".runpod" / "config.toml"
+    if config_path.exists():
+        for raw_line in config_path.read_text(encoding="utf-8").splitlines():
+            line = raw_line.strip()
+            if line.startswith("apikey =") or line.startswith("api_key ="):
+                api_key = line.split("=", 1)[1].strip().strip('"')
+                if api_key:
+                    break
+
+if not api_key:
+    print("")
+    raise SystemExit(0)
+
+url = (
+    "https://rest.runpod.io/v1/templates/"
+    + urllib.parse.quote(template_id)
+    + "?includePublicTemplates=true&includeRunpodTemplates=true&includeEndpointBoundTemplates=false"
+)
+request = urllib.request.Request(url, headers={"Authorization": f"Bearer {api_key}"})
+
+try:
+    with urllib.request.urlopen(request, timeout=20) as response:
+        payload = json.load(response)
+except Exception:
+    print("")
+    raise SystemExit(0)
+
+print(payload.get("imageName", ""))
+PY
 }
 
 profile_key_for_name() {
@@ -80,6 +127,16 @@ case "$ACTION" in
       exit 1
     fi
 
+    TEMPLATE_IMAGE_NAME="${RUNPOD_TEMPLATE_IMAGE_NAME:-}"
+    if [ -z "$TEMPLATE_IMAGE_NAME" ]; then
+      TEMPLATE_IMAGE_NAME="$(resolve_template_image_name "$RUNPOD_TEMPLATE_ID")"
+    fi
+    if [ -z "$TEMPLATE_IMAGE_NAME" ]; then
+      echo "Error: unable to resolve imageName for template $RUNPOD_TEMPLATE_ID." >&2
+      echo "Set RUNPOD_TEMPLATE_IMAGE_NAME explicitly if template lookup is unavailable." >&2
+      exit 1
+    fi
+
     echo "Creating pod $NAME ($GPU_COUNT x $GPU_TYPE)..."
 
     create_args=(
@@ -94,6 +151,7 @@ case "$ACTION" in
       --startSSH
       --args "sleep infinity"
       --templateId "$RUNPOD_TEMPLATE_ID"
+      --imageName "$TEMPLATE_IMAGE_NAME"
     )
 
     runpodctl "${create_args[@]}"
