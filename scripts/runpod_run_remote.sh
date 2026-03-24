@@ -26,6 +26,12 @@ export RUN_ID="$JOB_ID"
 
 mkdir -p "$OUTPUT_DIR"
 
+DEFAULT_OUTER_TIMEOUT_SECONDS="660"
+if [ "$REQ_GPU_COUNT" = "1" ]; then
+  DEFAULT_OUTER_TIMEOUT_SECONDS="3600"
+fi
+OUTER_TIMEOUT_SECONDS="${RUNPOD_OUTER_TIMEOUT_SECONDS:-$DEFAULT_OUTER_TIMEOUT_SECONDS}"
+
 echo "Launching job $JOB_ID under tmux..."
 
 printf -v tmux_cmd '%q ' \
@@ -36,7 +42,7 @@ printf -v tmux_cmd '%q ' \
   "--heartbeat-seconds" "30" \
   "--required-gpu-count" "$REQ_GPU_COUNT" \
   "--required-gpu-substring" "$REQ_GPU_NAME" \
-  "--outer-timeout-seconds" "660" \
+  "--outer-timeout-seconds" "$OUTER_TIMEOUT_SECONDS" \
   "--" \
   "$@"
 tmux_cmd="${tmux_cmd% }"
