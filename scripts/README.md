@@ -11,6 +11,7 @@ This project operates on a split architecture:
 
 The controller owns the shared runtime state under the main checkout:
 - `registry/` is the single controller ledger for leases, nodes, heartbeats, spool records, and collected runs.
+- `registry/controller_events.jsonl` is the append-only controller event log for dispatch, collect, cleanup, and TTL actions.
 - `experiments/` under the main checkout is the canonical collection target, even when planning happens in a scratch worktree.
 - Worktrees are disposable planning sandboxes; they are not the source of truth for controller state.
 
@@ -21,20 +22,21 @@ There are two canonical execution lanes:
 ## Core Lifecycle
 
 ### Controller Commands
-- `scripts/branch_cycle.sh <node_id>`: Deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree. The script acquires a per-node controller lock, reconciles stale pod leases, runs the plan phase, commits local changes, pushes to GitHub, dispatches to RunPod, polls the remote tmux session with a controller TTL, collects artifacts, performs post-run pod cleanup, and only then runs the diagnosis/reflection phases.
+- `scripts/branch_cycle.sh <node_id>`: Deterministic, phase-bounded 3-step Claude session (`plan`, `diagnose`, `reflect`) in an isolated Git worktree. The script acquires a per-node controller lock, reconciles stale pod leases, runs the plan phase, commits only scoped source/doc changes (excluding runtime state like `worktrees/`, `experiments/`, and `registry/`), pushes to GitHub, dispatches to RunPod, polls the remote tmux session with a controller TTL, collects artifacts, performs post-run pod cleanup, and only then runs the diagnosis/reflection phases.
 - `scripts/supervisor.sh`: Reconciles stale pod leases, claims the first pending node from `registry/nodes.jsonl` under a portable local lock, and launches one `branch_cycle.sh` execution for unattended queue draining.
+- `scripts/install_reconcile_schedule.sh`: Installs a periodic Mac-side reconcile job via `launchd` or `cron` so crash recovery continues even when no controller cycle is currently running.
 - `scripts/sync_upstream_context.sh`: Syncs issues, PRs, and frontier status from the official OpenAI repository using the `gh` CLI. 
 
 ### Pod Lifecycle & Dispatch (Mac Side)
-- `scripts/runpod_pool.sh`: Manage pod clusters using local `runpodctl` (`get`, `create`, `start`, `stop`, `terminate`) and the hardware settings in `config/runpod_profiles.json`.
-- `scripts/runpod_dispatch.sh`: Reads a job spec JSON, selects the first unleased `pg-*` pod that matches the requested lane (or provisions one), resolves the public SSH endpoint with `runpodctl ssh connect`, writes a lease record under `registry/spool/`, and launches the remote job. Set `RUNPOD_POD_ID` to pin the dispatch to a specific pod during smoke tests.
-- `scripts/runpod_collect.sh`: Connects to the pod via SSH and port-aware `rsync` to pull back the canonical experiment directory, wrapper logs, and spool summary, then securely appends the results to `registry/runs.jsonl` with duplicate `run_id` protection.
-- `scripts/runpod_cleanup.sh`: Applies the controller-owned post-run action (`stop`, `terminate`, or release-only) recorded in the lease metadata and records the final pod state.
-- `scripts/runpod_reconcile.sh`: Crash-recovery path for unattended mode. It scans unreleased leases, collects artifacts for finished jobs, and forces cleanup when a job exceeds its controller TTL.
+- `scripts/runpod_pool.sh`: Manage pod clusters using local `runpodctl` (`get`, `create`, `start`, `stop`, `terminate`) and the hardware settings in `config/runpod_profiles.json`. `RUNPOD_TEMPLATE_ID` is required for pod creation; the controller no longer falls back to a generic image.
+- `scripts/runpod_dispatch.sh`: Reads a job spec JSON, selects the first unleased `pg-*` pod that matches the requested lane (or provisions one), resolves the public SSH endpoint with `runpodctl ssh connect`, writes a lease record under `registry/spool/`, logs pod choice and dispatch events to `registry/controller_events.jsonl`, and launches the remote job. Set `RUNPOD_POD_ID` to pin the dispatch to a specific pod during smoke tests.
+- `scripts/runpod_collect.sh`: Connects to the pod via SSH and port-aware `rsync` to pull back the canonical experiment directory, wrapper logs, and spool summary, then securely appends the results to `registry/runs.jsonl` with duplicate `run_id` protection and logs success/failure in the controller event log.
+- `scripts/runpod_cleanup.sh`: Applies the controller-owned post-run action (`stop`, `terminate`, or release-only) recorded in the lease metadata, records the final pod state, and logs the cleanup result in the controller event log.
+- `scripts/runpod_reconcile.sh`: Crash-recovery path for unattended mode. It scans unreleased leases, collects artifacts for finished jobs, logs TTL-expiry events, and forces cleanup when a job exceeds its controller TTL.
 
 ### Remote Execution (RunPod Side)
 These scripts are deployed and executed on the pod by the Mac controller over SSH:
-- `scripts/runpod_bootstrap_remote.sh`: Normalizes `origin` to the tracked GitHub repo, fetches it (`git fetch origin --prune`), creates a detached worktree at the exact designated commit SHA, and verifies the SHA matches.
+- `scripts/runpod_bootstrap_remote.sh`: Normalizes `origin` to the tracked GitHub repo, fetches it (`git fetch origin --prune`), creates a detached worktree at the exact designated commit SHA, and verifies the SHA matches. The pod template is expected to already contain `git`, `jq`, `tmux`, and `rsync`; bootstrap only uses `apt-get` if `RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK=1` is set explicitly.
 - `scripts/runpod_run_remote.sh`: Validates hardware (exact GPU count and model), applies an outer timeout, and starts the `run_experiment.sh` invocation inside `tmux`.
 
 ## Execution Wrapper
@@ -50,5 +52,7 @@ These scripts are deployed and executed on the pod by the Mac controller over SS
 
 ## Notes
 - The controller never runs heavy processes locally; all execution logic MUST pass through the queue and RunPod.
+- Set `RUNPOD_TEMPLATE_ID` on the Mac controller before unattended launches so new pods always come from the known-good template.
+- Install `scripts/runpod_reconcile.sh` on a periodic scheduler (`launchd` on macOS or `cron`) before leaving the controller unattended overnight.
 - RunPod executors use the official Parameter Golf environment and are strictly pull-only. They checkout an exact commit SHA for deterministic reproduction, then the controller collects artifacts back over full SSH.
 - Controller-side queue and ledger updates use portable local file locks so the same scripts work on this macOS controller and Linux workers.

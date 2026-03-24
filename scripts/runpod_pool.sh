@@ -17,7 +17,7 @@ Usage:
 Notes:
   - pod_name must start with pg-exp- or pg-rec-
   - create uses config/runpod_profiles.json for GPU selection
-  - set RUNPOD_TEMPLATE_ID to force a specific template
+  - RUNPOD_TEMPLATE_ID must be set for create
 EOF
 }
 
@@ -74,6 +74,12 @@ case "$ACTION" in
       exit 1
     fi
 
+    if [ -z "${RUNPOD_TEMPLATE_ID:-}" ]; then
+      echo "Error: RUNPOD_TEMPLATE_ID must be set before creating RunPod pods." >&2
+      echo "Refusing to fall back to a generic image for controller-managed launches." >&2
+      exit 1
+    fi
+
     echo "Creating pod $NAME ($GPU_COUNT x $GPU_TYPE)..."
 
     create_args=(
@@ -87,13 +93,8 @@ case "$ACTION" in
       --ports "22/tcp"
       --startSSH
       --args "sleep infinity"
+      --templateId "$RUNPOD_TEMPLATE_ID"
     )
-
-    if [ -n "${RUNPOD_TEMPLATE_ID:-}" ]; then
-      create_args+=(--templateId "$RUNPOD_TEMPLATE_ID")
-    else
-      create_args+=(--imageName "runpod/pytorch:2.4.0-py3.11-cuda12.4.1-devel-ubuntu22.04")
-    fi
 
     runpodctl "${create_args[@]}"
     ;;

@@ -33,6 +33,10 @@ require_cmd runpodctl
 require_cmd ssh
 require_cmd scp
 
+log_event() {
+  "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
+}
+
 active_leased_pods() {
   python3 - "$REPO_ROOT/registry/spool" <<'PY'
 import json
@@ -94,10 +98,21 @@ FAILURE_ACTION="$(jq -r --arg key "$PROFILE_KEY" '.[$key].failure_action // "ter
 IDLE_GRACE_MINUTES="$(jq -r --arg key "$PROFILE_KEY" '.[$key].idle_grace_minutes // 30' "$PROFILE_FILE")"
 LEASE_TTL_MINUTES="$(jq -r --arg key "$PROFILE_KEY" '.[$key].lease_ttl_minutes // 45' "$PROFILE_FILE")"
 POD_ID=""
+POD_NAME=""
+POD_SOURCE="existing"
 
 dispatch_cleanup() {
   local rc=$?
   if [ "$rc" -ne 0 ] && [ -n "$POD_ID" ]; then
+    log_event \
+      --event "dispatch_failed" \
+      --job-id "$JOB_ID" \
+      --pod-id "$POD_ID" \
+      --pod-name "$POD_NAME" \
+      --branch "$BRANCH" \
+      --reason "dispatch_exit" \
+      --status "$FAILURE_ACTION" \
+      --message "launch path failed before lease handoff completed"
     echo "Dispatch failed for $JOB_ID; cleaning up pod $POD_ID with action $FAILURE_ACTION." >&2
     case "$FAILURE_ACTION" in
       terminate)
@@ -114,6 +129,7 @@ trap dispatch_cleanup EXIT
 
 if [ -n "${RUNPOD_POD_ID:-}" ]; then
   POD_ID="$RUNPOD_POD_ID"
+  POD_SOURCE="override"
 else
   ACTIVE_LEASED_PODS="$(active_leased_pods)"
   POD_ID="$(
@@ -137,6 +153,7 @@ if [ -z "$POD_ID" ]; then
   echo "No existing $POD_PREFIX pod found. Creating $POD_NAME..."
   "$SCRIPT_DIR/runpod_pool.sh" create "$POD_NAME"
   sleep 10
+  POD_SOURCE="created"
   POD_ID="$(
     runpodctl get pod \
       | awk -v name="$POD_NAME" 'NR > 1 && $2 == name { print $1; exit }'
@@ -149,6 +166,17 @@ if [ -z "$POD_ID" ]; then
 fi
 
 echo "Using pod $POD_ID for $JOB_ID"
+if [ -z "$POD_NAME" ]; then
+  POD_NAME="$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null | awk 'NR == 2 { print $2 }')"
+fi
+log_event \
+  --event "pod_selected" \
+  --job-id "$JOB_ID" \
+  --pod-id "$POD_ID" \
+  --pod-name "$POD_NAME" \
+  --branch "$BRANCH" \
+  --reason "$POD_SOURCE" \
+  --message "selected controller pod for dispatch"
 runpodctl start pod "$POD_ID" >/dev/null 2>&1 || true
 
 SSH_CONNECT=""
@@ -211,7 +239,6 @@ mkdir -p "$REPO_ROOT/registry/spool"
 printf '%s\n' "$SSH_HOST" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_target.txt"
 printf '%s\n' "$SSH_PORT" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_port.txt"
 printf '%s\n' "$POD_ID" > "$REPO_ROOT/registry/spool/${JOB_ID}_pod_id.txt"
-POD_NAME="$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null | awk 'NR == 2 { print $2 }')"
 DISPATCHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 LEASE_EXPIRES_AT="$(python3 - "$DISPATCHED_AT" "$LEASE_TTL_MINUTES" <<'PY'
 from datetime import datetime, timedelta, timezone
@@ -260,6 +287,17 @@ jq -n \
       lease_ttl_minutes: $lease_ttl_minutes
     }
   }' > "$REPO_ROOT/registry/spool/${JOB_ID}_lease.json"
+
+log_event \
+  --event "job_dispatched" \
+  --job-id "$JOB_ID" \
+  --pod-id "$POD_ID" \
+  --pod-name "$POD_NAME" \
+  --branch "$BRANCH" \
+  --ssh-host "$SSH_HOST" \
+  --ssh-port "$SSH_PORT" \
+  --status "lease_active" \
+  --message "remote bootstrap and tmux launch completed"
 
 trap - EXIT
 echo "Job dispatched successfully."

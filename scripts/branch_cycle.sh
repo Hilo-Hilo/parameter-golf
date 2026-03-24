@@ -30,6 +30,10 @@ JOB_DISPATCHED=0
 POD_CLEANED=0
 CHILD_NODE_ID=""
 
+log_event() {
+  "$MAIN_CHECKOUT/scripts/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
+}
+
 acquire_node_lock() {
   mkdir -p "$NODE_LOCK_ROOT"
 
@@ -103,6 +107,15 @@ if not lease_expires_at:
 deadline = datetime.strptime(lease_expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
 print(int(deadline.timestamp()))
 PY
+}
+
+stage_plan_changes() {
+  git add -A -- . \
+    ':(exclude)worktrees/**' \
+    ':(exclude)experiments/**' \
+    ':(exclude)registry/**' \
+    ':(exclude).cursor/hooks/state/**' \
+    ':(exclude)tmp/**'
 }
 
 fingerprint_exists() {
@@ -316,7 +329,7 @@ CHILD_NODE_ID="${NODE_ID}_${PROPOSED_SLUG}"
 BRANCH_NAME="approach/$CHILD_NODE_ID"
 
 git checkout -b "$BRANCH_NAME"
-git add .
+stage_plan_changes
 if ! git diff --staged --quiet; then
   git commit -m "chore: auto-commit for $CHILD_NODE_ID (plan phase)"
 fi
@@ -373,6 +386,12 @@ while true; do
 
   if [ "$CONTROLLER_TTL_EPOCH" -gt 0 ] && [ "$(date -u +%s)" -ge "$CONTROLLER_TTL_EPOCH" ]; then
     echo "Controller TTL exceeded for $CHILD_NODE_ID. Triggering failure cleanup."
+    log_event \
+      --event "lease_ttl_exceeded" \
+      --job-id "$CHILD_NODE_ID" \
+      --reason "controller_ttl_exceeded" \
+      --status "cleanup_pending" \
+      --message "branch_cycle controller TTL reached before remote completion"
     if scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "controller_ttl_exceeded" >/dev/null 2>&1; then
       POD_CLEANED=1
     fi

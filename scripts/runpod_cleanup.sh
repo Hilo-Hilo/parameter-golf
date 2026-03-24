@@ -68,6 +68,10 @@ require_cmd jq
 require_cmd python3
 require_cmd runpodctl
 
+log_event() {
+  "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
+}
+
 lease_file="$REPO_ROOT/registry/spool/${job_id}_lease.json"
 pod_id=""
 profile_key=""
@@ -193,5 +197,15 @@ payload["cleanup"]["released_at"] = released_at
 lease_path.parent.mkdir(parents=True, exist_ok=True)
 lease_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
+
+pod_name="$(jq -r '.pod_name // empty' "$lease_file" 2>/dev/null || echo "")"
+log_event \
+  --event "pod_cleaned" \
+  --job-id "$job_id" \
+  --pod-id "$pod_id" \
+  --pod-name "$pod_name" \
+  --reason "$reason" \
+  --status "$action_applied" \
+  --message "pod status ${pod_status_before} -> ${pod_status_after}"
 
 echo "Cleanup complete for $job_id; pod status is now $pod_status_after."

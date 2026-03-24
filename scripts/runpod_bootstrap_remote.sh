@@ -17,10 +17,24 @@ WORKSPACE="/workspace"
 PG_REPO="$WORKSPACE/parameter-golf"
 JOB_DIR="$WORKSPACE/jobs/$JOB_ID"
 REPO_URL="${RUNPOD_REPO_URL:-https://github.com/Hilo-Hilo/parameter-golf.git}"
+ALLOW_APT_FALLBACK="${RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK:-0}"
 
-# Ensure essential tools
-if ! command -v jq >/dev/null || ! command -v tmux >/dev/null || ! command -v rsync >/dev/null; then
-  apt-get update && apt-get install -y jq tmux rsync
+missing_tools=()
+for tool in git jq tmux rsync; do
+  if ! command -v "$tool" >/dev/null 2>&1; then
+    missing_tools+=("$tool")
+  fi
+done
+
+if [ "${#missing_tools[@]}" -gt 0 ]; then
+  if [ "$ALLOW_APT_FALLBACK" = "1" ]; then
+    apt-get update
+    apt-get install -y "${missing_tools[@]}"
+  else
+    echo "Error: pod template is missing required tools: ${missing_tools[*]}" >&2
+    echo "Set RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK=1 only for explicit recovery." >&2
+    exit 1
+  fi
 fi
 
 mkdir -p "$WORKSPACE/jobs"

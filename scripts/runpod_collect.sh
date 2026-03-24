@@ -4,6 +4,19 @@ set -euo pipefail
 # scripts/runpod_collect.sh
 # Runs ON the Mac to collect job artifacts and append to registry.
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+require_cmd() {
+  if ! command -v "$1" >/dev/null 2>&1; then
+    echo "Error: missing required command: $1" >&2
+    exit 1
+  fi
+}
+
+log_event() {
+  "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
+}
+
 if [ "$#" -lt 2 ]; then
   echo "Usage: $0 <ssh_host> [ssh_port] <job_id>" >&2
   exit 1
@@ -18,6 +31,24 @@ else
   SSH_PORT="$2"
   JOB_ID="$3"
 fi
+
+require_cmd ssh
+require_cmd rsync
+require_cmd python3
+
+collect_exit() {
+  local rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log_event \
+      --event "collect_failed" \
+      --job-id "$JOB_ID" \
+      --ssh-host "$SSH_HOST" \
+      --ssh-port "$SSH_PORT" \
+      --status "$rc" \
+      --message "artifact collection exited non-zero"
+  fi
+}
+trap collect_exit EXIT
 
 WORKSPACE="/workspace"
 JOB_DIR="$WORKSPACE/jobs/$JOB_ID"
@@ -113,9 +144,22 @@ PY
 
   if [ "$APPEND_RESULT" = "skipped" ]; then
     echo "Summary already present in runs.jsonl; skipping duplicate append."
+    collect_status="skipped"
   else
     echo "Appended summary to runs.jsonl."
+    collect_status="appended"
   fi
 else
   echo "Warning: No summary JSON found in $LOCAL_RESULTS_DIR"
+  collect_status="no_summary"
 fi
+
+log_event \
+  --event "collect_completed" \
+  --job-id "$JOB_ID" \
+  --ssh-host "$SSH_HOST" \
+  --ssh-port "$SSH_PORT" \
+  --status "$collect_status" \
+  --message "artifact collection finished"
+
+trap - EXIT

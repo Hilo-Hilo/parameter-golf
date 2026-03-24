@@ -53,6 +53,10 @@ require_cmd python3
 require_cmd runpodctl
 require_cmd ssh
 
+log_event() {
+  "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
+}
+
 lease_epoch() {
   python3 - "$1" <<'PY'
 from datetime import datetime, timezone
@@ -135,6 +139,13 @@ for lease_file in "${lease_files[@]}"; do
   if [[ "$expiry_epoch" -gt 0 && "$now_epoch" -ge "$expiry_epoch" ]]; then
     echo "Lease TTL exceeded for $job_id."
     if [[ "$dry_run" -eq 0 ]]; then
+      log_event \
+        --event "lease_ttl_exceeded" \
+        --job-id "$job_id" \
+        --pod-id "$pod_id" \
+        --reason "reconcile_ttl_exceeded" \
+        --status "cleanup_pending" \
+        --message "reconcile detected an expired controller lease"
       "$SCRIPT_DIR/runpod_cleanup.sh" --job-id "$job_id" --reason "reconcile_ttl_exceeded"
     fi
     continue
