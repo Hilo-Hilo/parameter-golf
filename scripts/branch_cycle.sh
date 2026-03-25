@@ -824,7 +824,7 @@ write_job_spec() {
         + {branch: $branch, commit_sha: $commit, job_id: $job_id}
         | .resource_profile = {gpu_count: 1, gpu_type: $gpu_type}
         | .expected_track = "non_record_h100x1"
-        | .env_overrides = ((.env_overrides // {}) + (if (.env_overrides // {}).MAX_WALLCLOCK_SECONDS then {} else {MAX_WALLCLOCK_SECONDS: "5100"} end))
+        | .env_overrides = ((.env_overrides // {}) + (if (.env_overrides // {}).MAX_WALLCLOCK_SECONDS then {} else {MAX_WALLCLOCK_SECONDS: "5100"} end) + {RUNPOD_OUTER_TIMEOUT_SECONDS: "7200"})
         | .run_argv = [.run_argv[]? | if startswith("--nproc_per_node=") then "--nproc_per_node=1" else . end]' \
        "$PLAN_OUTPUT_FILE" > "$output_path"
   else
@@ -1312,7 +1312,7 @@ write_observability_state "cleanup" "completed" "pod cleanup completed"
 announce "=== Phase: diagnose ==="
 LOG_FILE="$(resolve_diagnose_log "$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID")"
 
-PROMPT="$(cat "$PROMPT_FILE")
+PROMPT="$(build_plan_prompt)
 Current Phase: diagnose
 The remote experiment has finished. Logs are at $LOG_FILE.
 Please analyze the logs and summarize any issues.
@@ -1325,7 +1325,7 @@ run_claude_phase "diagnose" "$PROMPT" "100" "10.00" "$MAIN_CHECKOUT/schemas/diag
 # PHASE 3: REFLECT
 # ==============================================================================
 announce "=== Phase: reflect ==="
-PROMPT="$(cat "$PROMPT_FILE")
+PROMPT="$(build_plan_prompt)
 Current Phase: reflect
 Review the diagnosis and outcome. Determine if this was a success and what to do next.
 Output JSON."
