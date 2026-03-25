@@ -166,7 +166,7 @@ fi
 PROFILE_KEY="$POD_PREFIX"
 
 IDLE_ACTION="$(jq -r --arg key "$PROFILE_KEY" '.[$key].idle_action // "stop"' "$PROFILE_FILE")"
-FAILURE_ACTION="$(jq -r --arg key "$PROFILE_KEY" '.[$key].failure_action // "terminate"' "$PROFILE_FILE")"
+FAILURE_ACTION="$(jq -r --arg key "$PROFILE_KEY" '.[$key].failure_action // "stop"' "$PROFILE_FILE")"
 IDLE_GRACE_MINUTES="$(jq -r --arg key "$PROFILE_KEY" '.[$key].idle_grace_minutes // 30' "$PROFILE_FILE")"
 LEASE_TTL_MINUTES="$(jq -r --arg key "$PROFILE_KEY" '.[$key].lease_ttl_minutes // 45' "$PROFILE_FILE")"
 POD_ID=""

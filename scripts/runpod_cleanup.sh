@@ -107,13 +107,13 @@ lease_file="$REPO_ROOT/registry/spool/${job_id}_lease.json"
 pod_id=""
 profile_key=""
 default_action="stop"
-failure_action="terminate"
+failure_action="stop"
 
 if [[ -f "$lease_file" ]]; then
   pod_id="$(jq -r '.pod_id // empty' "$lease_file")"
   profile_key="$(jq -r '.profile_key // empty' "$lease_file")"
   default_action="$(jq -r '.cleanup.default_action // "stop"' "$lease_file")"
-  failure_action="$(jq -r '.cleanup.failure_action // "terminate"' "$lease_file")"
+  failure_action="$(jq -r '.cleanup.failure_action // "stop"' "$lease_file")"
 fi
 
 if [[ -z "$pod_id" && -f "$REPO_ROOT/registry/spool/${job_id}_pod_id.txt" ]]; then
