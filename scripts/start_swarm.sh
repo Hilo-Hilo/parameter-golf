@@ -267,7 +267,8 @@ reap_workers() {
 # Re-seeds the root node as pending when there are fewer pending+running
 # nodes than the requested worker count.
 ensure_pending_supply() {
-  python3 - "$NODES_DB" "$REPO_ROOT/registry/.nodes.lock" "$NODE_ID" "$WORKERS" <<'PY'
+  local seeded_nodes
+  seeded_nodes=$(python3 - "$NODES_DB" "$REPO_ROOT/registry/.nodes.lock" "$NODE_ID" "$WORKERS" <<'PY'
 import fcntl
 import json
 import os
@@ -301,7 +302,7 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
     rows = []
     pending_count = 0
     running_live_count = 0
-    seed_active = False
+    seed_pending = False
     modified = False
 
     for raw_line in db_path.read_text(encoding="utf-8").splitlines():
@@ -327,8 +328,11 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
                 pending_count += 1
                 modified = True
 
-        if node_id == seed_node_id and row.get("status") in ("pending", "running"):
-            seed_active = True
+        # Only block re-seeding if there is already a *pending* root.
+        # A running root should not prevent seeding another pending one
+        # for a different worker to claim.
+        if node_id == seed_node_id and row.get("status") == "pending":
+            seed_pending = True
 
     if modified:
         fd, tmp_path = tempfile.mkstemp(dir=str(db_path.parent), prefix=".nodes.", text=True)
@@ -341,12 +345,44 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-    if pending_count + running_live_count < workers and not seed_active:
+    # Seed enough pending entries so idle workers have something to claim.
+    # Each entry gets a unique node_id so branch_cycle per-node locks
+    # don't collide (e.g. root, root_w1, root_w2).
+    # Print seeded node IDs to stdout so the caller can create tree refs.
+    need = workers - pending_count - running_live_count
+    seeded = []
+    if need > 0:
+        existing_ids = {r.get("node_id") for r in rows}
         with db_path.open("a", encoding="utf-8") as db_file:
-            db_file.write(json.dumps({"node_id": seed_node_id, "status": "pending"}) + "\n")
+            for i in range(need):
+                if i == 0 and seed_node_id not in existing_ids:
+                    nid = seed_node_id
+                else:
+                    slot = 1
+                    while f"{seed_node_id}_w{slot}" in existing_ids:
+                        slot += 1
+                    nid = f"{seed_node_id}_w{slot}"
+                existing_ids.add(nid)
+                db_file.write(json.dumps({"node_id": nid, "status": "pending"}) + "\n")
+                seeded.append(nid)
+
+    for nid in seeded:
+        print(nid)
 
     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 PY
+)
+  # Create tree refs for any newly seeded nodes so branch_cycle can
+  # create worktrees from them.
+  local nid
+  while IFS= read -r nid; do
+    [ -z "$nid" ] && continue
+    local tref="tree/$nid"
+    if ! git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$tref" 2>/dev/null; then
+      git -C "$REPO_ROOT" branch "$tref" "$BASE_REF" >/dev/null 2>&1 || true
+      announce "Created $tref from $BASE_REF for worker node."
+    fi
+  done <<< "$seeded_nodes"
 }
 
 # Spawn workers up to the configured limit.
