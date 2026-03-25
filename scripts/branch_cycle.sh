@@ -814,6 +814,8 @@ write_job_spec() {
     # already set by the plan.  The remote run script also auto-detects the
     # SKU, but setting it here ensures older pod checkouts get the budget too.
     # Default 5100s = 8.5x official 600s (H100 NVL, the most common RunPod SKU).
+    # Rewrite gpu_count to 1, inject proxy wallclock, and fix run_argv
+    # so torchrun uses nproc_per_node=1 instead of 8.
     jq --arg branch "$BRANCH_NAME" \
        --arg commit "$COMMIT_SHA" \
        --arg job_id "$CHILD_NODE_ID" \
@@ -822,7 +824,8 @@ write_job_spec() {
         + {branch: $branch, commit_sha: $commit, job_id: $job_id}
         | .resource_profile = {gpu_count: 1, gpu_type: $gpu_type}
         | .expected_track = "non_record_h100x1"
-        | .env_overrides = ((.env_overrides // {}) + (if (.env_overrides // {}).MAX_WALLCLOCK_SECONDS then {} else {MAX_WALLCLOCK_SECONDS: "5100"} end))' \
+        | .env_overrides = ((.env_overrides // {}) + (if (.env_overrides // {}).MAX_WALLCLOCK_SECONDS then {} else {MAX_WALLCLOCK_SECONDS: "5100"} end))
+        | .run_argv = [.run_argv[]? | if startswith("--nproc_per_node=") then "--nproc_per_node=1" else . end]' \
        "$PLAN_OUTPUT_FILE" > "$output_path"
   else
     jq --arg branch "$BRANCH_NAME" \
@@ -1093,7 +1096,7 @@ ensure_required_upstream_context
 ensure_dispatch_feasible
 PROMPT="$(build_plan_prompt)"
 
-run_claude_phase "plan" "$PROMPT" "15" "1.00" "$MAIN_CHECKOUT/schemas/plan_schema.json" "$PLAN_OUTPUT_FILE"
+run_claude_phase "plan" "$PROMPT" "100" "10.00" "$MAIN_CHECKOUT/schemas/plan_schema.json" "$PLAN_OUTPUT_FILE"
 
 cp "$PLAN_OUTPUT_FILE" "$STATE_FILE"
 
@@ -1144,7 +1147,7 @@ $(tail -n 50 "$NODES_DB" 2>/dev/null || true)
 
 Is this proposed approach a semantic duplicate of a past run? Return JSON."
 
-run_claude_phase "governance" "$GOV_PROMPT" "3" "0.20" "$MAIN_CHECKOUT/schemas/governance_schema.json" "$GOV_OUTPUT_FILE"
+run_claude_phase "governance" "$GOV_PROMPT" "20" "5.00" "$MAIN_CHECKOUT/schemas/governance_schema.json" "$GOV_OUTPUT_FILE"
 
 IS_DUPLICATE=$(jq -r '.structured_output.is_duplicate // "false"' "$GOV_OUTPUT_FILE")
 if [ "$IS_DUPLICATE" == "true" ]; then
@@ -1310,7 +1313,7 @@ Please analyze the logs and summarize any issues.
 Output JSON."
 
 cd "$PLAN_WORKTREE"
-run_claude_phase "diagnose" "$PROMPT" "10" "1.00" "$MAIN_CHECKOUT/schemas/diagnose_schema.json" "$DIAGNOSE_OUTPUT_FILE"
+run_claude_phase "diagnose" "$PROMPT" "100" "10.00" "$MAIN_CHECKOUT/schemas/diagnose_schema.json" "$DIAGNOSE_OUTPUT_FILE"
 
 # ==============================================================================
 # PHASE 3: REFLECT
@@ -1321,7 +1324,7 @@ Current Phase: reflect
 Review the diagnosis and outcome. Determine if this was a success and what to do next.
 Output JSON."
 
-run_claude_phase "reflect" "$PROMPT" "5" "0.50" "$MAIN_CHECKOUT/schemas/reflect_schema.json" "$REFLECT_OUTPUT_FILE"
+run_claude_phase "reflect" "$PROMPT" "50" "5.00" "$MAIN_CHECKOUT/schemas/reflect_schema.json" "$REFLECT_OUTPUT_FILE"
 
 # Update node status based on reflection
 ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$REFLECT_OUTPUT_FILE")
