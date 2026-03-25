@@ -179,5 +179,30 @@ for lease_file in "${lease_files[@]}"; do
     continue
   fi
 
+  # Detect orphaned reservation leases: no SSH info means the dispatch never
+  # completed the bootstrap.  If the reservation is older than 10 minutes and
+  # the pod is still running with no tmux session, it's abandoned.
+  if [[ -z "$ssh_host" ]]; then
+    reserved_at="$(jq -r '.reserved_at // empty' "$lease_file")"
+    if [[ -n "$reserved_at" ]]; then
+      reserved_epoch="$(lease_epoch "$reserved_at")"
+      stale_threshold=$(( now_epoch - 600 ))  # 10 minutes
+      if [[ "$reserved_epoch" -gt 0 && "$reserved_epoch" -le "$stale_threshold" ]]; then
+        echo "Orphaned reservation detected for $job_id (reserved_at=$reserved_at, no SSH)."
+        if [[ "$dry_run" -eq 0 ]]; then
+          log_event \
+            --event "orphan_reservation_cleaned" \
+            --job-id "$job_id" \
+            --pod-id "$pod_id" \
+            --reason "reconcile_orphaned_reservation" \
+            --status "cleanup_pending" \
+            --message "reconcile detected an orphaned reservation lease with no SSH info"
+          "$SCRIPT_DIR/runpod_cleanup.sh" --job-id "$job_id" --action stop --reason "reconcile_orphaned_reservation"
+        fi
+        continue
+      fi
+    fi
+  fi
+
   echo "Lease for $job_id is still active (session_state=$session_state)."
 done

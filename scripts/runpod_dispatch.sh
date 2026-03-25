@@ -109,8 +109,10 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
             raise SystemExit(0)
 
+    from datetime import datetime, timezone
+    reserved_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     lease_path.write_text(
-        json.dumps({"job_id": job_id, "pod_id": pod_id, "cleanup": {}}, sort_keys=True) + "\n",
+        json.dumps({"job_id": job_id, "pod_id": pod_id, "reserved_at": reserved_at, "cleanup": {}}, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     print("RESERVED")

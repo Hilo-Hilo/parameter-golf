@@ -304,6 +304,7 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
     running_live_count = 0
     seed_pending = False
     modified = False
+    stale_node_ids = []
 
     for raw_line in db_path.read_text(encoding="utf-8").splitlines():
         raw_line = raw_line.strip()
@@ -327,6 +328,7 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
                 row["status"] = "pending"
                 pending_count += 1
                 modified = True
+                stale_node_ids.append(node_id)
 
         # Only block re-seeding if there is already a *pending* root.
         # A running root should not prevent seeding another pending one
@@ -344,6 +346,29 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
         finally:
             if os.path.exists(tmp_path):
                 os.unlink(tmp_path)
+
+    # Release any unreleased leases for stale nodes so their pods
+    # get cleaned up by the reconciler instead of sitting idle.
+    if stale_node_ids:
+        from datetime import datetime, timezone
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        spool_dir = db_path.parent / "spool"
+        for stale_nid in stale_node_ids:
+            for lease_path in spool_dir.glob(f"{stale_nid}_lease.json"):
+                try:
+                    lease = json.loads(lease_path.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                if lease.get("cleanup", {}).get("released_at"):
+                    continue
+                lease.setdefault("cleanup", {})
+                lease["cleanup"]["released_at"] = now_str
+                lease["cleanup"]["last_reason"] = "stale_node_recovery"
+                lease["cleanup"]["last_action"] = "stop"
+                lease_path.write_text(
+                    json.dumps(lease, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
 
     # Seed enough pending entries so idle workers have something to claim.
     # Each entry gets a unique node_id so branch_cycle per-node locks
