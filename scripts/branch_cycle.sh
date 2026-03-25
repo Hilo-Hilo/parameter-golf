@@ -1,12 +1,53 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ "$#" -lt 1 ]; then
-  echo "Usage: $0 <node_id>" >&2
+usage() {
+  echo "Usage: $0 [--no-validation] <node_id>" >&2
+}
+
+NO_VALIDATION=0
+NODE_ID=""
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-validation)
+      NO_VALIDATION=1
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --)
+      shift
+      if [ "$#" -ne 1 ]; then
+        usage
+        exit 1
+      fi
+      NODE_ID="$1"
+      break
+      ;;
+    -*)
+      echo "Error: unknown flag: $1" >&2
+      usage
+      exit 1
+      ;;
+    *)
+      if [ -n "$NODE_ID" ]; then
+        echo "Error: expected a single node_id." >&2
+        usage
+        exit 1
+      fi
+      NODE_ID="$1"
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$NODE_ID" ]; then
+  usage
   exit 1
 fi
 
-NODE_ID="$1"
 REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 MAIN_CHECKOUT="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir)/.." && pwd)"
 SAFE_NODE_ID="$(printf '%s' "$NODE_ID" | tr -cs 'A-Za-z0-9._-' '_')"
@@ -116,6 +157,28 @@ stage_plan_changes() {
     ':(exclude)registry/**' \
     ':(exclude).cursor/hooks/state/**' \
     ':(exclude)tmp/**'
+}
+
+write_job_spec() {
+  local output_path="$1"
+
+  if [ "$NO_VALIDATION" -eq 1 ]; then
+    jq --arg branch "$BRANCH_NAME" \
+       --arg commit "$COMMIT_SHA" \
+       --arg job_id "$CHILD_NODE_ID" \
+       --arg gpu_type "H100" \
+       '.structured_output
+        + {branch: $branch, commit_sha: $commit, job_id: $job_id}
+        | .resource_profile = {gpu_count: 1, gpu_type: $gpu_type}
+        | .expected_track = "non_record_h100x1"' \
+       "$SCRATCH_DIR/phase_plan_output.json" > "$output_path"
+  else
+    jq --arg branch "$BRANCH_NAME" \
+       --arg commit "$COMMIT_SHA" \
+       --arg job_id "$CHILD_NODE_ID" \
+       '.structured_output + {branch: $branch, commit_sha: $commit, job_id: $job_id}' \
+       "$SCRATCH_DIR/phase_plan_output.json" > "$output_path"
+  fi
 }
 
 fingerprint_exists() {
@@ -352,11 +415,10 @@ fi
 
 # Create Job Spec JSON
 JOB_SPEC="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_job.json"
-jq --arg branch "$BRANCH_NAME" \
-   --arg commit "$COMMIT_SHA" \
-   --arg job_id "$CHILD_NODE_ID" \
-   '.structured_output + {branch: $branch, commit_sha: $commit, job_id: $job_id}' \
-   "$SCRATCH_DIR/phase_plan_output.json" > "$JOB_SPEC"
+if [ "$NO_VALIDATION" -eq 1 ]; then
+  echo "No-validation enabled; forcing dispatch onto the 1xH100 non-record lane."
+fi
+write_job_spec "$JOB_SPEC"
 
 echo "Dispatching job to RunPod..."
 cd "$MAIN_CHECKOUT"

@@ -1,6 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  echo "Usage: $0 [--no-validation]" >&2
+}
+
+NO_VALIDATION=0
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --no-validation)
+      NO_VALIDATION=1
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Error: unknown option $1" >&2
+      usage
+      exit 2
+      ;;
+  esac
+done
+
 REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 NODES_DB="$REPO_ROOT/registry/nodes.jsonl"
 LOCK_FILE="$REPO_ROOT/registry/.supervisor.lock"
@@ -79,7 +103,11 @@ fi
 
 if [ -n "$PENDING_NODE" ]; then
   echo "Found pending node: $PENDING_NODE. Starting branch cycle..."
-  "$REPO_ROOT/scripts/branch_cycle.sh" "$PENDING_NODE"
+  if [ "$NO_VALIDATION" -eq 1 ]; then
+    "$REPO_ROOT/scripts/branch_cycle.sh" --no-validation "$PENDING_NODE"
+  else
+    "$REPO_ROOT/scripts/branch_cycle.sh" "$PENDING_NODE"
+  fi
 else
   echo "No pending nodes found."
 fi
