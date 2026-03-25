@@ -61,9 +61,10 @@ fi
 
 DEFAULT_OUTER_TIMEOUT_SECONDS="660"
 if [ "$REQ_GPU_COUNT" = "1" ]; then
-  # Outer timeout = proxy train budget + 1800s headroom for eval/TTT/serialization
+  # Outer timeout = proxy train budget + 5400s headroom for compile + eval/TTT/serialization.
+  # TTT eval with many epochs can take 60+ min on 1 GPU.
   proxy_train="${MAX_WALLCLOCK_SECONDS:-4800}"
-  DEFAULT_OUTER_TIMEOUT_SECONDS="$(( proxy_train + 1800 ))"
+  DEFAULT_OUTER_TIMEOUT_SECONDS="$(( proxy_train + 5400 ))"
 fi
 OUTER_TIMEOUT_SECONDS="${RUNPOD_OUTER_TIMEOUT_SECONDS:-$DEFAULT_OUTER_TIMEOUT_SECONDS}"
 

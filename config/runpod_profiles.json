@@ -9,7 +9,7 @@
     "idle_grace_minutes": 30,
     "idle_action": "stop",
     "failure_action": "terminate",
-    "lease_ttl_minutes": 150
+    "lease_ttl_minutes": 200
   },
   "pg-rec": {
     "gpu_count": 8,
