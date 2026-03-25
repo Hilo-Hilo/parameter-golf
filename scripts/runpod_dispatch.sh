@@ -233,16 +233,16 @@ if [ -n "${RUNPOD_POD_ID:-}" ]; then
   POD_ID="$RUNPOD_POD_ID"
   POD_SOURCE="override"
 else
-  ACTIVE_LEASED_PODS="$(active_leased_pods)"
+  # Convert leased pod IDs to a comma-separated string so macOS awk
+  # can parse it without newline-in-variable issues.
+  ACTIVE_LEASED_PODS="$(active_leased_pods | paste -sd, -)"
   POD_ID="$(
     runpodctl get pod \
       | awk -v prefix="$POD_PREFIX" -v leased="$ACTIVE_LEASED_PODS" '
           BEGIN {
-            split(leased, rows, "\n")
-            for (i in rows) {
-              if (rows[i] != "") {
-                busy[rows[i]] = 1
-              }
+            n = split(leased, rows, ",")
+            for (i = 1; i <= n; i++) {
+              if (rows[i] != "") busy[rows[i]] = 1
             }
           }
           NR > 1 && $2 ~ ("^" prefix) && !busy[$1] { print $1; exit }
