@@ -971,6 +971,12 @@ PY
       --reason "$reason" \
       --status "removed" \
       --message "removed stale child node after pre-dispatch controller exit"
+
+    # Clean up the git branch so retries don't fail with "branch already exists".
+    if [ -n "$BRANCH_NAME" ]; then
+      git -C "$MAIN_CHECKOUT" branch -D "$BRANCH_NAME" 2>/dev/null || true
+      git -C "$MAIN_CHECKOUT" push origin --delete "$BRANCH_NAME" 2>/dev/null || true
+    fi
   fi
 }
 
