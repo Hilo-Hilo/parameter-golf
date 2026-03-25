@@ -425,6 +425,15 @@ spawn_workers() {
   done
 }
 
+# Advance all tree/* refs to the latest BASE_REF so new worktrees
+# pick up script fixes committed to main.
+update_tree_refs() {
+  local ref
+  for ref in $(git -C "$REPO_ROOT" for-each-ref --format='%(refname:short)' 'refs/heads/tree/'); do
+    git -C "$REPO_ROOT" branch -f "$ref" "$BASE_REF" 2>/dev/null || true
+  done
+}
+
 # Kill all background workers on shutdown.
 shutdown_workers() {
   announce "Stopping swarm..."
@@ -449,6 +458,7 @@ if [ "$RUN_ONCE" -eq 1 ]; then
     --status "once" \
     --message "start_swarm launched $WORKERS worker(s) for a single pass"
 
+  update_tree_refs
   ensure_pending_supply
   spawn_workers
 
@@ -470,6 +480,7 @@ trap shutdown_workers INT TERM
 
 while true; do
   reap_workers
+  update_tree_refs
   ensure_pending_supply
   spawn_workers
   sleep "$LOOP_SECONDS"
