@@ -1264,6 +1264,20 @@ while true; do
   else
     mirror_remote_observability
     print_new_remote_log_lines
+    # Check if the lease was released by the reconciler or if the pod is gone.
+    # This prevents hours-long SSH retry loops on terminated/recycled pods.
+    LEASE_RELEASED="$(jq -r '.cleanup.released_at // empty' "$LEASE_FILE" 2>/dev/null)"
+    if [ -n "$LEASE_RELEASED" ]; then
+      announce "Lease for $CHILD_NODE_ID was released externally. Aborting wait."
+      write_observability_state "wait_remote" "failed" "lease released externally during wait"
+      exit 1
+    fi
+    POD_CHECK="$(runpodctl get pod "$CURRENT_POD_ID" --allfields 2>/dev/null | awk 'NR==2{print $NF}' || true)"
+    if [ "$POD_CHECK" = "EXITED" ] || [ "$POD_CHECK" = "MISSING" ] || [ -z "$POD_CHECK" ]; then
+      announce "Pod $CURRENT_POD_ID is $POD_CHECK. Aborting wait for $CHILD_NODE_ID."
+      write_observability_state "wait_remote" "failed" "pod is $POD_CHECK during SSH retry"
+      exit 1
+    fi
     write_observability_state "wait_remote" "degraded" "remote SSH check failed; retrying"
     announce "Remote SSH check failed for $CHILD_NODE_ID; retrying."
   fi

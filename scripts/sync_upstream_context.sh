@@ -16,7 +16,6 @@ fi
 
 echo "Fetching Issue #140 (The live frontier)..."
 gh issue view 140 -R "$REPO" > "$OUT_DIR/issue_140.md" 2>/dev/null || true
-# Sometimes issues have comments with important rules or updates
 gh issue view 140 -R "$REPO" --comments >> "$OUT_DIR/issue_140.md" 2>/dev/null || true
 
 echo "Fetching recent merged PRs..."
@@ -30,10 +29,26 @@ gh pr list --state open --limit 10 -R "$REPO" --json number,title,url,createdAt 
   --jq '.[] | "- [\(.title)](\(.url)) (Created: \(.createdAt))"' >> "$OUT_DIR/pr_digest.md" || true
 
 echo "Extracting frontier digest..."
-# We can just copy the leaderboard part from README or issue 140
-echo "# Frontier Digest" > "$OUT_DIR/frontier_digest.md"
+cat > "$OUT_DIR/frontier_digest.md" <<'HEADER'
+# Frontier Digest
+HEADER
 echo "Generated at $(date -u)" >> "$OUT_DIR/frontier_digest.md"
 echo "" >> "$OUT_DIR/frontier_digest.md"
-echo "Please refer to issue_140.md for the canonical, live SOTA rules and leaderboard." >> "$OUT_DIR/frontier_digest.md"
+
+# Pull the upstream README leaderboard table
+echo "## Official Leaderboard (from README)" >> "$OUT_DIR/frontier_digest.md"
+gh api "repos/$REPO/contents/README.md" --jq '.content' 2>/dev/null \
+  | base64 -d 2>/dev/null \
+  | sed -n '/^## Leaderboard/,/^## /p' \
+  | head -30 >> "$OUT_DIR/frontier_digest.md" || true
+
+# Summarize key techniques from top merged record PRs
+echo "" >> "$OUT_DIR/frontier_digest.md"
+echo "## Key Techniques from Recent Records" >> "$OUT_DIR/frontier_digest.md"
+gh pr list --state merged --limit 10 -R "$REPO" \
+  --search "Record in:title" \
+  --json number,title,url,mergedAt,body \
+  --jq '.[] | "### PR #\(.number): \(.title)\nMerged: \(.mergedAt)\nURL: \(.url)\n\(.body[0:500])\n---"' \
+  >> "$OUT_DIR/frontier_digest.md" 2>/dev/null || true
 
 echo "Upstream sync complete."

@@ -478,9 +478,21 @@ log_event \
 
 trap shutdown_workers INT TERM
 
+LAST_UPSTREAM_SYNC=0
+
 while true; do
   reap_workers
   update_tree_refs
+
+  # Sync upstream context every 30 minutes so plans use fresh data.
+  NOW_EPOCH="$(date -u +%s)"
+  if [ "$(( NOW_EPOCH - LAST_UPSTREAM_SYNC ))" -ge 1800 ]; then
+    if "$REPO_ROOT/scripts/sync_upstream_context.sh" >/dev/null 2>&1; then
+      announce "Synced upstream context."
+    fi
+    LAST_UPSTREAM_SYNC="$NOW_EPOCH"
+  fi
+
   ensure_pending_supply
   spawn_workers
   sleep "$LOOP_SECONDS"
