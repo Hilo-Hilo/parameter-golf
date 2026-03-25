@@ -2,16 +2,21 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--no-validation]" >&2
+  echo "Usage: $0 [--no-validation] [--worker-id ID]" >&2
 }
 
 NO_VALIDATION=0
+WORKER_ID="0"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-validation)
       NO_VALIDATION=1
       shift
+      ;;
+    --worker-id)
+      WORKER_ID="${2:-0}"
+      shift 2
       ;;
     -h|--help)
       usage
@@ -27,10 +32,10 @@ done
 
 REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 NODES_DB="$REPO_ROOT/registry/nodes.jsonl"
-LOCK_FILE="$REPO_ROOT/registry/.supervisor.lock"
+NODES_LOCK="$REPO_ROOT/registry/.nodes.lock"
 
 announce() {
-  printf '[%s][supervisor] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*"
+  printf '[%s][supervisor/w%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$WORKER_ID" "$*"
 }
 
 log_event() {
@@ -45,8 +50,11 @@ announce "Reconciling stale RunPod leases..."
 
 announce "Checking for pending nodes..."
 
+# Claim one pending node atomically under .nodes.lock (blocking).
+# Multiple concurrent supervisors safely serialize here and each claim
+# a different pending node.
 PENDING_NODE="$(
-  python3 - "$NODES_DB" "$LOCK_FILE" <<'PY'
+  python3 - "$NODES_DB" "$NODES_LOCK" <<'PY'
 import fcntl
 import json
 import os
@@ -65,11 +73,7 @@ rows = []
 pending_node = ""
 
 with lock_path.open("a+", encoding="utf-8") as lock_file:
-    try:
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
-        print("__LOCKED__")
-        raise SystemExit(0)
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
 
     for raw_line in db_path.read_text(encoding="utf-8").splitlines():
         raw_line = raw_line.strip()
@@ -104,22 +108,13 @@ print(pending_node)
 PY
 )"
 
-if [ "$PENDING_NODE" = "__LOCKED__" ]; then
-  announce "Supervisor already running."
-  log_event \
-    --event "supervisor_locked" \
-    --status "locked" \
-    --message "supervisor skipped because another supervisor instance holds the lock"
-  exit 0
-fi
-
 if [ -n "$PENDING_NODE" ]; then
   announce "Found pending node: $PENDING_NODE. Starting branch cycle..."
   log_event \
     --event "node_claimed" \
     --node-id "$PENDING_NODE" \
     --status "running" \
-    --message "supervisor claimed a pending node and is launching branch_cycle"
+    --message "supervisor/w${WORKER_ID} claimed a pending node and is launching branch_cycle"
   if [ "$NO_VALIDATION" -eq 1 ]; then
     "$REPO_ROOT/scripts/branch_cycle.sh" --no-validation "$PENDING_NODE"
   else
@@ -130,5 +125,5 @@ else
   log_event \
     --event "supervisor_idle" \
     --status "idle" \
-    --message "supervisor found no pending nodes"
+    --message "supervisor/w${WORKER_ID} found no pending nodes"
 fi

@@ -26,9 +26,44 @@ export RUN_ID="$JOB_ID"
 
 mkdir -p "$OUTPUT_DIR"
 
+# For 1-GPU proxy runs, auto-detect the H100 SKU and compute a faithful
+# wallclock training budget.  The official contest is 600s on 8xH100 SXM.
+# With grad_accum_steps=8//world_size the global batch is preserved, so the
+# proxy just needs to give ~8x more wall time, adjusted for SKU throughput.
+#
+# Reference multipliers (conservative, from public hardware data):
+#   H100 SXM  (80GB HBM3)  -> 8.0x  (4800s)
+#   H100 NVL               -> 8.5x  (5100s)
+#   H100 PCIe              -> 11.0x (6600s)
+#
+# The outer timeout is set to proxy_train + 1800s headroom for eval/TTT.
+# All values can be overridden via MAX_WALLCLOCK_SECONDS / RUNPOD_OUTER_TIMEOUT_SECONDS.
+if [ "$REQ_GPU_COUNT" = "1" ] && [ -z "${MAX_WALLCLOCK_SECONDS:-}" ]; then
+  GPU_LINE="$(nvidia-smi -L 2>/dev/null | head -1 || true)"
+  echo "Detected GPU: $GPU_LINE"
+  PROXY_TRAIN_SECONDS="$(python3 - "$GPU_LINE" <<'PY'
+import sys
+gpu = sys.argv[1] if len(sys.argv) > 1 else ""
+official_budget = 600
+if "NVL" in gpu:
+    mult = 8.5
+elif "PCIe" in gpu or "PCIE" in gpu:
+    mult = 11.0
+else:
+    # Default: assume SXM-class (includes "H100 80GB HBM3" and unknowns)
+    mult = 8.0
+print(int(official_budget * mult))
+PY
+)"
+  export MAX_WALLCLOCK_SECONDS="$PROXY_TRAIN_SECONDS"
+  echo "1-GPU proxy: MAX_WALLCLOCK_SECONDS=$PROXY_TRAIN_SECONDS (from SKU detection)"
+fi
+
 DEFAULT_OUTER_TIMEOUT_SECONDS="660"
 if [ "$REQ_GPU_COUNT" = "1" ]; then
-  DEFAULT_OUTER_TIMEOUT_SECONDS="3600"
+  # Outer timeout = proxy train budget + 1800s headroom for eval/TTT/serialization
+  proxy_train="${MAX_WALLCLOCK_SECONDS:-4800}"
+  DEFAULT_OUTER_TIMEOUT_SECONDS="$(( proxy_train + 1800 ))"
 fi
 OUTER_TIMEOUT_SECONDS="${RUNPOD_OUTER_TIMEOUT_SECONDS:-$DEFAULT_OUTER_TIMEOUT_SECONDS}"
 

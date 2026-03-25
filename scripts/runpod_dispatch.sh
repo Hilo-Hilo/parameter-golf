@@ -70,6 +70,54 @@ for pod_id in sorted(leased):
 PY
 }
 
+# Atomically reserve a pod under an exclusive lock so concurrent dispatches
+# cannot double-book the same pod.  Writes a minimal reservation lease that
+# the full lease write later overwrites.
+reserve_pod_or_fail() {
+  local pod_id="$1"
+  local job_id="$2"
+  python3 - "$REPO_ROOT/registry" "$pod_id" "$job_id" <<'PY'
+import fcntl
+import json
+import pathlib
+import sys
+
+registry_dir = pathlib.Path(sys.argv[1])
+pod_id = sys.argv[2]
+job_id = sys.argv[3]
+
+spool_dir = registry_dir / "spool"
+lock_path = registry_dir / ".pod_dispatch.lock"
+lease_path = spool_dir / f"{job_id}_lease.json"
+
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+spool_dir.mkdir(parents=True, exist_ok=True)
+lock_path.touch(exist_ok=True)
+
+with lock_path.open("a+", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    for existing_lease in spool_dir.glob("*_lease.json"):
+        try:
+            payload = json.loads(existing_lease.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if payload.get("cleanup", {}).get("released_at"):
+            continue
+        if payload.get("pod_id") == pod_id:
+            print("CONFLICT")
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+            raise SystemExit(0)
+
+    lease_path.write_text(
+        json.dumps({"job_id": job_id, "pod_id": pod_id, "cleanup": {}}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    print("RESERVED")
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+PY
+}
+
 BRANCH="$(jq -r '.branch' "$JOB_SPEC")"
 COMMIT_SHA="$(jq -r '.commit_sha' "$JOB_SPEC")"
 JOB_ID="$(jq -r '.job_id' "$JOB_SPEC")"
@@ -123,6 +171,31 @@ POD_ID=""
 POD_NAME=""
 POD_SOURCE="existing"
 
+build_pod_name() {
+  local suffix
+  suffix="$(date -u +%H%M%S)"
+
+  python3 - "$POD_PREFIX" "$JOB_ID" "$suffix" <<'PY'
+import re
+import sys
+
+prefix = sys.argv[1]
+job_id = sys.argv[2]
+suffix = sys.argv[3]
+
+slug = re.sub(r"[^a-z0-9]+", "-", job_id.lower())
+slug = re.sub(r"-+", "-", slug).strip("-") or "job"
+
+# Keep pod names concise and stable while preserving a timestamp suffix for uniqueness.
+max_total_len = 63
+reserved = len(prefix) + len(suffix) + 2  # two separators
+max_slug_len = max(max_total_len - reserved, 1)
+slug = slug[:max_slug_len].rstrip("-") or "job"
+
+print(f"{prefix}-{slug}-{suffix}")
+PY
+}
+
 dispatch_cleanup() {
   local rc=$?
   if [ "$rc" -ne 0 ] && [ -n "$POD_ID" ]; then
@@ -136,6 +209,11 @@ dispatch_cleanup() {
       --status "$FAILURE_ACTION" \
       --message "launch path failed before lease handoff completed"
     announce "Dispatch failed for $JOB_ID; cleaning up pod $POD_ID with action $FAILURE_ACTION." >&2
+    # Remove the reservation lease so the pod is freed for other workers.
+    local reservation_lease="$REPO_ROOT/registry/spool/${JOB_ID}_lease.json"
+    if [ -f "$reservation_lease" ]; then
+      rm -f "$reservation_lease"
+    fi
     case "$FAILURE_ACTION" in
       terminate)
         runpodctl remove pod "$POD_ID" >/dev/null 2>&1 || true
@@ -171,7 +249,7 @@ else
 fi
 
 if [ -z "$POD_ID" ]; then
-  POD_NAME="${POD_PREFIX}-smoke-$(date -u +%H%M%S)"
+  POD_NAME="$(build_pod_name)"
   announce "No existing $POD_PREFIX pod found. Creating $POD_NAME..."
   "$SCRIPT_DIR/runpod_pool.sh" create "$POD_NAME"
   sleep 10
@@ -184,6 +262,14 @@ fi
 
 if [ -z "$POD_ID" ]; then
   echo "Error: unable to resolve a RunPod pod ID for this job." >&2
+  exit 1
+fi
+
+# Atomically reserve the pod so concurrent dispatches cannot double-book it.
+RESERVE_RESULT="$(reserve_pod_or_fail "$POD_ID" "$JOB_ID")"
+if [ "$RESERVE_RESULT" = "CONFLICT" ]; then
+  announce "Pod $POD_ID was claimed by another worker. Aborting dispatch." >&2
+  POD_ID=""
   exit 1
 fi
 

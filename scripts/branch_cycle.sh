@@ -60,6 +60,12 @@ export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
 export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
 export CLAUDE_CODE_DISABLE_CRON=1
 
+REQUIRED_UPSTREAM_CONTEXT_FILES=(
+  "$MAIN_CHECKOUT/context/upstream/issue_140.md"
+  "$MAIN_CHECKOUT/context/upstream/pr_digest.md"
+  "$MAIN_CHECKOUT/context/upstream/frontier_digest.md"
+)
+
 mkdir -p "$MAIN_CHECKOUT/registry/spool"
 STATE_FILE="$MAIN_CHECKOUT/registry/spool/${NODE_ID}_state.json"
 NODES_DB="$MAIN_CHECKOUT/registry/nodes.jsonl"
@@ -438,6 +444,7 @@ cleanup() {
   fi
 
   if [ "$JOB_DISPATCHED" -eq 0 ]; then
+    retract_child_node "pre_dispatch_exit"
     requeue_parent_node "pre_dispatch_exit"
   fi
 
@@ -490,6 +497,183 @@ stage_plan_changes() {
     ':(exclude)tmp/**'
 }
 
+compact_json_file() {
+  local json_path="$1"
+
+  python3 - "$json_path" <<'PY'
+import json
+import pathlib
+import sys
+
+path = pathlib.Path(sys.argv[1])
+print(json.dumps(json.loads(path.read_text(encoding="utf-8")), separators=(",", ":")))
+PY
+}
+
+ensure_required_upstream_context() {
+  local missing=()
+  local path
+
+  for path in "${REQUIRED_UPSTREAM_CONTEXT_FILES[@]}"; do
+    if [ ! -f "$path" ]; then
+      missing+=("$path")
+    fi
+  done
+
+  if [ "${#missing[@]}" -eq 0 ]; then
+    return 0
+  fi
+
+  announce "Error: missing required upstream context files for the plan phase."
+  for path in "${missing[@]}"; do
+    announce "  missing: $path"
+  done
+  announce "Run scripts/sync_upstream_context.sh before starting the swarm."
+  write_observability_state "plan" "failed" "missing required upstream context files"
+  log_event \
+    --event "phase_failed" \
+    --node-id "$NODE_ID" \
+    --job-id "$CHILD_NODE_ID" \
+    --phase "plan" \
+    --branch "$BRANCH_NAME" \
+    --status "missing_context" \
+    --message "required upstream context files are missing"
+  return 1
+}
+
+ensure_dispatch_feasible() {
+  if [ -n "${RUNPOD_POD_ID:-}" ]; then
+    return 0
+  fi
+  if [ -n "${RUNPOD_TEMPLATE_ID:-}" ]; then
+    return 0
+  fi
+
+  local existing_pod
+  existing_pod="$(runpodctl get pod 2>/dev/null \
+    | awk 'NR > 1 && $2 ~ /^pg-(exp|rec)/ { print $1; exit }' || true)"
+  if [ -n "$existing_pod" ]; then
+    return 0
+  fi
+
+  announce "Error: dispatch will fail -- no RUNPOD_TEMPLATE_ID, no RUNPOD_POD_ID override, and no existing pg-* pod."
+  announce "Set RUNPOD_TEMPLATE_ID before starting the swarm, or ensure a reusable pod exists."
+  write_observability_state "plan" "failed" "dispatch not feasible: no pods and no template ID"
+  log_event \
+    --event "phase_failed" \
+    --node-id "$NODE_ID" \
+    --phase "plan" \
+    --status "no_dispatch_target" \
+    --message "pre-flight: RUNPOD_TEMPLATE_ID unset and no reusable pods found"
+  return 1
+}
+
+build_plan_prompt() {
+  python3 - "$MAIN_CHECKOUT" "$STATE_FILE" <<'PY'
+import pathlib
+import sys
+
+repo = pathlib.Path(sys.argv[1])
+state_path = pathlib.Path(sys.argv[2])
+
+
+def read_lines(path, start=1, limit=None):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return f"<missing: {path}>"
+
+    if not lines:
+        return "<empty>"
+
+    start_index = max(start - 1, 0)
+    if start_index >= len(lines):
+        return f"<offset {start} beyond EOF for {path}>"
+
+    if limit is None:
+        excerpt = lines[start_index:]
+        truncated = False
+    else:
+        excerpt = lines[start_index:start_index + limit]
+        truncated = start_index + limit < len(lines)
+
+    body = "\n".join(excerpt)
+    if truncated:
+        body += "\n... [truncated; use targeted Read with offset/limit if more detail is required]"
+    return body
+
+
+def tail_lines(path, limit):
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return f"<missing: {path}>"
+
+    if not lines:
+        return "<empty>"
+
+    excerpt = lines[-limit:]
+    prefix = ""
+    if len(lines) > limit:
+        prefix = f"... [showing last {limit} of {len(lines)} lines]\n"
+    return prefix + "\n".join(excerpt)
+
+
+def list_spool_json(path):
+    directory = pathlib.Path(path)
+    if not directory.exists():
+        return f"<missing directory: {directory}>"
+
+    names = sorted(entry.name for entry in directory.glob("*.json"))
+    if not names:
+        return "<no spool json files>"
+    return "\n".join(f"- {name}" for name in names)
+
+
+def section(title, body):
+    return f"## {title}\n{body.rstrip()}".rstrip()
+
+
+state_payload = "{}"
+if state_path.exists():
+    payload = state_path.read_text(encoding="utf-8").strip()
+    if payload:
+        state_payload = payload
+
+prompt_sections = [
+    repo.joinpath("worker_program.md").read_text(encoding="utf-8").rstrip(),
+    section(
+        "Controller Tooling Guardrails",
+        "\n".join(
+            [
+                "- The Read tool hard-fails above roughly 10k tokens. Do not read `context/upstream/issue_140.md`, `README.md`, or `registry/runs.jsonl` in full.",
+                "- Use the bundled excerpts below first. If you need more detail, use targeted Read calls with offset/limit or Grep/Glob.",
+                "- Keep exploration bounded. Prefer one novel, well-motivated hypothesis over exhaustive repo scanning.",
+                "- If the bundled context below is sufficient, do not reread those same files.",
+            ]
+        ),
+    ),
+    section("Bundled CLAUDE.md", read_lines(repo / "CLAUDE.md")),
+    section("Bundled PLAN.md", read_lines(repo / "PLAN.md")),
+    section("Bundled Journal", read_lines(repo / "journal.md")),
+    section("Bundled README Leaderboard Excerpt", read_lines(repo / "README.md", start=29, limit=28)),
+    section("Bundled issue_140.md Excerpt", read_lines(repo / "context/upstream/issue_140.md", start=1, limit=160)),
+    section("Bundled pr_digest.md", read_lines(repo / "context/upstream/pr_digest.md")),
+    section("Bundled frontier_digest.md", read_lines(repo / "context/upstream/frontier_digest.md")),
+    section("Bundled registry/runs.jsonl Tail", tail_lines(repo / "registry/runs.jsonl", 12)),
+    section("Bundled registry/jobs.jsonl Tail", tail_lines(repo / "registry/jobs.jsonl", 12)),
+    section("Bundled registry/spool JSON Files", list_spool_json(repo / "registry/spool")),
+    section(
+        "Current Phase",
+        "plan\nPlease analyze history, make local file edits for your new approach, and then output your JSON proposal.\nPrevious state if any:\n"
+        + state_payload,
+    ),
+]
+
+print("\n\n".join(prompt_sections))
+PY
+}
+
 run_claude_phase() {
   local phase="$1"
   local prompt="$2"
@@ -498,6 +682,8 @@ run_claude_phase() {
   local schema_path="$5"
   local output_file="$6"
   local stderr_log="$PHASE_LOG_DIR/${phase}.stderr.log"
+  local schema_json=""
+  local cli_subtype=""
 
   rm -f "$output_file" "$stderr_log"
 
@@ -515,6 +701,20 @@ run_claude_phase() {
     --status "running" \
     --message "Claude ${phase} phase started"
 
+  if ! schema_json="$(compact_json_file "$schema_path" 2>>"$stderr_log")"; then
+    write_observability_state "$phase" "failed" "Invalid JSON schema at $schema_path"
+    log_event \
+      --event "phase_failed" \
+      --node-id "$NODE_ID" \
+      --job-id "$CHILD_NODE_ID" \
+      --phase "$phase" \
+      --branch "$BRANCH_NAME" \
+      --status "invalid_schema" \
+      --message "failed to load JSON schema from $schema_path"
+    announce "Error: Failed to load JSON schema from $schema_path. See $stderr_log"
+    return 1
+  fi
+
   if ! claude -p "$prompt" \
     --max-turns "$max_turns" \
     --max-budget-usd "$max_budget" \
@@ -524,7 +724,7 @@ run_claude_phase() {
     --strict-mcp-config \
     --no-session-persistence \
     --output-format json \
-    --json-schema "$schema_path" \
+    --json-schema "$schema_json" \
     > "$output_file" 2> "$stderr_log" < /dev/null; then
     announce "Warning: Claude ${phase} phase exited non-zero. See $stderr_log"
   fi
@@ -560,6 +760,41 @@ run_claude_phase() {
     return 1
   fi
 
+  cli_subtype="$(jq -r '.subtype // "unknown"' "$output_file" 2>/dev/null || echo "unknown")"
+  if [ "$cli_subtype" != "success" ]; then
+    local cli_error
+    cli_error="$(jq -r '.result // ((.errors // []) | if length > 0 then join("; ") else empty end)' "$output_file" 2>/dev/null || true)"
+    if [ -z "$cli_error" ] || [ "$cli_error" = "null" ]; then
+      cli_error="Claude CLI returned subtype=$cli_subtype"
+    fi
+    write_observability_state "$phase" "failed" "Claude ${phase} phase failed: $cli_error"
+    log_event \
+      --event "phase_failed" \
+      --node-id "$NODE_ID" \
+      --job-id "$CHILD_NODE_ID" \
+      --phase "$phase" \
+      --branch "$BRANCH_NAME" \
+      --status "cli_${cli_subtype}" \
+      --message "$cli_error"
+    announce "Error: Claude ${phase} phase failed: $cli_error"
+    announce "See $stderr_log and $output_file for details."
+    return 1
+  fi
+
+  if ! jq -e '.structured_output != null' "$output_file" >/dev/null 2>&1; then
+    write_observability_state "$phase" "failed" "Claude ${phase} phase returned no structured_output"
+    log_event \
+      --event "phase_failed" \
+      --node-id "$NODE_ID" \
+      --job-id "$CHILD_NODE_ID" \
+      --phase "$phase" \
+      --branch "$BRANCH_NAME" \
+      --status "missing_structured_output" \
+      --message "Claude phase returned no structured_output"
+    announce "Error: Claude ${phase} phase returned no structured_output. See $stderr_log and $output_file"
+    return 1
+  fi
+
   write_observability_state "$phase" "completed" "Claude ${phase} phase completed"
   log_event \
     --event "phase_completed" \
@@ -575,6 +810,10 @@ write_job_spec() {
   local output_path="$1"
 
   if [ "$NO_VALIDATION" -eq 1 ]; then
+    # 1-GPU proxy: inject MAX_WALLCLOCK_SECONDS into env_overrides if not
+    # already set by the plan.  The remote run script also auto-detects the
+    # SKU, but setting it here ensures older pod checkouts get the budget too.
+    # Default 5100s = 8.5x official 600s (H100 NVL, the most common RunPod SKU).
     jq --arg branch "$BRANCH_NAME" \
        --arg commit "$COMMIT_SHA" \
        --arg job_id "$CHILD_NODE_ID" \
@@ -582,7 +821,8 @@ write_job_spec() {
        '.structured_output
         + {branch: $branch, commit_sha: $commit, job_id: $job_id}
         | .resource_profile = {gpu_count: 1, gpu_type: $gpu_type}
-        | .expected_track = "non_record_h100x1"' \
+        | .expected_track = "non_record_h100x1"
+        | .env_overrides = ((.env_overrides // {}) + (if (.env_overrides // {}).MAX_WALLCLOCK_SECONDS then {} else {MAX_WALLCLOCK_SECONDS: "5100"} end))' \
        "$PLAN_OUTPUT_FILE" > "$output_path"
   else
     jq --arg branch "$BRANCH_NAME" \
@@ -657,6 +897,77 @@ PY
       --reason "$reason" \
       --status "pending" \
       --message "restored parent node to pending after pre-dispatch controller exit"
+  fi
+}
+
+retract_child_node() {
+  local reason="${1:-pre_dispatch_exit}"
+  local result
+
+  if [ -z "$CHILD_NODE_ID" ]; then
+    return 0
+  fi
+
+  result="$(python3 - "$NODES_DB" "$NODES_LOCK_FILE" "$CHILD_NODE_ID" <<'PY'
+import fcntl
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+db_path = pathlib.Path(sys.argv[1])
+lock_path = pathlib.Path(sys.argv[2])
+child_node_id = sys.argv[3]
+
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+db_path.parent.mkdir(parents=True, exist_ok=True)
+db_path.touch(exist_ok=True)
+
+rows = []
+removed = False
+
+with lock_path.open("a+", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    for raw_line in db_path.read_text(encoding="utf-8").splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            row = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("node_id") == child_node_id and row.get("status") == "running":
+            removed = True
+            continue
+        rows.append(row)
+
+    fd, tmp_path = tempfile.mkstemp(dir=str(db_path.parent), prefix=".nodes.", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            for row in rows:
+                tmp_file.write(json.dumps(row))
+                tmp_file.write("\n")
+        os.replace(tmp_path, db_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+print("removed" if removed else "unchanged")
+PY
+)"
+
+  if [ "$result" = "removed" ]; then
+    announce "Retracted child node $CHILD_NODE_ID after controller exit before dispatch."
+    log_event \
+      --event "child_retracted" \
+      --job-id "$CHILD_NODE_ID" \
+      --reason "$reason" \
+      --status "removed" \
+      --message "removed stale child node after pre-dispatch controller exit"
   fi
 }
 
@@ -777,12 +1088,10 @@ cd "$PLAN_WORKTREE"
 # PHASE 1: PLAN
 # ==============================================================================
 announce "=== Phase: plan ==="
-PROMPT_FILE="$MAIN_CHECKOUT/worker_program.md"
-
-PROMPT="$(cat "$PROMPT_FILE")
-Current Phase: plan
-Please analyze history, make local file edits for your new approach, and then output your JSON proposal.
-Previous state if any: $(cat "$STATE_FILE" 2>/dev/null || echo "{}")"
+CURRENT_PHASE="plan"
+ensure_required_upstream_context
+ensure_dispatch_feasible
+PROMPT="$(build_plan_prompt)"
 
 run_claude_phase "plan" "$PROMPT" "15" "1.00" "$MAIN_CHECKOUT/schemas/plan_schema.json" "$PLAN_OUTPUT_FILE"
 
