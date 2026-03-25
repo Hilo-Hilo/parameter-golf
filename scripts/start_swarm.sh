@@ -76,10 +76,33 @@ REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 NODES_DB="$REPO_ROOT/registry/nodes.jsonl"
 TREE_REF="tree/$NODE_ID"
 
+ensure_claude_auth() {
+  if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
+    return 0
+  fi
+
+  if ! command -v claude >/dev/null 2>&1; then
+    echo "Error: claude CLI is not installed or not on PATH." >&2
+    exit 2
+  fi
+
+  local auth_status
+  auth_status="$(claude auth status 2>/dev/null || true)"
+  if [ -n "$auth_status" ] && printf '%s' "$auth_status" | jq -e '.loggedIn == true' >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Error: Claude CLI is not authenticated for controller use." >&2
+  echo "Run 'claude auth login' for subscription auth, or export ANTHROPIC_API_KEY before starting the swarm." >&2
+  exit 2
+}
+
 if ! git -C "$REPO_ROOT" rev-parse --verify "${BASE_REF}^{commit}" >/dev/null 2>&1; then
   echo "Error: base ref $BASE_REF does not resolve to a commit." >&2
   exit 2
 fi
+
+ensure_claude_auth
 
 mkdir -p "$REPO_ROOT/registry"
 touch "$NODES_DB"
@@ -103,11 +126,16 @@ QUEUE_RESULT="$(
 import fcntl
 import json
 import pathlib
+import re
+import subprocess
 import sys
 
 db_path = pathlib.Path(sys.argv[1])
 node_id = sys.argv[2]
 lock_path = db_path.parent / ".nodes.lock"
+
+process_output = subprocess.check_output(["ps", "-axo", "command"], text=True)
+live_branch_cycle = re.compile(rf"scripts/branch_cycle\.sh(?:\s+--no-validation)?\s+{re.escape(node_id)}(?:\s|$)")
 
 db_path.parent.mkdir(parents=True, exist_ok=True)
 db_path.touch(exist_ok=True)
@@ -118,6 +146,7 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
 
     rows = []
     active = False
+    recovered = False
     for raw_line in db_path.read_text(encoding="utf-8").splitlines():
         raw_line = raw_line.strip()
         if not raw_line:
@@ -126,11 +155,25 @@ with lock_path.open("a+", encoding="utf-8") as lock_file:
             row = json.loads(raw_line)
         except json.JSONDecodeError:
             continue
+        if row.get("node_id") == node_id:
+            if row.get("status") == "pending":
+                active = True
+            elif row.get("status") == "running":
+                if live_branch_cycle.search(process_output):
+                    active = True
+                else:
+                    row["status"] = "pending"
+                    active = True
+                    recovered = True
         rows.append(row)
-        if row.get("node_id") == node_id and row.get("status") in {"pending", "running"}:
-            active = True
 
-    if active:
+    if recovered:
+        with db_path.open("w", encoding="utf-8") as db_file:
+            for row in rows:
+                db_file.write(json.dumps(row))
+                db_file.write("\n")
+        print("recovered")
+    elif active:
         print("existing")
     else:
         with db_path.open("a", encoding="utf-8") as db_file:
@@ -145,6 +188,9 @@ PY
 case "$QUEUE_RESULT" in
   queued)
     echo "Queued node $NODE_ID in registry/nodes.jsonl."
+    ;;
+  recovered)
+    echo "Recovered stale running node $NODE_ID and re-queued it as pending."
     ;;
   existing)
     echo "Node $NODE_ID already has an active pending/running entry."

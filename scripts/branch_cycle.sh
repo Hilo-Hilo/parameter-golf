@@ -67,9 +67,16 @@ touch "$NODES_DB"
 SCRATCH_DIR=$(mktemp -d)
 SCRATCH_REF="scratch_${SAFE_NODE_ID}_$$"
 PLAN_WORKTREE="$MAIN_CHECKOUT/worktrees/$SCRATCH_REF"
+PHASE_LOG_DIR="$MAIN_CHECKOUT/registry/phase_logs/$SAFE_NODE_ID/$SCRATCH_REF"
+PLAN_OUTPUT_FILE="$PHASE_LOG_DIR/plan.output.json"
+GOV_OUTPUT_FILE="$PHASE_LOG_DIR/governance.output.json"
+DIAGNOSE_OUTPUT_FILE="$PHASE_LOG_DIR/diagnose.output.json"
+REFLECT_OUTPUT_FILE="$PHASE_LOG_DIR/reflect.output.json"
 JOB_DISPATCHED=0
 POD_CLEANED=0
 CHILD_NODE_ID=""
+
+mkdir -p "$PHASE_LOG_DIR"
 
 log_event() {
   "$MAIN_CHECKOUT/scripts/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
@@ -108,6 +115,10 @@ cleanup() {
   if [ "$JOB_DISPATCHED" -eq 1 ] && [ "$POD_CLEANED" -eq 0 ] && [ -n "$CHILD_NODE_ID" ]; then
     cd "$MAIN_CHECKOUT"
     scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "controller_exit" >/dev/null 2>&1 || true
+  fi
+
+  if [ "$JOB_DISPATCHED" -eq 0 ]; then
+    requeue_parent_node "pre_dispatch_exit"
   fi
 
   release_node_lock
@@ -159,6 +170,49 @@ stage_plan_changes() {
     ':(exclude)tmp/**'
 }
 
+run_claude_phase() {
+  local phase="$1"
+  local prompt="$2"
+  local max_turns="$3"
+  local max_budget="$4"
+  local schema_path="$5"
+  local output_file="$6"
+  local stderr_log="$PHASE_LOG_DIR/${phase}.stderr.log"
+
+  rm -f "$output_file" "$stderr_log"
+
+  echo "Running Claude ${phase} phase non-interactively..."
+  echo "  JSON output: $output_file"
+  echo "  STDERR log:  $stderr_log"
+
+  if ! claude -p "$prompt" \
+    --max-turns "$max_turns" \
+    --max-budget-usd "$max_budget" \
+    --tools "Read,Edit,Glob,Grep" \
+    --settings "$MAIN_CHECKOUT/.claude/settings.json" \
+    --mcp-config "$MAIN_CHECKOUT/.mcp.json" \
+    --strict-mcp-config \
+    --no-session-persistence \
+    --output-format json \
+    --json-schema "$schema_path" \
+    > "$output_file" 2> "$stderr_log" < /dev/null; then
+    echo "Warning: Claude ${phase} phase exited non-zero. See $stderr_log" >&2
+  fi
+
+  if [ ! -s "$output_file" ]; then
+    echo "Error: Claude ${phase} phase produced no JSON output. See $stderr_log" >&2
+    return 1
+  fi
+
+  if jq -e '.is_error == true' "$output_file" >/dev/null 2>&1; then
+    local cli_error
+    cli_error="$(jq -r '.result // "Claude CLI returned an unspecified error."' "$output_file")"
+    echo "Error: Claude ${phase} phase failed: $cli_error" >&2
+    echo "See $stderr_log and $output_file for details." >&2
+    return 1
+  fi
+}
+
 write_job_spec() {
   local output_path="$1"
 
@@ -171,13 +225,80 @@ write_job_spec() {
         + {branch: $branch, commit_sha: $commit, job_id: $job_id}
         | .resource_profile = {gpu_count: 1, gpu_type: $gpu_type}
         | .expected_track = "non_record_h100x1"' \
-       "$SCRATCH_DIR/phase_plan_output.json" > "$output_path"
+       "$PLAN_OUTPUT_FILE" > "$output_path"
   else
     jq --arg branch "$BRANCH_NAME" \
        --arg commit "$COMMIT_SHA" \
        --arg job_id "$CHILD_NODE_ID" \
        '.structured_output + {branch: $branch, commit_sha: $commit, job_id: $job_id}' \
-       "$SCRATCH_DIR/phase_plan_output.json" > "$output_path"
+       "$PLAN_OUTPUT_FILE" > "$output_path"
+  fi
+}
+
+requeue_parent_node() {
+  local reason="${1:-pre_dispatch_exit}"
+  local result
+
+  result="$(python3 - "$NODES_DB" "$NODES_LOCK_FILE" "$NODE_ID" <<'PY'
+import fcntl
+import json
+import os
+import pathlib
+import sys
+import tempfile
+
+db_path = pathlib.Path(sys.argv[1])
+lock_path = pathlib.Path(sys.argv[2])
+node_id = sys.argv[3]
+
+lock_path.parent.mkdir(parents=True, exist_ok=True)
+db_path.parent.mkdir(parents=True, exist_ok=True)
+db_path.touch(exist_ok=True)
+
+rows = []
+updated = False
+
+with lock_path.open("a+", encoding="utf-8") as lock_file:
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+    for raw_line in db_path.read_text(encoding="utf-8").splitlines():
+        raw_line = raw_line.strip()
+        if not raw_line:
+            continue
+        try:
+            row = json.loads(raw_line)
+        except json.JSONDecodeError:
+            continue
+        if row.get("node_id") == node_id and row.get("status") == "running":
+            row["status"] = "pending"
+            updated = True
+        rows.append(row)
+
+    fd, tmp_path = tempfile.mkstemp(dir=str(db_path.parent), prefix=".nodes.", text=True)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as tmp_file:
+            for row in rows:
+                tmp_file.write(json.dumps(row))
+                tmp_file.write("\n")
+        os.replace(tmp_path, db_path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+
+    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+print("updated" if updated else "unchanged")
+PY
+)"
+
+  if [ "$result" = "updated" ]; then
+    echo "Requeued parent node $NODE_ID after controller exit before dispatch."
+    log_event \
+      --event "node_requeued" \
+      --job-id "$NODE_ID" \
+      --reason "$reason" \
+      --status "pending" \
+      --message "restored parent node to pending after pre-dispatch controller exit"
   fi
 }
 
@@ -299,24 +420,12 @@ Current Phase: plan
 Please analyze history, make local file edits for your new approach, and then output your JSON proposal.
 Previous state if any: $(cat "$STATE_FILE" 2>/dev/null || echo "{}")"
 
-claude -p "$PROMPT" \
-  --model claude-3-7-sonnet-20250219 \
-  --max-turns 15 \
-  --max-budget-usd 1.00 \
-  --bare \
-  --tools "Read,Edit,Glob,Grep" \
-  --settings "$MAIN_CHECKOUT/.claude/settings.json" \
-  --mcp-config "$MAIN_CHECKOUT/.mcp.json" \
-  --strict-mcp-config \
-  --no-session-persistence \
-  --output-format json \
-  --json-schema "$MAIN_CHECKOUT/schemas/plan_schema.json" \
-  > "$SCRATCH_DIR/phase_plan_output.json" || true
+run_claude_phase "plan" "$PROMPT" "15" "1.00" "$MAIN_CHECKOUT/schemas/plan_schema.json" "$PLAN_OUTPUT_FILE"
 
-cp "$SCRATCH_DIR/phase_plan_output.json" "$STATE_FILE"
+cp "$PLAN_OUTPUT_FILE" "$STATE_FILE"
 
-PROPOSED_SLUG=$(jq -r '.structured_output.proposed_slug // empty' "$SCRATCH_DIR/phase_plan_output.json")
-CHANGED_AXES=$(jq -r '.structured_output.changed_axes // empty' "$SCRATCH_DIR/phase_plan_output.json")
+PROPOSED_SLUG=$(jq -r '.structured_output.proposed_slug // empty' "$PLAN_OUTPUT_FILE")
+CHANGED_AXES=$(jq -r '.structured_output.changed_axes // empty' "$PLAN_OUTPUT_FILE")
 
 if [ -z "$PROPOSED_SLUG" ] || [ "$PROPOSED_SLUG" == "null" ]; then
   echo "Error: Plan did not output valid proposed_slug."
@@ -334,7 +443,7 @@ fi
 # GOVERNANCE: HYBRID NOVELTY CHECK
 # ==============================================================================
 # The run command array is parsed into a single string for fingerprinting
-ARGS_JSON=$(jq -c '.structured_output.run_argv // []' "$SCRATCH_DIR/phase_plan_output.json")
+ARGS_JSON=$(jq -c '.structured_output.run_argv // []' "$PLAN_OUTPUT_FILE")
 NEXT_CMD=$(python3 -c "
 import sys, json, shlex
 try:
@@ -362,23 +471,11 @@ $(tail -n 50 "$NODES_DB" 2>/dev/null || true)
 
 Is this proposed approach a semantic duplicate of a past run? Return JSON."
 
-claude -p "$GOV_PROMPT" \
-  --model claude-3-7-sonnet-20250219 \
-  --max-turns 3 \
-  --max-budget-usd 0.20 \
-  --bare \
-  --tools "Read,Edit,Glob,Grep" \
-  --settings "$MAIN_CHECKOUT/.claude/settings.json" \
-  --mcp-config "$MAIN_CHECKOUT/.mcp.json" \
-  --strict-mcp-config \
-  --no-session-persistence \
-  --output-format json \
-  --json-schema "$MAIN_CHECKOUT/schemas/governance_schema.json" \
-  > "$SCRATCH_DIR/gov_output.json" || true
+run_claude_phase "governance" "$GOV_PROMPT" "3" "0.20" "$MAIN_CHECKOUT/schemas/governance_schema.json" "$GOV_OUTPUT_FILE"
 
-IS_DUPLICATE=$(jq -r '.structured_output.is_duplicate // "false"' "$SCRATCH_DIR/gov_output.json")
+IS_DUPLICATE=$(jq -r '.structured_output.is_duplicate // "false"' "$GOV_OUTPUT_FILE")
 if [ "$IS_DUPLICATE" == "true" ]; then
-  REASON=$(jq -r '.structured_output.reason // "No reason provided"' "$SCRATCH_DIR/gov_output.json")
+  REASON=$(jq -r '.structured_output.reason // "No reason provided"' "$GOV_OUTPUT_FILE")
   echo "Governance Reject: Semantic duplicate detected. Reason: $REASON"
   exit 1
 fi
@@ -490,19 +587,7 @@ Please analyze the logs and summarize any issues.
 Output JSON."
 
 cd "$PLAN_WORKTREE"
-claude -p "$PROMPT" \
-  --model claude-3-7-sonnet-20250219 \
-  --max-turns 10 \
-  --max-budget-usd 1.00 \
-  --bare \
-  --tools "Read,Edit,Glob,Grep" \
-  --settings "$MAIN_CHECKOUT/.claude/settings.json" \
-  --mcp-config "$MAIN_CHECKOUT/.mcp.json" \
-  --strict-mcp-config \
-  --no-session-persistence \
-  --output-format json \
-  --json-schema "$MAIN_CHECKOUT/schemas/diagnose_schema.json" \
-  > "$SCRATCH_DIR/phase_diagnose_output.json" || true
+run_claude_phase "diagnose" "$PROMPT" "10" "1.00" "$MAIN_CHECKOUT/schemas/diagnose_schema.json" "$DIAGNOSE_OUTPUT_FILE"
 
 # ==============================================================================
 # PHASE 3: REFLECT
@@ -513,22 +598,10 @@ Current Phase: reflect
 Review the diagnosis and outcome. Determine if this was a success and what to do next.
 Output JSON."
 
-claude -p "$PROMPT" \
-  --model claude-3-7-sonnet-20250219 \
-  --max-turns 5 \
-  --max-budget-usd 0.50 \
-  --bare \
-  --tools "Read,Edit,Glob,Grep" \
-  --settings "$MAIN_CHECKOUT/.claude/settings.json" \
-  --mcp-config "$MAIN_CHECKOUT/.mcp.json" \
-  --strict-mcp-config \
-  --no-session-persistence \
-  --output-format json \
-  --json-schema "$MAIN_CHECKOUT/schemas/reflect_schema.json" \
-  > "$SCRATCH_DIR/phase_reflect_output.json" || true
+run_claude_phase "reflect" "$PROMPT" "5" "0.50" "$MAIN_CHECKOUT/schemas/reflect_schema.json" "$REFLECT_OUTPUT_FILE"
 
 # Update node status based on reflection
-ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$SCRATCH_DIR/phase_reflect_output.json")
+ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$REFLECT_OUTPUT_FILE")
 append_node_record "$ACTION" "0"
 
 echo "Branch cycle complete for $CHILD_NODE_ID. Action determined: $ACTION."
