@@ -51,6 +51,10 @@ fi
 REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 MAIN_CHECKOUT="$(cd "$(git -C "$REPO_ROOT" rev-parse --git-common-dir)/.." && pwd)"
 SAFE_NODE_ID="$(printf '%s' "$NODE_ID" | tr -cs 'A-Za-z0-9._-' '_')"
+OBS_NODE_DIR="$MAIN_CHECKOUT/registry/observability/nodes"
+OBS_JOB_DIR_ROOT="$MAIN_CHECKOUT/registry/observability/jobs"
+OBS_NODE_STATUS_FILE="$OBS_NODE_DIR/${SAFE_NODE_ID}.json"
+POLL_INTERVAL_SECONDS="${CONTROLLER_POLL_SECONDS:-15}"
 
 export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
 export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
@@ -75,11 +79,305 @@ REFLECT_OUTPUT_FILE="$PHASE_LOG_DIR/reflect.output.json"
 JOB_DISPATCHED=0
 POD_CLEANED=0
 CHILD_NODE_ID=""
+BRANCH_NAME=""
+COMMIT_SHA=""
+SSH_TARGET=""
+SSH_PORT="22"
+LEASE_FILE=""
+CURRENT_POD_ID=""
+CURRENT_POD_NAME=""
+JOB_OBS_DIR=""
+JOB_LOG_MIRROR=""
+JOB_HEARTBEAT_MIRROR=""
+JOB_FINAL_STATE_MIRROR=""
+LOG_CURSOR_FILE=""
+CURRENT_PHASE="setup"
 
 mkdir -p "$PHASE_LOG_DIR"
+mkdir -p "$OBS_NODE_DIR" "$OBS_JOB_DIR_ROOT"
 
 log_event() {
   "$MAIN_CHECKOUT/scripts/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
+}
+
+announce() {
+  local label
+  if [ -n "$BRANCH_NAME" ]; then
+    label="$BRANCH_NAME"
+  elif [ -n "$CHILD_NODE_ID" ]; then
+    label="$CHILD_NODE_ID"
+  else
+    label="tree/$NODE_ID"
+  fi
+
+  printf '[%s][%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$label" "$*"
+}
+
+prepare_job_observability() {
+  if [ -z "$CHILD_NODE_ID" ]; then
+    return 0
+  fi
+
+  JOB_OBS_DIR="$OBS_JOB_DIR_ROOT/$CHILD_NODE_ID"
+  JOB_LOG_MIRROR="$JOB_OBS_DIR/run.log"
+  JOB_HEARTBEAT_MIRROR="$JOB_OBS_DIR/heartbeat.json"
+  JOB_FINAL_STATE_MIRROR="$JOB_OBS_DIR/final_state.json"
+  LOG_CURSOR_FILE="$JOB_OBS_DIR/.terminal_log_cursor"
+  mkdir -p "$JOB_OBS_DIR"
+}
+
+write_observability_state() {
+  local phase="$1"
+  local status="$2"
+  local message="${3:-}"
+
+  python3 - \
+    "$OBS_NODE_STATUS_FILE" \
+    "$JOB_OBS_DIR" \
+    "$NODE_ID" \
+    "$SAFE_NODE_ID" \
+    "$CHILD_NODE_ID" \
+    "$BRANCH_NAME" \
+    "$COMMIT_SHA" \
+    "$SCRATCH_REF" \
+    "$phase" \
+    "$status" \
+    "$message" \
+    "$PHASE_LOG_DIR" \
+    "$PLAN_OUTPUT_FILE" \
+    "$GOV_OUTPUT_FILE" \
+    "$DIAGNOSE_OUTPUT_FILE" \
+    "$REFLECT_OUTPUT_FILE" \
+    "$CURRENT_POD_ID" \
+    "$CURRENT_POD_NAME" \
+    "$SSH_TARGET" \
+    "$SSH_PORT" \
+    "$LEASE_FILE" \
+    "$JOB_LOG_MIRROR" \
+    "$JOB_HEARTBEAT_MIRROR" \
+    "$JOB_FINAL_STATE_MIRROR" \
+    "$$" <<'PY'
+from datetime import datetime, timezone
+import json
+import pathlib
+import sys
+
+(
+    node_status_path,
+    job_dir,
+    parent_node_id,
+    safe_node_id,
+    child_node_id,
+    branch_name,
+    commit_sha,
+    scratch_ref,
+    phase,
+    status,
+    message,
+    phase_log_dir,
+    plan_output_file,
+    governance_output_file,
+    diagnose_output_file,
+    reflect_output_file,
+    pod_id,
+    pod_name,
+    ssh_host,
+    ssh_port,
+    lease_file,
+    run_log_path,
+    heartbeat_path,
+    final_state_path,
+    controller_pid,
+) = sys.argv[1:]
+
+now = datetime.now(timezone.utc)
+
+def last_nonempty_line(path_str: str) -> str:
+    if not path_str:
+        return ""
+    path = pathlib.Path(path_str)
+    if not path.exists() or not path.is_file():
+        return ""
+    size = path.stat().st_size
+    with path.open("rb") as fh:
+        fh.seek(max(size - 65536, 0))
+        data = fh.read().decode("utf-8", errors="replace")
+    for raw_line in reversed(data.splitlines()):
+        line = raw_line.strip()
+        if line:
+            return line[-500:]
+    return ""
+
+def parse_json_file(path_str: str):
+    if not path_str:
+        return {}
+    path = pathlib.Path(path_str)
+    if not path.exists() or not path.is_file():
+        return {}
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return {}
+
+heartbeat_payload = parse_json_file(heartbeat_path)
+final_state_payload = parse_json_file(final_state_path)
+lease_payload = parse_json_file(lease_file)
+
+payload = {
+    "updated_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "controller_pid": int(controller_pid),
+    "node_id": parent_node_id,
+    "safe_node_id": safe_node_id,
+    "scratch_ref": scratch_ref,
+    "phase": phase,
+    "status": status,
+    "phase_log_dir": phase_log_dir,
+    "phase_outputs": {
+        "plan": plan_output_file,
+        "governance": governance_output_file,
+        "diagnose": diagnose_output_file,
+        "reflect": reflect_output_file,
+    },
+}
+
+if message:
+    payload["message"] = message
+if child_node_id:
+    payload["child_node_id"] = child_node_id
+if branch_name:
+    payload["branch"] = branch_name
+if commit_sha:
+    payload["commit"] = commit_sha
+if pod_id:
+    payload["pod_id"] = pod_id
+if pod_name:
+    payload["pod_name"] = pod_name
+if ssh_host:
+    payload["ssh_host"] = ssh_host
+if ssh_port:
+    payload["ssh_port"] = ssh_port
+if run_log_path:
+    payload["live_run_log_path"] = run_log_path
+    last_log_line = last_nonempty_line(run_log_path)
+    if last_log_line:
+        payload["last_log_line"] = last_log_line
+if heartbeat_path:
+    payload["heartbeat_path"] = heartbeat_path
+if heartbeat_payload:
+    heartbeat_ts = heartbeat_payload.get("timestamp")
+    if heartbeat_ts:
+        payload["last_heartbeat"] = heartbeat_ts
+        try:
+            heartbeat_dt = datetime.strptime(heartbeat_ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            payload["heartbeat_age_seconds"] = max(int((now - heartbeat_dt).total_seconds()), 0)
+        except ValueError:
+            pass
+if final_state_path:
+    payload["final_state_path"] = final_state_path
+if final_state_payload:
+    payload["final_state"] = final_state_payload
+if lease_file:
+    payload["lease_file"] = lease_file
+if lease_payload:
+    for key in ("profile_key", "dispatched_at", "lease_expires_at"):
+        value = lease_payload.get(key)
+        if value:
+            payload[key] = value
+    cleanup = lease_payload.get("cleanup")
+    if isinstance(cleanup, dict) and cleanup:
+        payload["cleanup"] = cleanup
+    lease_expires_at = lease_payload.get("lease_expires_at")
+    if lease_expires_at:
+        try:
+            deadline = datetime.strptime(lease_expires_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+            payload["controller_ttl_remaining_seconds"] = int((deadline - now).total_seconds())
+        except ValueError:
+            pass
+
+node_status = pathlib.Path(node_status_path)
+node_status.parent.mkdir(parents=True, exist_ok=True)
+node_status.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+if job_dir:
+    job_status = pathlib.Path(job_dir) / "status.json"
+    job_status.parent.mkdir(parents=True, exist_ok=True)
+    job_status.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+PY
+}
+
+load_lease_metadata() {
+  if [ -z "$LEASE_FILE" ] || [ ! -f "$LEASE_FILE" ]; then
+    return 0
+  fi
+
+  CURRENT_POD_ID="$(jq -r '.pod_id // empty' "$LEASE_FILE")"
+  CURRENT_POD_NAME="$(jq -r '.pod_name // empty' "$LEASE_FILE")"
+  SSH_TARGET="$(jq -r '.ssh.host // empty' "$LEASE_FILE")"
+  SSH_PORT="$(jq -r '.ssh.port // "22"' "$LEASE_FILE")"
+}
+
+mirror_remote_observability() {
+  if [ -z "$JOB_OBS_DIR" ] || [ -z "$SSH_TARGET" ]; then
+    return 0
+  fi
+
+  local ssh_opts=(-o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT")
+  local ssh_transport="ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p $SSH_PORT"
+  local remote_wrapper_log="/workspace/jobs/$CHILD_NODE_ID/experiments/$CHILD_NODE_ID/run.log"
+  local remote_heartbeat="/workspace/parameter-golf/registry/heartbeats/${CHILD_NODE_ID}.json"
+  local remote_final_state="/workspace/parameter-golf/registry/spool/${CHILD_NODE_ID}_final_state.json"
+
+  mkdir -p "$JOB_OBS_DIR"
+
+  if ssh "${ssh_opts[@]}" "$SSH_TARGET" "[ -f \"$remote_wrapper_log\" ]" >/dev/null 2>&1; then
+    rsync -az --append-verify -e "$ssh_transport" "$SSH_TARGET:$remote_wrapper_log" "$JOB_LOG_MIRROR" >/dev/null 2>&1 || true
+  fi
+
+  if ssh "${ssh_opts[@]}" "$SSH_TARGET" "[ -f \"$remote_heartbeat\" ]" >/dev/null 2>&1; then
+    rsync -az -e "$ssh_transport" "$SSH_TARGET:$remote_heartbeat" "$JOB_HEARTBEAT_MIRROR" >/dev/null 2>&1 || true
+  fi
+
+  if ssh "${ssh_opts[@]}" "$SSH_TARGET" "[ -f \"$remote_final_state\" ]" >/dev/null 2>&1; then
+    rsync -az -e "$ssh_transport" "$SSH_TARGET:$remote_final_state" "$JOB_FINAL_STATE_MIRROR" >/dev/null 2>&1 || true
+  fi
+}
+
+print_new_remote_log_lines() {
+  if [ -z "$JOB_LOG_MIRROR" ] || [ ! -f "$JOB_LOG_MIRROR" ]; then
+    return 0
+  fi
+
+  local seen_lines="0"
+  local total_lines
+
+  if [ -n "$LOG_CURSOR_FILE" ] && [ -f "$LOG_CURSOR_FILE" ]; then
+    seen_lines="$(tr -dc '0-9' < "$LOG_CURSOR_FILE" 2>/dev/null || true)"
+  fi
+  if [ -z "$seen_lines" ]; then
+    seen_lines="0"
+  fi
+
+  total_lines="$(wc -l < "$JOB_LOG_MIRROR" | tr -d ' ')"
+  if [ -z "$total_lines" ]; then
+    total_lines="0"
+  fi
+
+  if [ "$total_lines" -lt "$seen_lines" ]; then
+    seen_lines="0"
+  fi
+
+  if [ "$total_lines" -gt "$seen_lines" ]; then
+    local start_line=$((seen_lines + 1))
+    while IFS= read -r line; do
+      if [ -n "$line" ]; then
+        announce "remote | $line"
+      fi
+    done < <(sed -n "${start_line},${total_lines}p" "$JOB_LOG_MIRROR")
+  fi
+
+  if [ -n "$LOG_CURSOR_FILE" ]; then
+    printf '%s\n' "$total_lines" > "$LOG_CURSOR_FILE"
+  fi
 }
 
 acquire_node_lock() {
@@ -99,7 +397,7 @@ acquire_node_lock() {
       fi
     fi
 
-    echo "Error: node $NODE_ID is already being processed." >&2
+    announce "Error: node $NODE_ID is already being processed." >&2
     exit 1
   done
 }
@@ -111,6 +409,28 @@ release_node_lock() {
 cleanup() {
   local rc=$?
   trap - EXIT INT TERM
+
+  if [ "$rc" -eq 0 ]; then
+    write_observability_state "$CURRENT_PHASE" "completed" "branch cycle exited successfully"
+    log_event \
+      --event "node_finished" \
+      --node-id "$NODE_ID" \
+      --job-id "$CHILD_NODE_ID" \
+      --phase "$CURRENT_PHASE" \
+      --branch "$BRANCH_NAME" \
+      --status "completed" \
+      --message "branch cycle exited successfully"
+  else
+    write_observability_state "$CURRENT_PHASE" "failed" "branch cycle exited with rc=$rc"
+    log_event \
+      --event "node_failed" \
+      --node-id "$NODE_ID" \
+      --job-id "$CHILD_NODE_ID" \
+      --phase "$CURRENT_PHASE" \
+      --branch "$BRANCH_NAME" \
+      --status "$rc" \
+      --message "branch cycle exited non-zero"
+  fi
 
   if [ "$JOB_DISPATCHED" -eq 1 ] && [ "$POD_CLEANED" -eq 0 ] && [ -n "$CHILD_NODE_ID" ]; then
     cd "$MAIN_CHECKOUT"
@@ -181,9 +501,19 @@ run_claude_phase() {
 
   rm -f "$output_file" "$stderr_log"
 
-  echo "Running Claude ${phase} phase non-interactively..."
-  echo "  JSON output: $output_file"
-  echo "  STDERR log:  $stderr_log"
+  CURRENT_PHASE="$phase"
+  announce "Running Claude ${phase} phase non-interactively..."
+  announce "  JSON output: $output_file"
+  announce "  STDERR log:  $stderr_log"
+  write_observability_state "$phase" "running" "Claude ${phase} phase started"
+  log_event \
+    --event "phase_started" \
+    --node-id "$NODE_ID" \
+    --job-id "$CHILD_NODE_ID" \
+    --phase "$phase" \
+    --branch "$BRANCH_NAME" \
+    --status "running" \
+    --message "Claude ${phase} phase started"
 
   if ! claude -p "$prompt" \
     --max-turns "$max_turns" \
@@ -196,21 +526,49 @@ run_claude_phase() {
     --output-format json \
     --json-schema "$schema_path" \
     > "$output_file" 2> "$stderr_log" < /dev/null; then
-    echo "Warning: Claude ${phase} phase exited non-zero. See $stderr_log" >&2
+    announce "Warning: Claude ${phase} phase exited non-zero. See $stderr_log"
   fi
 
   if [ ! -s "$output_file" ]; then
-    echo "Error: Claude ${phase} phase produced no JSON output. See $stderr_log" >&2
+    write_observability_state "$phase" "failed" "Claude ${phase} phase produced no JSON output"
+    log_event \
+      --event "phase_failed" \
+      --node-id "$NODE_ID" \
+      --job-id "$CHILD_NODE_ID" \
+      --phase "$phase" \
+      --branch "$BRANCH_NAME" \
+      --status "no_output" \
+      --message "Claude phase produced no JSON output"
+    announce "Error: Claude ${phase} phase produced no JSON output. See $stderr_log"
     return 1
   fi
 
   if jq -e '.is_error == true' "$output_file" >/dev/null 2>&1; then
     local cli_error
     cli_error="$(jq -r '.result // "Claude CLI returned an unspecified error."' "$output_file")"
-    echo "Error: Claude ${phase} phase failed: $cli_error" >&2
-    echo "See $stderr_log and $output_file for details." >&2
+    write_observability_state "$phase" "failed" "Claude ${phase} phase failed: $cli_error"
+    log_event \
+      --event "phase_failed" \
+      --node-id "$NODE_ID" \
+      --job-id "$CHILD_NODE_ID" \
+      --phase "$phase" \
+      --branch "$BRANCH_NAME" \
+      --status "cli_error" \
+      --message "$cli_error"
+    announce "Error: Claude ${phase} phase failed: $cli_error"
+    announce "See $stderr_log and $output_file for details."
     return 1
   fi
+
+  write_observability_state "$phase" "completed" "Claude ${phase} phase completed"
+  log_event \
+    --event "phase_completed" \
+    --node-id "$NODE_ID" \
+    --job-id "$CHILD_NODE_ID" \
+    --phase "$phase" \
+    --branch "$BRANCH_NAME" \
+    --status "completed" \
+    --message "Claude ${phase} phase completed"
 }
 
 write_job_spec() {
@@ -292,7 +650,7 @@ PY
 )"
 
   if [ "$result" = "updated" ]; then
-    echo "Requeued parent node $NODE_ID after controller exit before dispatch."
+    announce "Requeued parent node $NODE_ID after controller exit before dispatch."
     log_event \
       --event "node_requeued" \
       --job-id "$NODE_ID" \
@@ -404,6 +762,12 @@ PY
 acquire_node_lock
 cd "$MAIN_CHECKOUT"
 scripts/runpod_reconcile.sh >/dev/null 2>&1 || true
+write_observability_state "setup" "running" "branch cycle acquired node lock"
+log_event \
+  --event "node_started" \
+  --node-id "$NODE_ID" \
+  --status "running" \
+  --message "branch cycle acquired node lock and began processing"
 
 mkdir -p "$MAIN_CHECKOUT/worktrees"
 git worktree add -B "$SCRATCH_REF" "$PLAN_WORKTREE" "tree/$NODE_ID"
@@ -412,7 +776,7 @@ cd "$PLAN_WORKTREE"
 # ==============================================================================
 # PHASE 1: PLAN
 # ==============================================================================
-echo "=== Phase: plan ==="
+announce "=== Phase: plan ==="
 PROMPT_FILE="$MAIN_CHECKOUT/worker_program.md"
 
 PROMPT="$(cat "$PROMPT_FILE")
@@ -428,14 +792,14 @@ PROPOSED_SLUG=$(jq -r '.structured_output.proposed_slug // empty' "$PLAN_OUTPUT_
 CHANGED_AXES=$(jq -r '.structured_output.changed_axes // empty' "$PLAN_OUTPUT_FILE")
 
 if [ -z "$PROPOSED_SLUG" ] || [ "$PROPOSED_SLUG" == "null" ]; then
-  echo "Error: Plan did not output valid proposed_slug."
+  announce "Error: Plan did not output valid proposed_slug."
   exit 1
 fi
 
-echo "Proposed slug: $PROPOSED_SLUG"
+announce "Proposed slug: $PROPOSED_SLUG"
 
 if ! git check-ref-format "refs/heads/$PROPOSED_SLUG"; then
-  echo "Governance Reject: Invalid branch name '$PROPOSED_SLUG'"
+  announce "Governance Reject: Invalid branch name '$PROPOSED_SLUG'"
   exit 1
 fi
 
@@ -456,11 +820,11 @@ except:
 FINGERPRINT=$(echo -n "${PROPOSED_SLUG}${CHANGED_AXES}${NEXT_CMD}" | shasum -a 256 | awk '{print $1}')
 
 if [ "$(fingerprint_exists "$FINGERPRINT")" = "true" ]; then
-  echo "Governance Reject: Fingerprint '$FINGERPRINT' already exists in registry."
+  announce "Governance Reject: Fingerprint '$FINGERPRINT' already exists in registry."
   exit 1
 fi
 
-echo "Running Governance LLM Check..."
+announce "Running Governance LLM Check..."
 GOV_PROMPT="You are the Governance Agent. A worker has proposed a new approach:
 Slug: $PROPOSED_SLUG
 Axes changed: $CHANGED_AXES
@@ -476,17 +840,27 @@ run_claude_phase "governance" "$GOV_PROMPT" "3" "0.20" "$MAIN_CHECKOUT/schemas/g
 IS_DUPLICATE=$(jq -r '.structured_output.is_duplicate // "false"' "$GOV_OUTPUT_FILE")
 if [ "$IS_DUPLICATE" == "true" ]; then
   REASON=$(jq -r '.structured_output.reason // "No reason provided"' "$GOV_OUTPUT_FILE")
-  echo "Governance Reject: Semantic duplicate detected. Reason: $REASON"
+  announce "Governance Reject: Semantic duplicate detected. Reason: $REASON"
   exit 1
 fi
 
-echo "Governance Check Passed. Creating child node..."
+announce "Governance Check Passed. Creating child node..."
 
 # ==============================================================================
 # INFRA & EXECUTION: BRANCH, PUSH, JOB DISPATCH
 # ==============================================================================
 CHILD_NODE_ID="${NODE_ID}_${PROPOSED_SLUG}"
 BRANCH_NAME="approach/$CHILD_NODE_ID"
+prepare_job_observability
+CURRENT_PHASE="prepare_branch"
+write_observability_state "prepare_branch" "running" "preparing branch and job artifacts"
+log_event \
+  --event "branch_preparing" \
+  --node-id "$NODE_ID" \
+  --job-id "$CHILD_NODE_ID" \
+  --branch "$BRANCH_NAME" \
+  --status "running" \
+  --message "preparing child branch and job artifacts"
 
 git checkout -b "$BRANCH_NAME"
 stage_plan_changes
@@ -495,16 +869,25 @@ if ! git diff --staged --quiet; then
 fi
 
 # Push the branch to origin
-echo "Pushing branch $BRANCH_NAME to origin..."
+announce "Pushing branch $BRANCH_NAME to origin..."
 git push origin "$BRANCH_NAME"
 
 COMMIT_SHA=$(git rev-parse HEAD)
+CURRENT_PHASE="branch_pushed"
+write_observability_state "branch_pushed" "running" "branch pushed to origin"
+log_event \
+  --event "branch_pushed" \
+  --node-id "$NODE_ID" \
+  --job-id "$CHILD_NODE_ID" \
+  --branch "$BRANCH_NAME" \
+  --status "pushed" \
+  --message "child branch pushed to origin"
 
 # Write to NODES_DB
 if ! append_node_record "running" "1"; then
   rc=$?
   if [ "$rc" -eq 3 ]; then
-    echo "Governance Reject: Fingerprint '$FINGERPRINT' already exists in registry."
+    announce "Governance Reject: Fingerprint '$FINGERPRINT' already exists in registry."
     exit 1
   fi
   exit "$rc"
@@ -513,63 +896,94 @@ fi
 # Create Job Spec JSON
 JOB_SPEC="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_job.json"
 if [ "$NO_VALIDATION" -eq 1 ]; then
-  echo "No-validation enabled; forcing dispatch onto the 1xH100 non-record lane."
+  announce "No-validation enabled; forcing dispatch onto the 1xH100 non-record lane."
 fi
 write_job_spec "$JOB_SPEC"
+CURRENT_PHASE="job_spec_written"
+write_observability_state "job_spec_written" "running" "job spec written for dispatch"
 
-echo "Dispatching job to RunPod..."
+announce "Dispatching job to RunPod..."
 cd "$MAIN_CHECKOUT"
-scripts/runpod_dispatch.sh "$JOB_SPEC"
+CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_dispatch.sh "$JOB_SPEC"
 JOB_DISPATCHED=1
 
 SSH_TARGET=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_target.txt" || echo "")
 SSH_PORT=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_port.txt" || echo "22")
 if [ -z "$SSH_TARGET" ]; then
-  echo "Error: SSH target not saved by dispatch."
+  announce "Error: SSH target not saved by dispatch."
   exit 1
 fi
 
 LEASE_FILE="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_lease.json"
 CONTROLLER_TTL_EPOCH="$(controller_ttl_epoch "$LEASE_FILE")"
+load_lease_metadata
+mirror_remote_observability
+CURRENT_PHASE="wait_remote"
+write_observability_state "wait_remote" "running" "waiting for remote tmux session to complete"
 
-echo "Waiting for remote job to complete on $SSH_TARGET:$SSH_PORT..."
+announce "Waiting for remote job to complete on $SSH_TARGET:$SSH_PORT..."
 while true; do
+  CURRENT_PHASE="wait_remote"
   if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT" "$SSH_TARGET" "tmux has-session -t job_${CHILD_NODE_ID} 2>/dev/null" >/dev/null 2>&1; then
-    :
+    mirror_remote_observability
+    print_new_remote_log_lines
+    write_observability_state "wait_remote" "running" "remote tmux session is still active"
   elif ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT" "$SSH_TARGET" "true" >/dev/null 2>&1; then
-    echo "Tmux session ended. Job complete."
+    mirror_remote_observability
+    print_new_remote_log_lines
+    write_observability_state "wait_remote" "completed" "remote tmux session ended"
+    log_event \
+      --event "remote_job_completed" \
+      --node-id "$NODE_ID" \
+      --job-id "$CHILD_NODE_ID" \
+      --phase "wait_remote" \
+      --branch "$BRANCH_NAME" \
+      --status "completed" \
+      --message "remote tmux session ended"
+    announce "Tmux session ended. Job complete."
     break
   else
-    echo "Remote SSH check failed for $CHILD_NODE_ID; retrying."
+    mirror_remote_observability
+    print_new_remote_log_lines
+    write_observability_state "wait_remote" "degraded" "remote SSH check failed; retrying"
+    announce "Remote SSH check failed for $CHILD_NODE_ID; retrying."
   fi
 
   if [ "$CONTROLLER_TTL_EPOCH" -gt 0 ] && [ "$(date -u +%s)" -ge "$CONTROLLER_TTL_EPOCH" ]; then
-    echo "Controller TTL exceeded for $CHILD_NODE_ID. Triggering failure cleanup."
+    announce "Controller TTL exceeded for $CHILD_NODE_ID. Triggering failure cleanup."
+    write_observability_state "wait_remote" "failed" "controller TTL exceeded before remote completion"
     log_event \
       --event "lease_ttl_exceeded" \
+      --node-id "$NODE_ID" \
       --job-id "$CHILD_NODE_ID" \
+      --phase "wait_remote" \
       --reason "controller_ttl_exceeded" \
       --status "cleanup_pending" \
       --message "branch_cycle controller TTL reached before remote completion"
-    if scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "controller_ttl_exceeded" >/dev/null 2>&1; then
+    if CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "controller_ttl_exceeded" >/dev/null 2>&1; then
       POD_CLEANED=1
     fi
     exit 1
   fi
 
-  sleep 60
+  sleep "$POLL_INTERVAL_SECONDS"
 done
 
-echo "Collecting artifacts from remote..."
-if ! scripts/runpod_collect.sh "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID"; then
-  if scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "collect_failed" >/dev/null 2>&1; then
+CURRENT_PHASE="collect"
+write_observability_state "collect" "running" "collecting remote artifacts"
+announce "Collecting artifacts from remote..."
+if ! CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_collect.sh "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID"; then
+  write_observability_state "collect" "failed" "artifact collection failed"
+  if CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "collect_failed" >/dev/null 2>&1; then
     POD_CLEANED=1
   fi
   exit 1
 fi
 
-scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "job_complete"
+write_observability_state "collect" "completed" "artifact collection completed"
+CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "job_complete"
 POD_CLEANED=1
+write_observability_state "cleanup" "completed" "pod cleanup completed"
 
 # Clean up final child worktree if we created one, but we don't need local worktree for execution anymore
 # The plan worktree is cleaned up by the trap.
@@ -577,7 +991,7 @@ POD_CLEANED=1
 # ==============================================================================
 # PHASE 2: DIAGNOSE
 # ==============================================================================
-echo "=== Phase: diagnose ==="
+announce "=== Phase: diagnose ==="
 LOG_FILE="$(resolve_diagnose_log "$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID")"
 
 PROMPT="$(cat "$PROMPT_FILE")
@@ -592,7 +1006,7 @@ run_claude_phase "diagnose" "$PROMPT" "10" "1.00" "$MAIN_CHECKOUT/schemas/diagno
 # ==============================================================================
 # PHASE 3: REFLECT
 # ==============================================================================
-echo "=== Phase: reflect ==="
+announce "=== Phase: reflect ==="
 PROMPT="$(cat "$PROMPT_FILE")
 Current Phase: reflect
 Review the diagnosis and outcome. Determine if this was a success and what to do next.
@@ -603,6 +1017,16 @@ run_claude_phase "reflect" "$PROMPT" "5" "0.50" "$MAIN_CHECKOUT/schemas/reflect_
 # Update node status based on reflection
 ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$REFLECT_OUTPUT_FILE")
 append_node_record "$ACTION" "0"
+CURRENT_PHASE="reflect"
+write_observability_state "reflect" "completed" "branch cycle finished with action=$ACTION"
+log_event \
+  --event "reflection_recorded" \
+  --node-id "$NODE_ID" \
+  --job-id "$CHILD_NODE_ID" \
+  --phase "reflect" \
+  --branch "$BRANCH_NAME" \
+  --status "$ACTION" \
+  --message "reflection recorded final recommended action"
 
-echo "Branch cycle complete for $CHILD_NODE_ID. Action determined: $ACTION."
+announce "Branch cycle complete for $CHILD_NODE_ID. Action determined: $ACTION."
 cd "$MAIN_CHECKOUT"

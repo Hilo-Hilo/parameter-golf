@@ -72,6 +72,11 @@ log_event() {
   "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
 }
 
+announce() {
+  local label="${CONTROLLER_LOG_LABEL:-$job_id}"
+  printf '[%s][%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$label" "$*"
+}
+
 pod_status_from_output() {
   python3 - "${1:-}" <<'PY'
 import sys
@@ -144,7 +149,7 @@ pod_status_before="$(pod_status_from_output "$pod_info_before")"
 pod_status_before="${pod_status_before:-MISSING}"
 action_applied="$action"
 
-echo "Cleanup for $job_id on pod $pod_id ($pod_status_before), action=$action, reason=$reason"
+announce "Cleanup for $job_id on pod $pod_id ($pod_status_before), action=$action, reason=$reason"
 
 if [[ "$dry_run" -eq 0 ]]; then
   case "$action" in
@@ -159,7 +164,7 @@ if [[ "$dry_run" -eq 0 ]]; then
           runpodctl remove pod "$pod_id"
           action_applied="terminate_after_stop_failure"
         else
-          echo "Error: stop failed for pod $pod_id and no terminate fallback is configured" >&2
+          announce "Error: stop failed for pod $pod_id and no terminate fallback is configured" >&2
           exit 1
         fi
       fi
@@ -183,7 +188,7 @@ pod_status_after="${pod_status_after:-MISSING}"
 released_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 
 if [[ "$dry_run" -eq 1 ]]; then
-  echo "Dry run only; lease metadata was not updated."
+  announce "Dry run only; lease metadata was not updated."
   exit 0
 fi
 
@@ -234,4 +239,4 @@ log_event \
   --status "$action_applied" \
   --message "pod status ${pod_status_before} -> ${pod_status_after}"
 
-echo "Cleanup complete for $job_id; pod status is now $pod_status_after."
+announce "Cleanup complete for $job_id; pod status is now $pod_status_after."

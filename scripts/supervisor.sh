@@ -29,13 +29,21 @@ REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 NODES_DB="$REPO_ROOT/registry/nodes.jsonl"
 LOCK_FILE="$REPO_ROOT/registry/.supervisor.lock"
 
+announce() {
+  printf '[%s][supervisor] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$*"
+}
+
+log_event() {
+  "$REPO_ROOT/scripts/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
+}
+
 mkdir -p "$REPO_ROOT/registry"
 touch "$NODES_DB"
 
-echo "Reconciling stale RunPod leases..."
+announce "Reconciling stale RunPod leases..."
 "$REPO_ROOT/scripts/runpod_reconcile.sh" || true
 
-echo "Checking for pending nodes..."
+announce "Checking for pending nodes..."
 
 PENDING_NODE="$(
   python3 - "$NODES_DB" "$LOCK_FILE" <<'PY'
@@ -97,17 +105,30 @@ PY
 )"
 
 if [ "$PENDING_NODE" = "__LOCKED__" ]; then
-  echo "Supervisor already running."
+  announce "Supervisor already running."
+  log_event \
+    --event "supervisor_locked" \
+    --status "locked" \
+    --message "supervisor skipped because another supervisor instance holds the lock"
   exit 0
 fi
 
 if [ -n "$PENDING_NODE" ]; then
-  echo "Found pending node: $PENDING_NODE. Starting branch cycle..."
+  announce "Found pending node: $PENDING_NODE. Starting branch cycle..."
+  log_event \
+    --event "node_claimed" \
+    --node-id "$PENDING_NODE" \
+    --status "running" \
+    --message "supervisor claimed a pending node and is launching branch_cycle"
   if [ "$NO_VALIDATION" -eq 1 ]; then
     "$REPO_ROOT/scripts/branch_cycle.sh" --no-validation "$PENDING_NODE"
   else
     "$REPO_ROOT/scripts/branch_cycle.sh" "$PENDING_NODE"
   fi
 else
-  echo "No pending nodes found."
+  announce "No pending nodes found."
+  log_event \
+    --event "supervisor_idle" \
+    --status "idle" \
+    --message "supervisor found no pending nodes"
 fi

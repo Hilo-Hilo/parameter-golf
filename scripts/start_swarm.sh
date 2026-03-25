@@ -76,6 +76,14 @@ REPO_ROOT="$(git -C "$(dirname "$0")/.." rev-parse --show-toplevel)"
 NODES_DB="$REPO_ROOT/registry/nodes.jsonl"
 TREE_REF="tree/$NODE_ID"
 
+announce() {
+  printf '[%s][tree/%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$NODE_ID" "$*"
+}
+
+log_event() {
+  "$REPO_ROOT/scripts/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
+}
+
 ensure_claude_auth() {
   if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
     return 0
@@ -108,17 +116,17 @@ mkdir -p "$REPO_ROOT/registry"
 touch "$NODES_DB"
 
 if [ -z "${RUNPOD_TEMPLATE_ID:-}" ]; then
-  echo "Warning: RUNPOD_TEMPLATE_ID is not set. The controller can reuse an existing pg-* pod but cannot provision a new one." >&2
+  announce "Warning: RUNPOD_TEMPLATE_ID is not set. The controller can reuse an existing pg-* pod but cannot provision a new one." >&2
 fi
 
 if [ "$RESET_TREE_REF" -eq 1 ]; then
   git -C "$REPO_ROOT" branch -f "$TREE_REF" "$BASE_REF" >/dev/null
-  echo "Reset $TREE_REF to $BASE_REF."
+  announce "Reset $TREE_REF to $BASE_REF."
 elif git -C "$REPO_ROOT" show-ref --verify --quiet "refs/heads/$TREE_REF"; then
-  echo "Using existing $TREE_REF."
+  announce "Using existing $TREE_REF."
 else
   git -C "$REPO_ROOT" branch "$TREE_REF" "$BASE_REF" >/dev/null
-  echo "Created $TREE_REF from $BASE_REF."
+  announce "Created $TREE_REF from $BASE_REF."
 fi
 
 QUEUE_RESULT="$(
@@ -187,13 +195,28 @@ PY
 
 case "$QUEUE_RESULT" in
   queued)
-    echo "Queued node $NODE_ID in registry/nodes.jsonl."
+    announce "Queued node $NODE_ID in registry/nodes.jsonl."
+    log_event \
+      --event "node_queued" \
+      --node-id "$NODE_ID" \
+      --status "pending" \
+      --message "seed node queued by start_swarm"
     ;;
   recovered)
-    echo "Recovered stale running node $NODE_ID and re-queued it as pending."
+    announce "Recovered stale running node $NODE_ID and re-queued it as pending."
+    log_event \
+      --event "node_recovered" \
+      --node-id "$NODE_ID" \
+      --status "pending" \
+      --message "start_swarm recovered a stale running node entry"
     ;;
   existing)
-    echo "Node $NODE_ID already has an active pending/running entry."
+    announce "Node $NODE_ID already has an active pending/running entry."
+    log_event \
+      --event "node_reused" \
+      --node-id "$NODE_ID" \
+      --status "existing" \
+      --message "start_swarm found an active pending or running node entry"
     ;;
 esac
 
@@ -208,12 +231,22 @@ run_supervisor() {
 }
 
 if [ "$RUN_ONCE" -eq 1 ]; then
+  log_event \
+    --event "swarm_started" \
+    --node-id "$NODE_ID" \
+    --status "once" \
+    --message "start_swarm launched a single supervisor pass"
   run_supervisor
   exit 0
 fi
 
-echo "Starting supervisor loop for node $NODE_ID (interval ${LOOP_SECONDS}s)..."
-trap 'echo "Stopping swarm loop."; exit 0' INT TERM
+announce "Starting supervisor loop for node $NODE_ID (interval ${LOOP_SECONDS}s)..."
+log_event \
+  --event "swarm_started" \
+  --node-id "$NODE_ID" \
+  --status "looping" \
+  --message "start_swarm launched the supervisor loop"
+trap 'announce "Stopping swarm loop."; exit 0' INT TERM
 while true; do
   run_supervisor
   sleep "$LOOP_SECONDS"

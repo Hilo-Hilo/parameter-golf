@@ -37,6 +37,11 @@ log_event() {
   "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
 }
 
+announce() {
+  local label="${CONTROLLER_LOG_LABEL:-$JOB_ID}"
+  printf '[%s][%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$label" "$*"
+}
+
 active_leased_pods() {
   python3 - "$REPO_ROOT/registry/spool" <<'PY'
 import json
@@ -130,7 +135,7 @@ dispatch_cleanup() {
       --reason "dispatch_exit" \
       --status "$FAILURE_ACTION" \
       --message "launch path failed before lease handoff completed"
-    echo "Dispatch failed for $JOB_ID; cleaning up pod $POD_ID with action $FAILURE_ACTION." >&2
+    announce "Dispatch failed for $JOB_ID; cleaning up pod $POD_ID with action $FAILURE_ACTION." >&2
     case "$FAILURE_ACTION" in
       terminate)
         runpodctl remove pod "$POD_ID" >/dev/null 2>&1 || true
@@ -167,7 +172,7 @@ fi
 
 if [ -z "$POD_ID" ]; then
   POD_NAME="${POD_PREFIX}-smoke-$(date -u +%H%M%S)"
-  echo "No existing $POD_PREFIX pod found. Creating $POD_NAME..."
+  announce "No existing $POD_PREFIX pod found. Creating $POD_NAME..."
   "$SCRIPT_DIR/runpod_pool.sh" create "$POD_NAME"
   sleep 10
   POD_SOURCE="created"
@@ -182,7 +187,7 @@ if [ -z "$POD_ID" ]; then
   exit 1
 fi
 
-echo "Using pod $POD_ID for $JOB_ID"
+announce "Using pod $POD_ID for $JOB_ID"
 if [ -z "$POD_NAME" ]; then
   POD_NAME="$(runpodctl get pod "$POD_ID" --allfields 2>/dev/null | awk 'NR == 2 { print $2 }')"
 fi
@@ -206,7 +211,7 @@ for _ in {1..18}; do
 done
 
 if [[ "$SSH_CONNECT" != ssh\ * ]]; then
-  echo "Error: unable to resolve an SSH command for pod $POD_ID: $SSH_CONNECT" >&2
+  announce "Error: unable to resolve an SSH command for pod $POD_ID: $SSH_CONNECT" >&2
   exit 1
 fi
 
@@ -214,7 +219,7 @@ SSH_HOST="$(printf '%s\n' "$SSH_CONNECT" | awk '{print $2}')"
 SSH_PORT="$(printf '%s\n' "$SSH_CONNECT" | awk '{print $4}')"
 
 if [ -z "$SSH_HOST" ] || [ -z "$SSH_PORT" ]; then
-  echo "Error: unable to parse SSH details from: $SSH_CONNECT" >&2
+  announce "Error: unable to parse SSH details from: $SSH_CONNECT" >&2
   exit 1
 fi
 
@@ -226,7 +231,7 @@ scp_to_remote() {
   scp -o StrictHostKeyChecking=no -P "$SSH_PORT" "$1" "$SSH_HOST:$2"
 }
 
-echo "Waiting for SSH on $SSH_HOST:$SSH_PORT..."
+announce "Waiting for SSH on $SSH_HOST:$SSH_PORT..."
 for _ in {1..18}; do
   if ssh_remote "echo SSH_READY" >/dev/null 2>&1; then
     break
@@ -235,7 +240,7 @@ for _ in {1..18}; do
 done
 
 if ! ssh_remote "echo SSH_READY" >/dev/null 2>&1; then
-  echo "Error: SSH did not become ready for pod $POD_ID" >&2
+  announce "Error: SSH did not become ready for pod $POD_ID" >&2
   exit 1
 fi
 
@@ -243,7 +248,7 @@ ssh_remote "mkdir -p /workspace/scripts"
 scp_to_remote "$SCRIPT_DIR/runpod_bootstrap_remote.sh" "/workspace/scripts/runpod_bootstrap_remote.sh"
 ssh_remote "chmod +x /workspace/scripts/runpod_bootstrap_remote.sh"
 
-echo "Bootstrapping exact commit $COMMIT_SHA..."
+announce "Bootstrapping exact commit $COMMIT_SHA..."
 BOOTSTRAP_CMD="/workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
 if [ -n "$REMOTE_ENV_SH" ]; then
   BOOTSTRAP_CMD="$REMOTE_ENV_SH $BOOTSTRAP_CMD"
@@ -256,7 +261,7 @@ if [ -n "$REMOTE_ENV_SH" ]; then
   REMOTE_RUN_CMD="$REMOTE_ENV_SH $REMOTE_RUN_CMD"
 fi
 
-echo "Launching remote job..."
+announce "Launching remote job..."
 ssh_remote "$REMOTE_RUN_CMD"
 
 mkdir -p "$REPO_ROOT/registry/spool"
@@ -324,4 +329,4 @@ log_event \
   --message "remote bootstrap and tmux launch completed"
 
 trap - EXIT
-echo "Job dispatched successfully."
+announce "Job dispatched successfully."

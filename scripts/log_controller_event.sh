@@ -11,9 +11,11 @@ Usage:
 
 Options:
   --event EVENT       Required controller event name.
+  --node-id ID        Optional controller node identifier.
   --job-id ID         Optional job identifier.
   --pod-id ID         Optional RunPod pod identifier.
   --pod-name NAME     Optional RunPod pod name.
+  --phase NAME        Optional controller phase name.
   --branch NAME       Optional git branch associated with the event.
   --reason TEXT       Optional structured reason label.
   --status TEXT       Optional event status label.
@@ -24,9 +26,11 @@ EOF
 }
 
 event=""
+node_id=""
 job_id=""
 pod_id=""
 pod_name=""
+phase_name=""
 branch_name=""
 reason=""
 status=""
@@ -40,6 +44,10 @@ while [[ $# -gt 0 ]]; do
       event="${2:-}"
       shift 2
       ;;
+    --node-id)
+      node_id="${2:-}"
+      shift 2
+      ;;
     --job-id)
       job_id="${2:-}"
       shift 2
@@ -50,6 +58,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --pod-name)
       pod_name="${2:-}"
+      shift 2
+      ;;
+    --phase)
+      phase_name="${2:-}"
       shift 2
       ;;
     --branch)
@@ -98,9 +110,11 @@ python3 - \
   "$REPO_ROOT/registry/controller_events.jsonl" \
   "$REPO_ROOT/registry/.controller_events.lock" \
   "$event" \
+  "$node_id" \
   "$job_id" \
   "$pod_id" \
   "$pod_name" \
+  "$phase_name" \
   "$branch_name" \
   "$reason" \
   "$status" \
@@ -118,9 +132,11 @@ lock_path = pathlib.Path(sys.argv[2])
 
 keys = [
     "event",
+    "node_id",
     "job_id",
     "pod_id",
     "pod_name",
+    "phase",
     "branch",
     "reason",
     "status",

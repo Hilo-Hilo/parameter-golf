@@ -17,6 +17,11 @@ log_event() {
   "$SCRIPT_DIR/log_controller_event.sh" "$@" >/dev/null 2>&1 || true
 }
 
+announce() {
+  local label="${CONTROLLER_LOG_LABEL:-$JOB_ID}"
+  printf '[%s][%s] %s\n' "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$label" "$*"
+}
+
 if [ "$#" -lt 2 ]; then
   echo "Usage: $0 <ssh_host> [ssh_port] <job_id>" >&2
   exit 1
@@ -61,7 +66,7 @@ LOCAL_RESULTS_DIR="$REPO_ROOT/experiments/$JOB_ID"
 
 mkdir -p "$LOCAL_RESULTS_DIR"
 
-echo "Collecting results from $SSH_HOST:$SSH_PORT for $JOB_ID..."
+announce "Collecting results from $SSH_HOST:$SSH_PORT for $JOB_ID..."
 if ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_HOST" "[ -d \"$PRIMARY_REMOTE_DIR\" ]"; then
   rsync -avz -e "ssh -o StrictHostKeyChecking=no -p $SSH_PORT" "$SSH_HOST:$PRIMARY_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/"
 fi
@@ -143,14 +148,14 @@ PY
 )"
 
   if [ "$APPEND_RESULT" = "skipped" ]; then
-    echo "Summary already present in runs.jsonl; skipping duplicate append."
+    announce "Summary already present in runs.jsonl; skipping duplicate append."
     collect_status="skipped"
   else
-    echo "Appended summary to runs.jsonl."
+    announce "Appended summary to runs.jsonl."
     collect_status="appended"
   fi
 else
-  echo "Warning: No summary JSON found in $LOCAL_RESULTS_DIR"
+  announce "Warning: No summary JSON found in $LOCAL_RESULTS_DIR"
   collect_status="no_summary"
 fi
 

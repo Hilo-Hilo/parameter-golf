@@ -6,6 +6,7 @@
 - Prefer minimal, explicit shell wrappers over large orchestration stacks unless added complexity clearly buys reliability here.
 - Keep novel Parameter Golf experiments on dedicated `approach/<name>` branches when working manually, but land validated controller or repo-hardening changes on `main` and push `main` before considering the run finished.
 - When the user asks to change git attribution on this machine (for example dropping Claude from co-authored trailers), follow that for local commits.
+- For controller `claude -p` invocations in this repo, do not pin an explicit Claude model; use the CLI default/latest model selection.
 - After substantive code or script changes, update the markdown that documents behavior so operators are not misled (only where such docs already exist and apply).
 - Prefer ephemeral, deterministic worker executions (short-lived, schema-bounded AI sessions managed by a shell controller) over long-lived persistent sessions to prevent context drift and enforce tight safety boundaries.
 - Delegate privileged operations like git push/fetch, pod selection, SSH, artifact collection, and infrastructure provisioning to the Mac shell controller; RunPod pods should remain pull-only executors.
