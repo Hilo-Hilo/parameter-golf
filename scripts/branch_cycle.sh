@@ -1180,7 +1180,8 @@ log_event \
   --status "running" \
   --message "preparing child branch and job artifacts"
 
-git checkout -b "$BRANCH_NAME"
+# Use -B to force-create so stale branches from retracted cycles don't block.
+git checkout -B "$BRANCH_NAME"
 stage_plan_changes
 if ! git diff --staged --quiet; then
   git commit -m "chore: auto-commit for $CHILD_NODE_ID (plan phase)"
