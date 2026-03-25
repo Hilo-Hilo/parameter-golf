@@ -58,6 +58,15 @@ git remote set-url origin "$REPO_URL"
 echo "Fetching origin..."
 git fetch origin --prune
 
+# Kill any stale tmux session from a previous run of this job (e.g. pod was
+# stopped mid-run and restarted).  Also clean stale experiment output so the
+# new run starts fresh.
+if tmux has-session -t "job_${JOB_ID}" 2>/dev/null; then
+  echo "Killing stale tmux session job_${JOB_ID}..."
+  tmux kill-session -t "job_${JOB_ID}" 2>/dev/null || true
+fi
+rm -rf "$PG_REPO/experiments/$JOB_ID" 2>/dev/null || true
+
 echo "Creating detached worktree for $JOB_ID..."
 if [ -d "$JOB_DIR" ]; then
   git worktree remove -f "$JOB_DIR" 2>/dev/null || rm -rf "$JOB_DIR"
