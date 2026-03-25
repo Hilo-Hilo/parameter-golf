@@ -21,6 +21,13 @@ Read before taking action:
 - `journal.md`, `registry/jobs.jsonl`, `registry/runs.jsonl`, `registry/spool/`
 - `train_gpt.py`, `train_gpt_mlx.py`
 
+## Tooling Limits
+
+- The `Read` tool has a hard size cap. Do not read large files such as `context/upstream/issue_140.md`, `README.md`, or `registry/runs.jsonl` in full.
+- When the controller bundles excerpts from required files directly in the prompt, treat that as satisfying the initial read requirement unless you need more detail.
+- If you need more detail from a large file, use targeted `Read` calls with `offset` and `limit`, or use `Grep` / `Glob` first.
+- Keep exploration bounded. Prefer one well-motivated hypothesis over exhaustive repo-wide scanning.
+
 ## Role & Constraints
 
 1. **Innovation:** You read history, read code, and propose code changes.
@@ -53,6 +60,51 @@ Propose a command by outputting the required fields in your JSON plan:
   "success_criteria": "sub 1.10 val_bpb"
 }
 ```
+
+## Byte Budget Engineering (CRITICAL)
+
+Every run so far has exceeded the 16,000,000 byte cap. This is the #1 blocker.
+The artifact size is DETERMINISTIC and CONTROLLABLE. You MUST estimate bytes before proposing a run.
+
+### How artifact bytes are computed
+
+```
+bytes_total = bytes_code + bytes_model
+bytes_code  = size of train_gpt.py (~62,791 bytes, fixed)
+bytes_model = int6+zlib serialized model weights
+```
+
+### Byte estimation formula
+
+For a model with `L` layers, `d` model dim, `V` vocab size, MLP multiplier `M`:
+```
+params_per_layer ≈ 4*d*d + 2*M*d*d + misc ≈ (4 + 2*M) * d^2
+total_params ≈ L * (4 + 2*M) * d^2 + V * d  (embedding)
+raw_bytes = total_params * 4  (FP32)
+int6_bytes ≈ total_params * 0.75  (6 bits per param)
+zlib_ratio ≈ 0.85  (typical for int6 quantized weights)
+estimated_artifact ≈ int6_bytes * zlib_ratio + 62791
+```
+
+### Reference points from our runs
+
+| Config | Raw Model | int6+zlib | Total | Over/Under |
+|--------|-----------|-----------|-------|------------|
+| 10L d512 MLP1x | 98.4M | 16.8M | 16.9M | +900KB OVER |
+| 11L d496 MLP1x | 101.5M | 17.3M | 17.3M | +1.3M OVER |
+
+### Proven techniques to fit under 16M (from upstream leaderboard)
+
+1. **Use d_model=496 or smaller** — NOT 512. d=496 with 10L fits tighter.
+2. **Mixed int5/int6 quantization** — MLP layers at int5 (clip_range=15), attention at int6 (clip_range=31). Saves ~1.5MB. The code already supports this via `mixed_quantize_int6()`.
+3. **zstd-22 instead of zlib** — Better compression, saves ~500KB. Set `pip install zstd` in the pod and the code auto-detects it.
+4. **GPTQ-lite** — Per-row clip percentile search (try 5 candidates: 0.999, 0.9995, 0.9999, 0.99999, 1.0) for better quantization. Zero training cost. Used by the #2 leaderboard entry.
+5. **QAT (Quantization-Aware Training)** — Train with fake quantization in the forward pass so weights learn to be more compressible. Used by top entries.
+6. **Fewer layers or smaller MLP** — 9-10 layers instead of 11 if needed.
+
+### Hard rule
+
+**Do NOT propose a run without estimating `bytes_total` in your `success_criteria`.** If your estimate exceeds 15.5M (leaving margin), reduce d_model or add quantization techniques BEFORE proposing. An experiment that produces great bpb but exceeds 16M is WORTHLESS — it cannot be submitted.
 
 ## Hygiene
 
