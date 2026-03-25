@@ -11,6 +11,39 @@ Optimize exact final roundtrip `val_bpb` under challenge constraints:
 - Canonical track: reproducible 10-minute training on `8xH100`
 - Legality rules: eval budget is separate, no network calls during evaluation, backward-looking TTT is allowed, pre-eval adaptation on validation is not allowed, val tokens cannot be stored in the artifact. Serious SOTA claims should plan for 3-seed significance checks.
 
+## Research Strategy
+
+Workers should balance two complementary approaches:
+
+### Track A: SOTA Reproduction (HIGH PRIORITY)
+Before inventing novel approaches, **reproduce proven upstream techniques first**. The upstream leaderboard has entries at 1.12-1.15 bpb that fit under 16M. Study their PRs and replicate their exact recipe:
+
+**Priority reproduction targets (from upstream PRs):**
+
+1. **PR #549 (1.1194 bpb)**: LeakyReLU(0.5)^2 + Legal Score-First TTT + Parallel Muon on the #414 stack. This is the CURRENT LEADER. Key: LeakyReLU with slope=0.5 (not 0.01), score-first TTT variant, parallel Muon optimizer.
+2. **PR #414 (1.1228 bpb)**: GPTQ-lite clip search + EMA (decay ~0.997) + warmdown3500 + QAT@0.15. Key: GPTQ-lite with 5 clip percentiles, training EMA, early QAT injection.
+3. **PR #315 (1.1248 bpb)**: Partial RoPE (16/64 dims) + layerwise LN scale + XSA on last 4 layers + EMA. Key: these are additive improvements that each contribute 0.002-0.005 bpb.
+4. **PR #640 (1.1570 bpb)**: Ternary U-Net + FP8 QAT + bitmask-LZMA compression. Radical approach — 73.7M params quantized to ternary.
+
+**How to reproduce:** The SOTA record code is checked into this repo. Read the record's `train_gpt.py` and `README.md`, then adapt it as your working `train_gpt.py`:
+
+```
+records/track_10min_16mb/2026-03-23_LeakyReLU_LegalTTT_ParallelMuon/        # 1.1194 bpb (#1)
+records/track_10min_16mb/2026-03-22_11L_EMA_GPTQ-lite_warmdown3500_QAT015_1.1233/  # 1.1228 bpb (#2)
+records/track_10min_16mb/2026-03-21_11L_XSA4_EMA_PartialRoPE_LateQAT_1.1248/       # 1.1248 bpb (#3)
+records/track_10min_16mb/2026-03-20_10L_Int5MLP_MuonWD04_SWA50/             # 1.1428 bpb (#5)
+```
+
+Each has a `train_gpt.py` with the exact code that achieved the score, plus a `README.md` with the exact env vars and command. Copy the record `train_gpt.py` to your worktree root as the working trainer, preserving the exact hyperparameters. Do NOT improvise on the first reproduction — reproduce the exact recipe first, then iterate.
+
+### Track B: Novel Exploration
+After reproducing a SOTA baseline, try targeted improvements:
+- Combine techniques from different PRs
+- Tune hyperparameters that the upstream entries didn't sweep
+- Explore axes the leaderboard hasn't tried
+
+**Rule: at least half of proposed experiments should be Track A reproductions until we have a working sub-1.15 bpb baseline that fits under 16M.**
+
 ## Required Context
 
 Read before taking action:
