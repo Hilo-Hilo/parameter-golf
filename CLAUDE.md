@@ -51,7 +51,22 @@ This runs a deterministic, phase-bounded 3-step Claude session (`plan`, `diagnos
 4. Do not edit repo files directly over SSH.
 
 ### Controller
-Pods are dumb executors. Claude never touches RunPod directly. The local controller owns branch pushes, the shared registry, job queueing, pod selection, remote launch, artifact collection, and post-run stop/terminate decisions.
+GPU instances are dumb executors. Claude never touches RunPod or SkyPilot directly. The local controller owns branch pushes, the shared registry, job queueing, instance selection, remote launch, artifact collection, and post-run stop/terminate decisions.
+
+### Dispatch Backends
+The swarm supports two dispatch backends, selected via `DISPATCH_BACKEND` env var:
+- **`runpod`** (default): Uses `runpodctl` to provision 1xH100 pods. Set `RUNPOD_TEMPLATE_ID` for auto-provisioning.
+- **`skypilot`**: Uses SkyPilot + Shadeform to provision 1xH100 or 8xH100 clusters. Requires `pip install "skypilot[shadeform]"` and Shadeform API key in `~/.shadeform/api_key`.
+
+For the official 8xH100 track, use `DISPATCH_BACKEND=skypilot` without `--no-validation`:
+```bash
+DISPATCH_BACKEND=skypilot scripts/start_swarm.sh --workers 1
+```
+
+For 1xH100 proxy (development), use either backend with `--no-validation`:
+```bash
+DISPATCH_BACKEND=skypilot scripts/start_swarm.sh --no-validation --workers 3
+```
 
 ### Research
 

@@ -55,6 +55,21 @@ OBS_NODE_DIR="$MAIN_CHECKOUT/registry/observability/nodes"
 OBS_JOB_DIR_ROOT="$MAIN_CHECKOUT/registry/observability/jobs"
 OBS_NODE_STATUS_FILE="$OBS_NODE_DIR/${SAFE_NODE_ID}.json"
 POLL_INTERVAL_SECONDS="${CONTROLLER_POLL_SECONDS:-15}"
+DISPATCH_BACKEND="${DISPATCH_BACKEND:-runpod}"
+
+# Backend-aware command helpers
+dispatch_cmd() {
+  case "$DISPATCH_BACKEND" in
+    skypilot) echo "$MAIN_CHECKOUT/scripts/skypilot_dispatch.sh" ;;
+    *) echo "$MAIN_CHECKOUT/scripts/runpod_dispatch.sh" ;;
+  esac
+}
+cleanup_cmd() {
+  case "$DISPATCH_BACKEND" in
+    skypilot) echo "$MAIN_CHECKOUT/scripts/skypilot_cleanup.sh" ;;
+    *) echo "$MAIN_CHECKOUT/scripts/runpod_cleanup.sh" ;;
+  esac
+}
 
 export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
 export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
@@ -440,7 +455,7 @@ cleanup() {
 
   if [ "$JOB_DISPATCHED" -eq 1 ] && [ "$POD_CLEANED" -eq 0 ] && [ -n "$CHILD_NODE_ID" ]; then
     cd "$MAIN_CHECKOUT"
-    scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "controller_exit" >/dev/null 2>&1 || true
+    "$(cleanup_cmd)" --job-id "$CHILD_NODE_ID" --reason "controller_exit" >/dev/null 2>&1 || true
   fi
 
   if [ "$JOB_DISPATCHED" -eq 0 ]; then
@@ -542,30 +557,41 @@ ensure_required_upstream_context() {
 }
 
 ensure_dispatch_feasible() {
-  if [ -n "${RUNPOD_POD_ID:-}" ]; then
-    return 0
-  fi
-  if [ -n "${RUNPOD_TEMPLATE_ID:-}" ]; then
-    return 0
-  fi
+  case "$DISPATCH_BACKEND" in
+    skypilot)
+      if ! command -v sky >/dev/null 2>&1; then
+        announce "Error: DISPATCH_BACKEND=skypilot but 'sky' CLI not found."
+        return 1
+      fi
+      return 0
+      ;;
+    *)
+      if [ -n "${RUNPOD_POD_ID:-}" ]; then
+        return 0
+      fi
+      if [ -n "${RUNPOD_TEMPLATE_ID:-}" ]; then
+        return 0
+      fi
 
-  local existing_pod
-  existing_pod="$(runpodctl get pod 2>/dev/null \
-    | awk 'NR > 1 && $2 ~ /^pg-(exp|rec)/ { print $1; exit }' || true)"
-  if [ -n "$existing_pod" ]; then
-    return 0
-  fi
+      local existing_pod
+      existing_pod="$(runpodctl get pod 2>/dev/null \
+        | awk 'NR > 1 && $2 ~ /^pg-(exp|rec)/ { print $1; exit }' || true)"
+      if [ -n "$existing_pod" ]; then
+        return 0
+      fi
 
-  announce "Error: dispatch will fail -- no RUNPOD_TEMPLATE_ID, no RUNPOD_POD_ID override, and no existing pg-* pod."
-  announce "Set RUNPOD_TEMPLATE_ID before starting the swarm, or ensure a reusable pod exists."
-  write_observability_state "plan" "failed" "dispatch not feasible: no pods and no template ID"
-  log_event \
-    --event "phase_failed" \
-    --node-id "$NODE_ID" \
-    --phase "plan" \
-    --status "no_dispatch_target" \
-    --message "pre-flight: RUNPOD_TEMPLATE_ID unset and no reusable pods found"
-  return 1
+      announce "Error: dispatch will fail -- no RUNPOD_TEMPLATE_ID, no RUNPOD_POD_ID override, and no existing pg-* pod."
+      announce "Set RUNPOD_TEMPLATE_ID before starting the swarm, or ensure a reusable pod exists."
+      write_observability_state "plan" "failed" "dispatch not feasible: no pods and no template ID"
+      log_event \
+        --event "phase_failed" \
+        --node-id "$NODE_ID" \
+        --phase "plan" \
+        --status "no_dispatch_target" \
+        --message "pre-flight: RUNPOD_TEMPLATE_ID unset and no reusable pods found"
+      return 1
+      ;;
+  esac
 }
 
 build_plan_prompt() {
@@ -1082,6 +1108,7 @@ PY
 acquire_node_lock
 cd "$MAIN_CHECKOUT"
 scripts/runpod_reconcile.sh >/dev/null 2>&1 || true
+[ "$DISPATCH_BACKEND" = "skypilot" ] && scripts/skypilot_reconcile.sh >/dev/null 2>&1 || true
 write_observability_state "setup" "running" "branch cycle acquired node lock"
 log_event \
   --event "node_started" \
@@ -1221,9 +1248,9 @@ write_job_spec "$JOB_SPEC"
 CURRENT_PHASE="job_spec_written"
 write_observability_state "job_spec_written" "running" "job spec written for dispatch"
 
-announce "Dispatching job to RunPod..."
+announce "Dispatching job via ${DISPATCH_BACKEND}..."
 cd "$MAIN_CHECKOUT"
-CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_dispatch.sh "$JOB_SPEC"
+CONTROLLER_LOG_LABEL="$BRANCH_NAME" "$(dispatch_cmd)" "$JOB_SPEC"
 JOB_DISPATCHED=1
 
 SSH_TARGET=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_target.txt" || echo "")
@@ -1272,7 +1299,12 @@ while true; do
       write_observability_state "wait_remote" "failed" "lease released externally during wait"
       exit 1
     fi
-    POD_CHECK="$(runpodctl get pod "$CURRENT_POD_ID" --allfields 2>/dev/null | awk 'NR==2{print $NF}' || true)"
+    if [ "$DISPATCH_BACKEND" = "skypilot" ]; then
+      POD_CHECK="$(sky status "$CURRENT_POD_ID" 2>/dev/null | awk -v name="$CURRENT_POD_ID" 'NR > 1 && $1 == name { print $3; exit }' || echo "MISSING")"
+      case "$POD_CHECK" in UP) POD_CHECK="RUNNING" ;; STOPPED) POD_CHECK="EXITED" ;; esac
+    else
+      POD_CHECK="$(runpodctl get pod "$CURRENT_POD_ID" --allfields 2>/dev/null | awk 'NR==2{print $NF}' || true)"
+    fi
     if [ "$POD_CHECK" = "EXITED" ] || [ "$POD_CHECK" = "MISSING" ] || [ -z "$POD_CHECK" ]; then
       announce "Pod $CURRENT_POD_ID is $POD_CHECK. Aborting wait for $CHILD_NODE_ID."
       write_observability_state "wait_remote" "failed" "pod is $POD_CHECK during SSH retry"
@@ -1293,7 +1325,7 @@ while true; do
       --reason "controller_ttl_exceeded" \
       --status "cleanup_pending" \
       --message "branch_cycle controller TTL reached before remote completion"
-    if CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "controller_ttl_exceeded" >/dev/null 2>&1; then
+    if CONTROLLER_LOG_LABEL="$BRANCH_NAME" "$(cleanup_cmd)" --job-id "$CHILD_NODE_ID" --reason "controller_ttl_exceeded" >/dev/null 2>&1; then
       POD_CLEANED=1
     fi
     exit 1
@@ -1307,14 +1339,14 @@ write_observability_state "collect" "running" "collecting remote artifacts"
 announce "Collecting artifacts from remote..."
 if ! CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_collect.sh "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID"; then
   write_observability_state "collect" "failed" "artifact collection failed"
-  if CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "collect_failed" >/dev/null 2>&1; then
+  if CONTROLLER_LOG_LABEL="$BRANCH_NAME" "$(cleanup_cmd)" --job-id "$CHILD_NODE_ID" --reason "collect_failed" >/dev/null 2>&1; then
     POD_CLEANED=1
   fi
   exit 1
 fi
 
 write_observability_state "collect" "completed" "artifact collection completed"
-CONTROLLER_LOG_LABEL="$BRANCH_NAME" scripts/runpod_cleanup.sh --job-id "$CHILD_NODE_ID" --reason "job_complete"
+CONTROLLER_LOG_LABEL="$BRANCH_NAME" "$(cleanup_cmd)" --job-id "$CHILD_NODE_ID" --reason "job_complete"
 POD_CLEANED=1
 write_observability_state "cleanup" "completed" "pod cleanup completed"
 

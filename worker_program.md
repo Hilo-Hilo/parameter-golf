@@ -100,7 +100,7 @@ Set `TRAIN_BATCH_TOKENS=524288` (not the default 786432) in `env_overrides`. Thi
 1. **Innovation:** You read history, read code, and propose code changes.
 2. **Deterministic Output:** When executing a phase (`plan`, `diagnose`, `reflect`), your primary output must be a strict JSON object matching the requested schema. 
 3. **No Direct Branching or Syncing:** You do not create branches, push code, or sync remotes. You edit files locally in your given worktree, then output your proposed hypothesis slug in JSON. The shell controller will commit your edits, push them, and dispatch the job to a pod.
-4. **No Privilege Escalation:** Do not use SSH, check live RunPod state, or decide which pod to use. The shell controller manages the pod pool, shared registry, lease cleanup, queueing, and crash recovery. Pods are dumb executors.
+4. **No Privilege Escalation:** Do not use SSH, check live GPU instance state, or decide which instance to use. The shell controller manages the instance pool (RunPod or SkyPilot/Shadeform), shared registry, lease cleanup, queueing, and crash recovery. GPU instances are dumb executors.
 
 ## Experiment Lifecycle
 

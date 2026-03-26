@@ -126,7 +126,13 @@ ensure_claude_auth
 mkdir -p "$REPO_ROOT/registry"
 touch "$NODES_DB"
 
-if [ -z "${RUNPOD_TEMPLATE_ID:-}" ]; then
+if [ "${DISPATCH_BACKEND:-runpod}" = "skypilot" ]; then
+  if ! command -v sky >/dev/null 2>&1; then
+    announce "Error: DISPATCH_BACKEND=skypilot but 'sky' CLI not found. Install with: pip install 'skypilot[shadeform]'" >&2
+    exit 2
+  fi
+  announce "Using SkyPilot dispatch backend."
+elif [ -z "${RUNPOD_TEMPLATE_ID:-}" ]; then
   announce "Warning: RUNPOD_TEMPLATE_ID is not set. The controller can reuse an existing pg-* pod but cannot provision a new one." >&2
 fi
 

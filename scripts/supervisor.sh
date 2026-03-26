@@ -45,8 +45,11 @@ log_event() {
 mkdir -p "$REPO_ROOT/registry"
 touch "$NODES_DB"
 
-announce "Reconciling stale RunPod leases..."
+announce "Reconciling stale leases..."
 "$REPO_ROOT/scripts/runpod_reconcile.sh" || true
+if [ "${DISPATCH_BACKEND:-runpod}" = "skypilot" ] && command -v sky >/dev/null 2>&1; then
+  "$REPO_ROOT/scripts/skypilot_reconcile.sh" || true
+fi
 
 announce "Checking for pending nodes..."
 
