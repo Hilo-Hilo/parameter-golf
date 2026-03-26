@@ -115,7 +115,7 @@ if [ -n "$PENDING_NODE" ]; then
     --node-id "$PENDING_NODE" \
     --status "running" \
     --message "supervisor/w${WORKER_ID} claimed a pending node and is launching branch_cycle"
-  local cycle_rc=0
+  cycle_rc=0
   if [ "$NO_VALIDATION" -eq 1 ]; then
     "$REPO_ROOT/scripts/branch_cycle.sh" --no-validation "$PENDING_NODE" || cycle_rc=$?
   else
