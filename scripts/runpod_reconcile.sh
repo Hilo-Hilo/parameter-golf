@@ -136,12 +136,28 @@ for lease_file in "${lease_files[@]}"; do
 
   echo "Reconciling $job_id on pod $pod_id (status=$pod_status)..."
 
-  if [[ "$pod_status" == "MISSING" || "$pod_status" == "EXITED" ]]; then
+  if [[ "$pod_status" == "EXITED" ]]; then
     if [[ "$dry_run" -eq 0 ]]; then
-      status_reason="$(printf '%s' "$pod_status" | tr '[:upper:]' '[:lower:]')"
-      "$SCRIPT_DIR/runpod_cleanup.sh" --job-id "$job_id" --action none --reason "reconcile_${status_reason}"
+      "$SCRIPT_DIR/runpod_cleanup.sh" --job-id "$job_id" --action none --reason "reconcile_exited"
     fi
     continue
+  fi
+
+  # MISSING means runpodctl returned no data — could be a transient API failure.
+  # Retry once before treating as gone, to avoid prematurely releasing active leases.
+  if [[ "$pod_status" == "MISSING" ]]; then
+    sleep 2
+    pod_info="$(runpodctl get pod "$pod_id" --allfields 2>/dev/null || true)"
+    pod_status="$(pod_status_from_output "$pod_info")"
+    pod_status="${pod_status:-MISSING}"
+    if [[ "$pod_status" == "MISSING" ]]; then
+      echo "Pod $pod_id confirmed MISSING after retry for $job_id."
+      if [[ "$dry_run" -eq 0 ]]; then
+        "$SCRIPT_DIR/runpod_cleanup.sh" --job-id "$job_id" --action none --reason "reconcile_missing"
+      fi
+      continue
+    fi
+    echo "Pod $pod_id recovered to $pod_status on retry for $job_id (was transiently MISSING)."
   fi
 
   session_state="unknown"
