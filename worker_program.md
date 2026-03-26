@@ -61,6 +61,40 @@ Read before taking action:
 - If you need more detail from a large file, use targeted `Read` calls with `offset` and `limit`, or use `Grep` / `Glob` first.
 - Keep exploration bounded. Prefer one well-motivated hypothesis over exhaustive repo-wide scanning.
 
+## 1-GPU Proxy Training Rules (CRITICAL)
+
+This swarm runs on **1xH100 NVL**, not 8xH100. The controller automatically sets
+`--nproc_per_node=1` and `MAX_WALLCLOCK_SECONDS=5100`. But the proxy setup has
+important implications you MUST account for:
+
+### The step count problem
+
+On 8xH100: `grad_accum=1`, step time ~45ms → **~13,300 steps** in 600s.
+On 1xH100: `grad_accum=8`, step time ~830ms → **~6,100 steps** in 5100s.
+
+That's only **46% of the training steps**, seeing **46% of the tokens**. Models are
+systematically undertrained compared to the 8xH100 official setup.
+
+### How to compensate: use TRAIN_BATCH_TOKENS=524288
+
+Set `TRAIN_BATCH_TOKENS=524288` (not the default 786432) in `env_overrides`. This:
+- Reduces per-microstep work → faster steps (~755ms instead of ~830ms)
+- Gives **~6,750 steps** instead of ~6,100 in the same wallclock
+- Upstream PR #332 explicitly found that **smaller batch wins** because more updates
+  matter more than larger batch size in this regime
+
+**Our two best valid results both used batch=524288:**
+- 1.1974 bpb (fastmuon, d496, batch=524k implied via faster steps)
+- 1.2015 bpb (nobigram, d496, explicit batch=524k)
+
+### What NOT to do
+
+- Do NOT use `TRAIN_BATCH_TOKENS=786432` (default) — you'll get ~6100 steps, undertrained.
+- Do NOT try to reproduce 8xH100 recipes without changing batch size — a recipe that
+  needs 13,000 steps will fail at 6,000 steps.
+- Do NOT set TTT epochs above 5 — high-epoch TTT (10-30) consistently produces
+  terrible post-quant bpb (1.55+) even when pre-quant is good. 3-5 epochs is the sweet spot.
+
 ## Role & Constraints
 
 1. **Innovation:** You read history, read code, and propose code changes.
