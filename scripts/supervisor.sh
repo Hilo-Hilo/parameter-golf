@@ -115,10 +115,19 @@ if [ -n "$PENDING_NODE" ]; then
     --node-id "$PENDING_NODE" \
     --status "running" \
     --message "supervisor/w${WORKER_ID} claimed a pending node and is launching branch_cycle"
+  local cycle_rc=0
   if [ "$NO_VALIDATION" -eq 1 ]; then
-    "$REPO_ROOT/scripts/branch_cycle.sh" --no-validation "$PENDING_NODE"
+    "$REPO_ROOT/scripts/branch_cycle.sh" --no-validation "$PENDING_NODE" || cycle_rc=$?
   else
-    "$REPO_ROOT/scripts/branch_cycle.sh" "$PENDING_NODE"
+    "$REPO_ROOT/scripts/branch_cycle.sh" "$PENDING_NODE" || cycle_rc=$?
+  fi
+  if [ "$cycle_rc" -ne 0 ]; then
+    announce "Warning: branch_cycle for $PENDING_NODE exited with code $cycle_rc"
+    log_event \
+      --event "branch_cycle_failed" \
+      --node-id "$PENDING_NODE" \
+      --status "failed" \
+      --message "branch_cycle exited with code $cycle_rc"
   fi
 else
   announce "No pending nodes found."

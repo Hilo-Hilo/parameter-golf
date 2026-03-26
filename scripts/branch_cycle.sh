@@ -1334,7 +1334,9 @@ Please analyze the logs and summarize any issues.
 Output JSON."
 
 cd "$PLAN_WORKTREE"
-run_claude_phase "diagnose" "$PROMPT" "100" "10.00" "$MAIN_CHECKOUT/schemas/diagnose_schema.json" "$DIAGNOSE_OUTPUT_FILE"
+if ! run_claude_phase "diagnose" "$PROMPT" "100" "10.00" "$MAIN_CHECKOUT/schemas/diagnose_schema.json" "$DIAGNOSE_OUTPUT_FILE"; then
+  announce "Warning: diagnose phase failed; defaulting reflect action to discard."
+fi
 
 # ==============================================================================
 # PHASE 3: REFLECT
@@ -1345,10 +1347,12 @@ Current Phase: reflect
 Review the diagnosis and outcome. Determine if this was a success and what to do next.
 Output JSON."
 
-run_claude_phase "reflect" "$PROMPT" "50" "5.00" "$MAIN_CHECKOUT/schemas/reflect_schema.json" "$REFLECT_OUTPUT_FILE"
+if ! run_claude_phase "reflect" "$PROMPT" "50" "5.00" "$MAIN_CHECKOUT/schemas/reflect_schema.json" "$REFLECT_OUTPUT_FILE"; then
+  announce "Warning: reflect phase failed; defaulting action to discard."
+fi
 
 # Update node status based on reflection
-ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$REFLECT_OUTPUT_FILE")
+ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$REFLECT_OUTPUT_FILE" 2>/dev/null || echo "discard")
 append_node_record "$ACTION" "0"
 CURRENT_PHASE="reflect"
 write_observability_state "reflect" "completed" "branch cycle finished with action=$ACTION"
