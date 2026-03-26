@@ -4,19 +4,21 @@
     "accelerators": "H100:1",
     "infra": "shadeform",
     "disk_size": 100,
-    "idle_action": "stop",
+    "idle_action": "down",
     "failure_action": "down",
-    "idle_grace_minutes": 30,
-    "lease_ttl_minutes": 200
+    "idle_grace_minutes": 5,
+    "lease_ttl_minutes": 200,
+    "_note": "Shadeform does not support sky stop; always use sky down"
   },
   "pg-rec": {
     "gpu_count": 8,
     "accelerators": "H100:8",
     "infra": "shadeform",
     "disk_size": 200,
-    "idle_action": "stop",
+    "idle_action": "down",
     "failure_action": "down",
-    "idle_grace_minutes": 10,
-    "lease_ttl_minutes": 25
+    "idle_grace_minutes": 5,
+    "lease_ttl_minutes": 25,
+    "_note": "Shadeform does not support sky stop; always use sky down"
   }
 }

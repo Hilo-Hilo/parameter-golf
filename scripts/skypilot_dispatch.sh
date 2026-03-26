@@ -310,12 +310,18 @@ resources:
   infra: $INFRA
 
 setup: |
-  # Ensure essential tools are available
-  which git >/dev/null 2>&1 || (apt-get update && apt-get install -y git)
-  which jq >/dev/null 2>&1 || (apt-get update && apt-get install -y jq)
-  which tmux >/dev/null 2>&1 || (apt-get update && apt-get install -y tmux)
-  which rsync >/dev/null 2>&1 || (apt-get update && apt-get install -y rsync)
-  mkdir -p /workspace
+  # Ensure /workspace exists and is writable
+  sudo mkdir -p /workspace && sudo chmod 777 /workspace
+  # System tools
+  sudo apt-get update && sudo apt-get install -y git jq tmux rsync || true
+  # Python training dependencies
+  pip install torch --index-url https://download.pytorch.org/whl/cu128 || \
+    pip install torch --index-url https://download.pytorch.org/whl/cu124 || \
+    pip install torch
+  pip install sentencepiece huggingface_hub numpy zstandard || true
+  # Ensure pip-installed binaries (torchrun) are on PATH
+  echo 'export PATH=\$PATH:\$HOME/.local/bin' >> ~/.bashrc
+  export PATH=\$PATH:\$HOME/.local/bin
 YAML
 
 # ---------------------------------------------------------------------------
@@ -405,7 +411,8 @@ scp_to_remote "$SCRIPT_DIR/runpod_bootstrap_remote.sh" "/workspace/scripts/runpo
 ssh_remote "chmod +x /workspace/scripts/runpod_bootstrap_remote.sh"
 
 announce "Bootstrapping exact commit $COMMIT_SHA..."
-BOOTSTRAP_CMD="/workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
+# Ensure pip-installed binaries (torchrun, etc.) are on PATH for all SSH commands
+BOOTSTRAP_CMD="export PATH=\$PATH:\$HOME/.local/bin && /workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
 if [ -n "$REMOTE_ENV_SH" ]; then
   BOOTSTRAP_CMD="$REMOTE_ENV_SH $BOOTSTRAP_CMD"
 fi
@@ -413,9 +420,9 @@ ssh_remote "$BOOTSTRAP_CMD"
 
 REMOTE_RUN_SCRIPT="/workspace/jobs/$JOB_ID/scripts/runpod_run_remote.sh"
 REQ_GPU_SUBSTRING="$(jq -r '.resource_profile.gpu_type // "H100"' "$JOB_SPEC")"
-REMOTE_RUN_CMD="$REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
+REMOTE_RUN_CMD="export PATH=\$PATH:\$HOME/.local/bin && $REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
 if [ -n "$REMOTE_ENV_SH" ]; then
-  REMOTE_RUN_CMD="$REMOTE_ENV_SH $REMOTE_RUN_CMD"
+  REMOTE_RUN_CMD="export PATH=\$PATH:\$HOME/.local/bin && $REMOTE_ENV_SH $REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
 fi
 
 announce "Launching remote job..."
