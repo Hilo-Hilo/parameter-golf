@@ -339,46 +339,48 @@ fi
 rm -f "$TASK_YAML"
 
 # ---------------------------------------------------------------------------
-# Extract SSH connection details
+# Extract SSH connection details from SkyPilot's SSH config
 # ---------------------------------------------------------------------------
 
+SSH_USER=""
 SSH_HOST=""
 SSH_PORT="22"
 
 announce "Extracting SSH details for $CLUSTER_NAME..."
 for _ in {1..18}; do
-  SSH_HOST="$(sky status "$CLUSTER_NAME" 2>/dev/null \
-    | awk -v name="$CLUSTER_NAME" 'NR > 1 && $1 == name { for(i=1;i<=NF;i++) if($i ~ /[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/) { print $i; exit } }' || true)"
-  if [ -n "$SSH_HOST" ]; then
-    break
-  fi
-  sleep 10
-done
-
-if [ -z "$SSH_HOST" ]; then
-  # Fallback: try sky status JSON format or ssh config
+  # SkyPilot writes ~/.ssh/config entries after launch. Parse them.
   SSH_HOST="$(ssh -G "$CLUSTER_NAME" 2>/dev/null | awk '/^hostname / { print $2 }' || true)"
   SSH_PORT="$(ssh -G "$CLUSTER_NAME" 2>/dev/null | awk '/^port / { print $2 }' || echo "22")"
-fi
+  SSH_USER="$(ssh -G "$CLUSTER_NAME" 2>/dev/null | awk '/^user / { print $2 }' || echo "root")"
+  if [ -n "$SSH_HOST" ] && [ "$SSH_HOST" != "$CLUSTER_NAME" ]; then
+    break
+  fi
+  SSH_HOST=""
+  sleep 10
+done
 
 if [ -z "$SSH_HOST" ]; then
   announce "Error: unable to resolve SSH host for cluster $CLUSTER_NAME" >&2
   exit 1
 fi
 
+SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+
 # ---------------------------------------------------------------------------
 # Wait for SSH readiness
 # ---------------------------------------------------------------------------
 
+# Use the SkyPilot cluster name as SSH target (leverages ~/.ssh/config with
+# proxy commands, identity files, etc. that SkyPilot configures).
 ssh_remote() {
-  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT" "root@$SSH_HOST" "$@"
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$CLUSTER_NAME" "$@"
 }
 
 scp_to_remote() {
-  scp -o StrictHostKeyChecking=no -P "$SSH_PORT" "$1" "root@$SSH_HOST:$2"
+  scp -o StrictHostKeyChecking=no "$1" "$CLUSTER_NAME:$2"
 }
 
-announce "Waiting for SSH on root@$SSH_HOST:$SSH_PORT..."
+announce "Waiting for SSH on $SSH_TARGET:$SSH_PORT (via $CLUSTER_NAME)..."
 for _ in {1..18}; do
   if ssh_remote "echo SSH_READY" >/dev/null 2>&1; then
     break
@@ -387,21 +389,12 @@ for _ in {1..18}; do
 done
 
 if ! ssh_remote "echo SSH_READY" >/dev/null 2>&1; then
-  # SkyPilot may use a non-root user; try the cluster name directly
-  ssh_remote() {
-    ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$CLUSTER_NAME" "$@"
-  }
-  scp_to_remote() {
-    scp -o StrictHostKeyChecking=no "$1" "$CLUSTER_NAME:$2"
-  }
-  if ! ssh_remote "echo SSH_READY" >/dev/null 2>&1; then
-    announce "Error: SSH did not become ready for cluster $CLUSTER_NAME" >&2
-    exit 1
-  fi
-  # Update SSH_HOST for lease file
-  SSH_HOST="$CLUSTER_NAME"
-  SSH_PORT="22"
+  announce "Error: SSH did not become ready for cluster $CLUSTER_NAME" >&2
+  exit 1
 fi
+
+# Ensure /workspace exists and is writable (Shadeform instances may not have it)
+ssh_remote "sudo mkdir -p /workspace && sudo chmod 777 /workspace" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------
 # Bootstrap and launch (reuse existing remote scripts)
@@ -433,7 +426,7 @@ ssh_remote "$REMOTE_RUN_CMD"
 # ---------------------------------------------------------------------------
 
 mkdir -p "$REPO_ROOT/registry/spool"
-printf '%s\n' "root@$SSH_HOST" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_target.txt"
+printf '%s\n' "$SSH_TARGET" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_target.txt"
 printf '%s\n' "$SSH_PORT" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_port.txt"
 printf '%s\n' "$CLUSTER_NAME" > "$REPO_ROOT/registry/spool/${JOB_ID}_pod_id.txt"
 
@@ -456,7 +449,7 @@ jq -n \
   --arg pod_id "$CLUSTER_NAME" \
   --arg pod_name "$CLUSTER_NAME" \
   --arg profile_key "$PROFILE_KEY" \
-  --arg ssh_host "root@$SSH_HOST" \
+  --arg ssh_host "$SSH_TARGET" \
   --argjson ssh_port "$SSH_PORT" \
   --arg dispatched_at "$DISPATCHED_AT" \
   --arg lease_expires_at "$LEASE_EXPIRES_AT" \
