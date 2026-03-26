@@ -313,15 +313,16 @@ setup: |
   # Ensure /workspace exists and is writable
   sudo mkdir -p /workspace && sudo chmod 777 /workspace
   # System tools
-  sudo apt-get update && sudo apt-get install -y git jq tmux rsync || true
-  # Python training dependencies
-  pip install torch --index-url https://download.pytorch.org/whl/cu128 || \
-    pip install torch --index-url https://download.pytorch.org/whl/cu124 || \
-    pip install torch
-  pip install sentencepiece huggingface_hub numpy zstandard || true
-  # Ensure pip-installed binaries (torchrun) are on PATH
-  echo 'export PATH=\$PATH:\$HOME/.local/bin' >> ~/.bashrc
+  sudo apt-get update -qq && sudo apt-get install -y -qq git jq tmux rsync || true
+  # Python training dependencies (--no-cache-dir for speed on fresh VMs)
+  pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu128 || \
+    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 || \
+    pip install --no-cache-dir torch
+  pip install --no-cache-dir sentencepiece huggingface_hub numpy zstandard || true
+  # Ensure pip-installed binaries (torchrun) are on PATH for all sessions
+  grep -q 'HOME/.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH=\$PATH:\$HOME/.local/bin' >> ~/.bashrc
   export PATH=\$PATH:\$HOME/.local/bin
+  echo "Setup complete. torch=\$(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null || echo 'MISSING')"
 YAML
 
 # ---------------------------------------------------------------------------
@@ -411,18 +412,20 @@ scp_to_remote "$SCRIPT_DIR/runpod_bootstrap_remote.sh" "/workspace/scripts/runpo
 ssh_remote "chmod +x /workspace/scripts/runpod_bootstrap_remote.sh"
 
 announce "Bootstrapping exact commit $COMMIT_SHA..."
-# Ensure pip-installed binaries (torchrun, etc.) are on PATH for all SSH commands
-BOOTSTRAP_CMD="export PATH=\$PATH:\$HOME/.local/bin && /workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
+# SkyPilot PATH prefix: pip-installed binaries live in ~/.local/bin on non-root instances
+SKY_PATH_PREFIX="export PATH=\$PATH:\$HOME/.local/bin"
+# Allow apt fallback since Shadeform instances may lack tools
+BOOTSTRAP_CMD="$SKY_PATH_PREFIX && RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK=1 /workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
 if [ -n "$REMOTE_ENV_SH" ]; then
-  BOOTSTRAP_CMD="$REMOTE_ENV_SH $BOOTSTRAP_CMD"
+  BOOTSTRAP_CMD="$SKY_PATH_PREFIX && RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK=1 $REMOTE_ENV_SH /workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
 fi
 ssh_remote "$BOOTSTRAP_CMD"
 
 REMOTE_RUN_SCRIPT="/workspace/jobs/$JOB_ID/scripts/runpod_run_remote.sh"
 REQ_GPU_SUBSTRING="$(jq -r '.resource_profile.gpu_type // "H100"' "$JOB_SPEC")"
-REMOTE_RUN_CMD="export PATH=\$PATH:\$HOME/.local/bin && $REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
+REMOTE_RUN_CMD="$SKY_PATH_PREFIX && $REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
 if [ -n "$REMOTE_ENV_SH" ]; then
-  REMOTE_RUN_CMD="export PATH=\$PATH:\$HOME/.local/bin && $REMOTE_ENV_SH $REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
+  REMOTE_RUN_CMD="$SKY_PATH_PREFIX && $REMOTE_ENV_SH $REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
 fi
 
 announce "Launching remote job..."

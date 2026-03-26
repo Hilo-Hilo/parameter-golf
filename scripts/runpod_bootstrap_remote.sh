@@ -31,8 +31,8 @@ done
 
 if [ "${#missing_tools[@]}" -gt 0 ]; then
   if [ "$ALLOW_APT_FALLBACK" = "1" ]; then
-    apt-get update
-    apt-get install -y "${missing_tools[@]}"
+    sudo apt-get update 2>/dev/null || apt-get update
+    sudo apt-get install -y "${missing_tools[@]}" 2>/dev/null || apt-get install -y "${missing_tools[@]}"
   else
     echo "Error: pod template is missing required tools: ${missing_tools[*]}" >&2
     echo "Set RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK=1 only for explicit recovery." >&2

@@ -83,6 +83,7 @@ printf -v tmux_cmd '%q ' \
   "$@"
 tmux_cmd="${tmux_cmd% }"
 
-tmux new-session -d -s "job_${JOB_ID}" "$tmux_cmd > \"$OUTPUT_DIR/run.log\" 2>&1"
+# Ensure PATH includes pip-installed binaries (torchrun) in tmux's fresh shell
+tmux new-session -d -s "job_${JOB_ID}" "export PATH=\$PATH:\$HOME/.local/bin && $tmux_cmd > \"$OUTPUT_DIR/run.log\" 2>&1"
 
 echo "Job launched. Use 'tmux attach -t job_${JOB_ID}' to view if connected manually."
