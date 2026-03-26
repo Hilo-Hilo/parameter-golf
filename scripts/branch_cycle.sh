@@ -1366,4 +1366,14 @@ log_event \
   --message "reflection recorded final recommended action"
 
 announce "Branch cycle complete for $CHILD_NODE_ID. Action determined: $ACTION."
+
+# Create tree ref for branched child so future workers can create worktrees from it.
+if [ "$ACTION" = "branch" ] || [ "$ACTION" = "keep" ]; then
+  CHILD_TREE_REF="tree/$CHILD_NODE_ID"
+  if ! git -C "$MAIN_CHECKOUT" show-ref --verify --quiet "refs/heads/$CHILD_TREE_REF" 2>/dev/null; then
+    git -C "$MAIN_CHECKOUT" branch "$CHILD_TREE_REF" HEAD 2>/dev/null || true
+    announce "Created $CHILD_TREE_REF for child iteration."
+  fi
+fi
+
 cd "$MAIN_CHECKOUT"
