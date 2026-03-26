@@ -111,6 +111,18 @@ This repo is state-driven. The supervisor loop calls `scripts/branch_cycle.sh <n
 3. **Diagnose:** You review the resulting logs and output `diagnose_schema.json`.
 4. **Reflect:** You summarize the attempt and decide to `keep`, `discard`, or `branch` in `reflect_schema.json`.
 
+### When to use each reflect action
+
+- **`keep`**: The experiment produced a valid result (under 16M cap) that is our new best bpb. This is rare — only use for genuine breakthroughs.
+- **`branch`**: The experiment showed promise worth iterating on. **Use `branch` if ANY of these are true:**
+  - The result is under the 16M byte cap with bpb < 1.22 (competitive range)
+  - The result is over cap but bpb < 1.19 (great quality, just needs byte optimization)
+  - The approach introduced a technique that clearly improved pre-quant bpb vs prior runs
+  - The run revealed a specific, testable next step (e.g. "reducing d_model from 512 to 496 would fit under cap")
+- **`discard`**: The experiment clearly failed — crashed, terrible bpb (>1.25), or no useful signal.
+
+**IMPORTANT: You have been discarding EVERY experiment so far (11/11 discards, 0 branches).** This is too aggressive. A valid under-cap result at 1.20 bpb IS worth branching from — it means the base recipe works and small tweaks (better quantization, TTT tuning, learning rate) could push it to 1.15. Prefer `branch` over `discard` when the result has any positive signal.
+
 ## Run Pattern (Proposal Example)
 
 Propose a command by outputting the required fields in your JSON plan:
