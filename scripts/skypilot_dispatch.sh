@@ -321,6 +321,10 @@ setup: |
     sudo /usr/bin/pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 || \
     sudo /usr/bin/pip3 install --no-cache-dir torch
   sudo /usr/bin/pip3 install --no-cache-dir sentencepiece huggingface_hub numpy zstandard || true
+  # Flash Attention 3 (required by SOTA PR #549 train_gpt.py)
+  sudo /usr/bin/pip3 install --no-cache-dir flash-attn --no-build-isolation 2>/dev/null || \
+    sudo /usr/bin/pip3 install --no-cache-dir flash-attn 2>/dev/null || \
+    echo "WARNING: flash-attn install failed — SOTA recipe may not work"
   # Verify system python can import torch
   /usr/bin/python3 -c "import torch; print(f'System torch={torch.__version__}, cuda={torch.cuda.is_available()}')"
   # Ensure torchrun is on PATH (sudo pip installs to /usr/local/bin)
