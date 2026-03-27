@@ -13,7 +13,7 @@
   },
   "pg-rec": {
     "gpu_count": 8,
-    "shade_instance_type": "H100x8-NVLINK",
+    "shade_instance_type": "H100x8_NVLINK",
     "cloud": "hyperstack",
     "region": "montreal-canada-2",
     "os": "ubuntu22.04_cuda12.4_shade_os",
