@@ -136,14 +136,20 @@ ensure_claude_auth
 mkdir -p "$REPO_ROOT/registry"
 touch "$NODES_DB"
 
-if [ "${DISPATCH_BACKEND:-runpod}" = "skypilot" ]; then
+if [ "${DISPATCH_BACKEND:-runpod}" = "shadeform" ]; then
+  if [ -z "${SHADEFORM_API_KEY:-}" ] && [ ! -f ~/.shadeform/api_key ]; then
+    announce "Error: DISPATCH_BACKEND=shadeform but no API key. Set SHADEFORM_API_KEY or create ~/.shadeform/api_key" >&2
+    exit 2
+  fi
+  announce "Using direct Shadeform API dispatch backend."
+elif [ "${DISPATCH_BACKEND:-runpod}" = "skypilot" ]; then
   if ! command -v sky >/dev/null 2>&1; then
-    announce "Error: DISPATCH_BACKEND=skypilot but 'sky' CLI not found. Install with: pip install 'skypilot[shadeform]'" >&2
+    announce "Error: DISPATCH_BACKEND=skypilot but 'sky' CLI not found." >&2
     exit 2
   fi
   announce "Using SkyPilot dispatch backend."
 elif [ -z "${RUNPOD_TEMPLATE_ID:-}" ]; then
-  announce "Warning: RUNPOD_TEMPLATE_ID is not set. The controller can reuse an existing pg-* pod but cannot provision a new one." >&2
+  announce "Warning: RUNPOD_TEMPLATE_ID is not set." >&2
 fi
 
 if [ "$RESET_TREE_REF" -eq 1 ]; then

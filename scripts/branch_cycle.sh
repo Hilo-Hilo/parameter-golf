@@ -65,12 +65,14 @@ DISPATCH_BACKEND="${DISPATCH_BACKEND:-runpod}"
 # Backend-aware command helpers
 dispatch_cmd() {
   case "$DISPATCH_BACKEND" in
+    shadeform) echo "$MAIN_CHECKOUT/scripts/shadeform_dispatch.sh" ;;
     skypilot) echo "$MAIN_CHECKOUT/scripts/skypilot_dispatch.sh" ;;
     *) echo "$MAIN_CHECKOUT/scripts/runpod_dispatch.sh" ;;
   esac
 }
 cleanup_cmd() {
   case "$DISPATCH_BACKEND" in
+    shadeform) echo "$MAIN_CHECKOUT/scripts/shadeform_cleanup.sh" ;;
     skypilot) echo "$MAIN_CHECKOUT/scripts/skypilot_cleanup.sh" ;;
     *) echo "$MAIN_CHECKOUT/scripts/runpod_cleanup.sh" ;;
   esac
@@ -570,6 +572,13 @@ ensure_required_upstream_context() {
 
 ensure_dispatch_feasible() {
   case "$DISPATCH_BACKEND" in
+    shadeform)
+      if [ -z "${SHADEFORM_API_KEY:-}" ] && [ ! -f ~/.shadeform/api_key ]; then
+        announce "Error: DISPATCH_BACKEND=shadeform but no API key found."
+        return 1
+      fi
+      return 0
+      ;;
     skypilot)
       if ! command -v sky >/dev/null 2>&1; then
         announce "Error: DISPATCH_BACKEND=skypilot but 'sky' CLI not found."
