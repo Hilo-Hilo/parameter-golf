@@ -99,6 +99,7 @@ fi
 PROFILE_KEY="$POD_PREFIX"
 
 ACCELERATORS="$(jq -r --arg key "$PROFILE_KEY" '.[$key].accelerators' "$PROFILE_FILE")"
+INSTANCE_TYPE="$(jq -r --arg key "$PROFILE_KEY" '.[$key].instance_type // empty' "$PROFILE_FILE")"
 INFRA="$(jq -r --arg key "$PROFILE_KEY" '.[$key].infra // "shadeform"' "$PROFILE_FILE")"
 DISK_SIZE="$(jq -r --arg key "$PROFILE_KEY" '.[$key].disk_size // 100' "$PROFILE_FILE")"
 IDLE_ACTION="$(jq -r --arg key "$PROFILE_KEY" '.[$key].idle_action // "stop"' "$PROFILE_FILE")"
@@ -303,11 +304,19 @@ log_event \
 # ---------------------------------------------------------------------------
 
 TASK_YAML="$(mktemp /tmp/skypilot_task_XXXXXXXXXX).yaml"
+# Use instance_type if specified (avoids SkyPilot picking a broken instance)
+if [ -n "$INSTANCE_TYPE" ] && [ "$INSTANCE_TYPE" != "null" ]; then
+  RESOURCE_SPEC="  instance_type: $INSTANCE_TYPE
+  disk_size: $DISK_SIZE
+  infra: $INFRA"
+else
+  RESOURCE_SPEC="  accelerators: $ACCELERATORS
+  disk_size: $DISK_SIZE
+  infra: $INFRA"
+fi
 cat > "$TASK_YAML" <<YAML
 resources:
-  accelerators: $ACCELERATORS
-  disk_size: $DISK_SIZE
-  infra: $INFRA
+$RESOURCE_SPEC
 
 setup: |
   # Ensure /workspace exists and is writable

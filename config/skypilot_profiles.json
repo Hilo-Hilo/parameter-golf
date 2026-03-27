@@ -19,6 +19,7 @@
     "failure_action": "down",
     "idle_grace_minutes": 30,
     "lease_ttl_minutes": 60,
-    "_note": "idle_action=none keeps cluster alive for reuse. Saves ~10 min setup per experiment."
+    "_note": "idle_action=none keeps cluster alive for reuse. Saves ~10 min setup per experiment.",
+    "instance_type": "hyperstack_H100x8-NVLINK"
   }
 }
