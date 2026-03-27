@@ -438,8 +438,11 @@ ssh_remote "$REMOTE_RUN_CMD"
 # ---------------------------------------------------------------------------
 
 mkdir -p "$REPO_ROOT/registry/spool"
-printf '%s\n' "$SSH_TARGET" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_target.txt"
-printf '%s\n' "$SSH_PORT" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_port.txt"
+# Use the SkyPilot cluster name as SSH target (not raw IP). SkyPilot's
+# ~/.ssh/config entry for the cluster has the correct identity key, user,
+# and proxy config. Raw ssh user@ip fails without the key.
+printf '%s\n' "$CLUSTER_NAME" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_target.txt"
+printf '%s\n' "22" > "$REPO_ROOT/registry/spool/${JOB_ID}_ssh_port.txt"
 printf '%s\n' "$CLUSTER_NAME" > "$REPO_ROOT/registry/spool/${JOB_ID}_pod_id.txt"
 
 DISPATCHED_AT="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
@@ -461,7 +464,7 @@ jq -n \
   --arg pod_id "$CLUSTER_NAME" \
   --arg pod_name "$CLUSTER_NAME" \
   --arg profile_key "$PROFILE_KEY" \
-  --arg ssh_host "$SSH_TARGET" \
+  --arg ssh_host "$CLUSTER_NAME" \
   --argjson ssh_port "$SSH_PORT" \
   --arg dispatched_at "$DISPATCHED_AT" \
   --arg lease_expires_at "$LEASE_EXPIRES_AT" \
