@@ -314,15 +314,17 @@ setup: |
   sudo mkdir -p /workspace && sudo chmod 777 /workspace
   # System tools
   sudo apt-get update -qq && sudo apt-get install -y -qq git jq tmux rsync || true
-  # Python training dependencies (--no-cache-dir for speed on fresh VMs)
-  pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu128 || \
-    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 || \
-    pip install --no-cache-dir torch
-  pip install --no-cache-dir sentencepiece huggingface_hub numpy zstandard || true
-  # Ensure pip-installed binaries (torchrun) are on PATH for all sessions
-  grep -q 'HOME/.local/bin' ~/.bashrc 2>/dev/null || echo 'export PATH=\$PATH:\$HOME/.local/bin' >> ~/.bashrc
-  export PATH=\$PATH:\$HOME/.local/bin
-  echo "Setup complete. torch=\$(python3 -c 'import torch; print(torch.__version__)' 2>/dev/null || echo 'MISSING')"
+  # IMPORTANT: Install to system Python (not the SkyPilot venv) so SSH sessions can find them.
+  # Deactivate any venv first, then use sudo pip3 to install system-wide.
+  deactivate 2>/dev/null || true
+  sudo /usr/bin/pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu128 || \
+    sudo /usr/bin/pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 || \
+    sudo /usr/bin/pip3 install --no-cache-dir torch
+  sudo /usr/bin/pip3 install --no-cache-dir sentencepiece huggingface_hub numpy zstandard || true
+  # Verify system python can import torch
+  /usr/bin/python3 -c "import torch; print(f'System torch={torch.__version__}, cuda={torch.cuda.is_available()}')"
+  # Ensure torchrun is on PATH (sudo pip installs to /usr/local/bin)
+  which torchrun || echo "WARNING: torchrun not found on PATH"
 YAML
 
 # ---------------------------------------------------------------------------
