@@ -13,34 +13,29 @@ Optimize exact final roundtrip `val_bpb` under challenge constraints:
 
 ## Research Strategy
 
-Workers should balance two complementary approaches:
+**The repo root `train_gpt.py` IS the current SOTA (PR #549, 1.1194 bpb).** Your job is to beat it.
 
-### Track A: SOTA Reproduction (HIGH PRIORITY)
-Before inventing novel approaches, **reproduce proven upstream techniques first**. The upstream leaderboard has entries at 1.12-1.15 bpb that fit under 16M. Study their PRs and replicate their exact recipe:
+### What's already in train_gpt.py
+- LeakyReLU(0.5)^2 activation
+- Legal score-first TTT
+- Parallel Muon optimizer
+- 10L d496 architecture, 3x MLP, GQA
 
-**Priority reproduction targets (from upstream PRs):**
+### Promising improvement directions (from upstream PRs)
+1. **GPTQ-lite clip search** (PR #414): 5 clip percentiles per row for better quantization. Zero training cost. -0.001 bpb.
+2. **EMA weight averaging** (PR #414): decay=0.997 every step, stacks with SWA. -0.001 bpb.
+3. **Partial RoPE** (PR #315): Only 16/64 head dims get rotary embeddings. -0.002 bpb.
+4. **Layerwise LN scale** (PR #315): Scale layernorm by 1/sqrt(layer_idx+1). -0.001 bpb.
+5. **XSA on last 4 layers** (PR #315): Cross-sequence attention. -0.002 bpb.
+6. **QAT injection** (PR #414): Quantization-aware training from 15% through training. -0.001 bpb.
+7. **Better compression**: lzma or zstd-22 instead of zlib. Saves ~500KB.
 
-1. **PR #549 (1.1194 bpb)**: LeakyReLU(0.5)^2 + Legal Score-First TTT + Parallel Muon on the #414 stack. This is the CURRENT LEADER. Key: LeakyReLU with slope=0.5 (not 0.01), score-first TTT variant, parallel Muon optimizer.
-2. **PR #414 (1.1228 bpb)**: GPTQ-lite clip search + EMA (decay ~0.997) + warmdown3500 + QAT@0.15. Key: GPTQ-lite with 5 clip percentiles, training EMA, early QAT injection.
-3. **PR #315 (1.1248 bpb)**: Partial RoPE (16/64 dims) + layerwise LN scale + XSA on last 4 layers + EMA. Key: these are additive improvements that each contribute 0.002-0.005 bpb.
-4. **PR #640 (1.1570 bpb)**: Ternary U-Net + FP8 QAT + bitmask-LZMA compression. Radical approach — 73.7M params quantized to ternary.
-
-**How to reproduce:** The SOTA record code is checked into this repo. Read the record's `train_gpt.py` and `README.md`, then adapt it as your working `train_gpt.py`:
-
-```
-records/track_10min_16mb/2026-03-23_LeakyReLU_LegalTTT_ParallelMuon/        # 1.1194 bpb (#1)
-records/track_10min_16mb/2026-03-22_11L_EMA_GPTQ-lite_warmdown3500_QAT015_1.1233/  # 1.1228 bpb (#2)
-records/track_10min_16mb/2026-03-21_11L_XSA4_EMA_PartialRoPE_LateQAT_1.1248/       # 1.1248 bpb (#3)
-records/track_10min_16mb/2026-03-20_10L_Int5MLP_MuonWD04_SWA50/             # 1.1428 bpb (#5)
-```
-
-Each has a `train_gpt.py` with the exact code that achieved the score, plus a `README.md` with the exact env vars and command. Copy the record `train_gpt.py` to your worktree root as the working trainer, preserving the exact hyperparameters. Do NOT improvise on the first reproduction — reproduce the exact recipe first, then iterate.
-
-### Track B: Novel Exploration
-After reproducing a SOTA baseline, try targeted improvements:
-- Combine techniques from different PRs
-- Tune hyperparameters that the upstream entries didn't sweep
-- Explore axes the leaderboard hasn't tried
+### How to iterate
+- Edit `train_gpt.py` in your worktree with targeted code changes
+- Each experiment runs on **8xH100 for 10 minutes** (~3,500 steps)
+- Propose `resource_profile: {"gpu_count": 8, "gpu_type": "H100"}`
+- Propose `run_argv: ["torchrun", "--standalone", "--nproc_per_node=8", "train_gpt.py"]`
+- Focus on **one change at a time** so you can attribute improvements
 
 **Rule: at least half of proposed experiments should be Track A reproductions until we have a working sub-1.15 bpb baseline that fits under 16M.**
 
@@ -61,39 +56,38 @@ Read before taking action:
 - If you need more detail from a large file, use targeted `Read` calls with `offset` and `limit`, or use `Grep` / `Glob` first.
 - Keep exploration bounded. Prefer one well-motivated hypothesis over exhaustive repo-wide scanning.
 
-## 1-GPU Proxy Training Rules (CRITICAL)
+## 8xH100 Official Track (CURRENT MODE)
 
-This swarm runs on **1xH100 NVL**, not 8xH100. The controller automatically sets
-`--nproc_per_node=1` and `MAX_WALLCLOCK_SECONDS=5100`. But the proxy setup has
-important implications you MUST account for:
+This swarm runs on **8xH100 via SkyPilot/Shadeform** — the official contest setup.
+- `--nproc_per_node=8`, `MAX_WALLCLOCK_SECONDS=600` (10 min), `TRAIN_BATCH_TOKENS=786432`
+- Step time ~170ms → **~3,500 steps** in 600s
+- `grad_accum_steps=1` (no accumulation needed with 8 GPUs)
 
-### The step count problem
+### Current baseline (stock train_gpt.py on 8xH100)
 
-On 8xH100: `grad_accum=1`, step time ~45ms → **~13,300 steps** in 600s.
-On 1xH100: `grad_accum=8`, step time ~830ms → **~6,100 steps** in 5100s.
+Our 8xH100 baseline: **val_bpb=1.1811**, 15.37MB, 3,520 steps, 170ms/step.
+Upstream SOTA (PR #549): **val_bpb=1.1194** with LeakyReLU + Legal TTT + Parallel Muon.
 
-That's only **46% of the training steps**, seeing **46% of the tokens**. Models are
-systematically undertrained compared to the 8xH100 official setup.
+### The working train_gpt.py is the SOTA PR #549 recipe
 
-### How to compensate: use TRAIN_BATCH_TOKENS=524288
+The repo root `train_gpt.py` is the **PR #549 leaderboard SOTA** with:
+- LeakyReLU(0.5)^2 activation (not relu^2)
+- Legal score-first TTT
+- Parallel Muon optimizer
+This achieved 1.1194 bpb (3-seed mean) on 8xH100 upstream. Your job is to improve it further.
 
-Set `TRAIN_BATCH_TOKENS=524288` (not the default 786432) in `env_overrides`. This:
-- Reduces per-microstep work → faster steps (~755ms instead of ~830ms)
-- Gives **~6,750 steps** instead of ~6,100 in the same wallclock
-- Upstream PR #332 explicitly found that **smaller batch wins** because more updates
-  matter more than larger batch size in this regime
+### What to propose in plans
 
-**Our two best valid results both used batch=524288:**
-- 1.1974 bpb (fastmuon, d496, batch=524k implied via faster steps)
-- 1.2015 bpb (nobigram, d496, explicit batch=524k)
+- `resource_profile`: `{"gpu_count": 8, "gpu_type": "H100"}`
+- `run_argv`: `["torchrun", "--standalone", "--nproc_per_node=8", "train_gpt.py"]`
+- Do NOT set `TRAIN_BATCH_TOKENS` unless experimenting with batch size (default 786432 is correct)
+- Do NOT set `MAX_WALLCLOCK_SECONDS` (default 600s is the official budget)
+- TTT epochs: 3-5 is the sweet spot. Do NOT go above 5.
 
-### What NOT to do
+### Key constraint
 
-- Do NOT use `TRAIN_BATCH_TOKENS=786432` (default) — you'll get ~6100 steps, undertrained.
-- Do NOT try to reproduce 8xH100 recipes without changing batch size — a recipe that
-  needs 13,000 steps will fail at 6,000 steps.
-- Do NOT set TTT epochs above 5 — high-epoch TTT (10-30) consistently produces
-  terrible post-quant bpb (1.55+) even when pre-quant is good. 3-5 epochs is the sweet spot.
+Each 8xH100 run costs ~$5-8. Be deliberate with hypotheses. Prefer targeted changes
+over shotgun approaches. One well-motivated code edit > many env var tweaks.
 
 ## Role & Constraints
 
