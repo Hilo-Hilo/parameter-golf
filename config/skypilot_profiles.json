@@ -4,21 +4,21 @@
     "accelerators": "H100:1",
     "infra": "shadeform",
     "disk_size": 100,
-    "idle_action": "down",
+    "idle_action": "none",
     "failure_action": "down",
-    "idle_grace_minutes": 5,
+    "idle_grace_minutes": 30,
     "lease_ttl_minutes": 200,
-    "_note": "Shadeform does not support sky stop; always use sky down"
+    "_note": "idle_action=none keeps cluster alive for reuse. Shadeform cannot sky stop."
   },
   "pg-rec": {
     "gpu_count": 8,
     "accelerators": "H100:8",
     "infra": "shadeform",
     "disk_size": 200,
-    "idle_action": "down",
+    "idle_action": "none",
     "failure_action": "down",
-    "idle_grace_minutes": 5,
-    "lease_ttl_minutes": 25,
-    "_note": "Shadeform does not support sky stop; always use sky down"
+    "idle_grace_minutes": 30,
+    "lease_ttl_minutes": 60,
+    "_note": "idle_action=none keeps cluster alive for reuse. Saves ~10 min setup per experiment."
   }
 }
