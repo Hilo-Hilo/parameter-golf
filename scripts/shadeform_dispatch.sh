@@ -57,10 +57,16 @@ PROFILE_KEY="$POD_PREFIX"
 SHADE_INSTANCE_TYPE="$(jq -r --arg k "$PROFILE_KEY" '.[$k].shade_instance_type' "$PROFILE_FILE")"
 CLOUD="$(jq -r --arg k "$PROFILE_KEY" '.[$k].cloud' "$PROFILE_FILE")"
 REGION="$(jq -r --arg k "$PROFILE_KEY" '.[$k].region' "$PROFILE_FILE")"
-OS_IMAGE="$(jq -r --arg k "$PROFILE_KEY" '.[$k].os // "ubuntu22.04_cuda12.4_shade_os"' "$PROFILE_FILE")"
+OS_IMAGE="$(jq -r --arg k "$PROFILE_KEY" '.[$k].os // "ubuntu22.04_cuda12.8_shade_os"' "$PROFILE_FILE")"
+SSH_KEY_ID="$(jq -r --arg k "$PROFILE_KEY" '.[$k].ssh_key_id // empty' "$PROFILE_FILE")"
 IDLE_ACTION="$(jq -r --arg k "$PROFILE_KEY" '.[$k].idle_action // "none"' "$PROFILE_FILE")"
 FAILURE_ACTION="$(jq -r --arg k "$PROFILE_KEY" '.[$k].failure_action // "down"' "$PROFILE_FILE")"
 LEASE_TTL_MINUTES="$(jq -r --arg k "$PROFILE_KEY" '.[$k].lease_ttl_minutes // 60' "$PROFILE_FILE")"
+
+if [ -z "$SSH_KEY_ID" ]; then
+  echo "Error: ssh_key_id not set in $PROFILE_FILE for profile $PROFILE_KEY." >&2
+  exit 1
+fi
 
 # ---------------------------------------------------------------------------
 # Build instance name
@@ -95,7 +101,8 @@ sf_create_instance() {
     \"shade_instance_type\": \"$SHADE_INSTANCE_TYPE\",
     \"shade_cloud\": true,
     \"name\": \"$name\",
-    \"os\": \"$OS_IMAGE\"
+    \"os\": \"$OS_IMAGE\",
+    \"ssh_key_id\": \"$SSH_KEY_ID\"
   }"
 }
 
@@ -246,14 +253,21 @@ fi
 # ---------------------------------------------------------------------------
 # SSH readiness
 # ---------------------------------------------------------------------------
-SSH_USER="shadeform"
+SSH_USER="ubuntu"
 SSH_PORT="22"
+SSH_KEY_FILE="${SHADEFORM_SSH_KEY_FILE:-$HOME/.shadeform/ssh_key}"
+
+if [ ! -f "$SSH_KEY_FILE" ]; then
+  echo "Error: SSH private key not found at $SSH_KEY_FILE." >&2
+  echo "Save the Shadeform Managed Key private key there (chmod 600) or set SHADEFORM_SSH_KEY_FILE." >&2
+  exit 1
+fi
 
 ssh_remote() {
-  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT" "${SSH_USER}@${INSTANCE_IP}" "$@"
+  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY_FILE" -p "$SSH_PORT" "${SSH_USER}@${INSTANCE_IP}" "$@"
 }
 scp_to_remote() {
-  scp -o StrictHostKeyChecking=no -P "$SSH_PORT" "$1" "${SSH_USER}@${INSTANCE_IP}:$2"
+  scp -o StrictHostKeyChecking=no -i "$SSH_KEY_FILE" -P "$SSH_PORT" "$1" "${SSH_USER}@${INSTANCE_IP}:$2"
 }
 
 announce "Waiting for SSH on ${SSH_USER}@${INSTANCE_IP}..."
@@ -269,12 +283,15 @@ fi
 # Setup (only on fresh instance)
 # ---------------------------------------------------------------------------
 if [ "$INSTANCE_SOURCE" = "created" ]; then
-  announce "Installing dependencies (torch + flash-attn from wheel)..."
+  # Match the official OpenAI competition template environment:
+  # matotezitanka/proteus-pytorch:2.11.0-cuda12.8
+  # PyTorch 2.11.0, CUDA 12.8, FlashAttention 3 (Hopper).
+  announce "Installing dependencies to match official competition template (torch 2.11.0, cu128, FA3)..."
   ssh_remote "sudo mkdir -p /workspace && sudo chmod 777 /workspace" 2>/dev/null || true
   ssh_remote "sudo apt-get update -qq && sudo apt-get install -y -qq git jq tmux rsync 2>/dev/null || true"
-  ssh_remote "sudo pip3 install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124 2>&1 | tail -2"
+  ssh_remote "sudo pip3 install --no-cache-dir torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128 2>&1 | tail -2"
   ssh_remote "sudo pip3 install --no-cache-dir flash-attn sentencepiece huggingface_hub numpy zstandard psutil 2>&1 | tail -2"
-  ssh_remote "python3 -c 'import torch; print(f\"torch={torch.__version__}\"); from flash_attn import flash_attn_func; print(\"flash-attn OK\")'"
+  ssh_remote "python3 -c 'import torch; print(f\"torch={torch.__version__} cuda={torch.version.cuda}\"); from flash_attn import flash_attn_func; import flash_attn; print(f\"flash-attn={flash_attn.__version__} OK\")'"
   announce "Setup complete."
 else
   ssh_remote "sudo mkdir -p /workspace && sudo chmod 777 /workspace" 2>/dev/null || true

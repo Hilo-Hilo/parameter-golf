@@ -330,7 +330,7 @@ def eval_val(
     val_token_count = torch.zeros((), device=device, dtype=torch.float64)
     val_byte_count = torch.zeros((), device=device, dtype=torch.float64)
     model.eval()
-    with torch.inference_mode():
+    with torch.no_grad():
         for batch_seq_start in range(seq_start, seq_end, local_batch_seqs):
             batch_seq_end = min(batch_seq_start + local_batch_seqs, seq_end)
             raw_start = batch_seq_start * seq_len
@@ -1028,7 +1028,7 @@ def eval_val_sliding(
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
     base_model.eval()
     compiled_logits = torch.compile(base_model.forward_logits, dynamic=False, fullgraph=True)
-    with torch.inference_mode():
+    with torch.no_grad():
         for bi in range(0, len(my_windows), batch_seqs):
             batch_ws = my_windows[bi:bi + batch_seqs]
             bsz = len(batch_ws)
@@ -1141,7 +1141,7 @@ def eval_val_sliding_ttt(
         my_windows = windows[my_s:my_e]
 
         base_model.eval()
-        with torch.inference_mode():
+        with torch.no_grad():
             for bi in range(0, len(my_windows), batch_seqs):
                 batch_ws = my_windows[bi:bi + batch_seqs]
                 bsz = len(batch_ws)
