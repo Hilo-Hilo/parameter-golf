@@ -22,6 +22,8 @@ NODE_ID="root"
 BASE_REF="main"
 LOOP_SECONDS=30
 WORKERS=1
+WATCHERS=0
+PIPELINE=0
 NO_VALIDATION=0
 RUN_ONCE=0
 RESET_TREE_REF=0
@@ -47,6 +49,14 @@ while [ "$#" -gt 0 ]; do
     --no-validation)
       NO_VALIDATION=1
       shift
+      ;;
+    --pipeline)
+      PIPELINE=1
+      shift
+      ;;
+    --watchers)
+      WATCHERS="${2:-}"
+      shift 2
       ;;
     --once)
       RUN_ONCE=1
@@ -243,16 +253,28 @@ cd "$REPO_ROOT"
 # Worker pool helpers (Bash 3.2 compatible — no associative arrays)
 # ---------------------------------------------------------------------------
 
-# Flat array of background worker PIDs.
+# Default watchers to workers count when pipeline is enabled
+if [ "$PIPELINE" -eq 1 ] && [ "$WATCHERS" -eq 0 ]; then
+  WATCHERS="$WORKERS"
+fi
+
+# Flat arrays of background PIDs.
 WORKER_PIDS=()
+WATCHER_PIDS=()
 
 run_supervisor() {
   local worker_id="$1"
-  if [ "$NO_VALIDATION" -eq 1 ]; then
-    "$REPO_ROOT/scripts/supervisor.sh" --no-validation --worker-id "$worker_id"
-  else
-    "$REPO_ROOT/scripts/supervisor.sh" --worker-id "$worker_id"
-  fi
+  local flags=""
+  [ "$NO_VALIDATION" -eq 1 ] && flags="$flags --no-validation"
+  [ "$PIPELINE" -eq 1 ] && flags="$flags --plan-only"
+  "$REPO_ROOT/scripts/supervisor.sh" $flags --worker-id "$worker_id"
+}
+
+run_watcher() {
+  local worker_id="$1"
+  local flags="--worker-id $worker_id"
+  [ "$NO_VALIDATION" -eq 1 ] && flags="$flags --no-validation"
+  "$REPO_ROOT/scripts/watcher.sh" $flags
 }
 
 # Remove finished PIDs from WORKER_PIDS.
@@ -267,6 +289,20 @@ reap_workers() {
     fi
   done
   WORKER_PIDS=("${alive[@]+"${alive[@]}"}")
+}
+
+# Remove finished watcher PIDs.
+reap_watchers() {
+  local alive=()
+  local pid
+  for pid in "${WATCHER_PIDS[@]+"${WATCHER_PIDS[@]}"}"; do
+    if kill -0 "$pid" 2>/dev/null; then
+      alive+=("$pid")
+    else
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+  WATCHER_PIDS=("${alive[@]+"${alive[@]}"}")
 }
 
 # Ensure enough pending nodes exist to keep workers busy.
@@ -431,6 +467,21 @@ spawn_workers() {
   done
 }
 
+# Spawn watchers up to the configured limit (pipeline mode only).
+spawn_watchers() {
+  if [ "$PIPELINE" -eq 0 ]; then
+    return
+  fi
+  local i=0
+  while [ "${#WATCHER_PIDS[@]}" -lt "$WATCHERS" ]; do
+    run_watcher "watcher_$i" &
+    WATCHER_PIDS+=("$!")
+    announce "Launched watcher watcher_$i (pid $!)."
+    i=$((i + 1))
+    sleep 1
+  done
+}
+
 # Advance all tree/* refs to the latest BASE_REF so new worktrees
 # pick up script fixes committed to main.
 update_tree_refs() {
@@ -440,14 +491,14 @@ update_tree_refs() {
   done
 }
 
-# Kill all background workers on shutdown.
+# Kill all background workers and watchers on shutdown.
 shutdown_workers() {
   announce "Stopping swarm..."
   local pid
-  for pid in "${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}"; do
+  for pid in "${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}" "${WATCHER_PIDS[@]+"${WATCHER_PIDS[@]}"}"; do
     kill "$pid" 2>/dev/null || true
   done
-  for pid in "${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}"; do
+  for pid in "${WORKER_PIDS[@]+"${WORKER_PIDS[@]}"}" "${WATCHER_PIDS[@]+"${WATCHER_PIDS[@]}"}"; do
     wait "$pid" 2>/dev/null || true
   done
   exit 0
@@ -488,6 +539,7 @@ LAST_UPSTREAM_SYNC=0
 
 while true; do
   reap_workers
+  reap_watchers
   update_tree_refs
 
   # Sync upstream context every 30 minutes so plans use fresh data.
@@ -501,5 +553,6 @@ while true; do
 
   ensure_pending_supply
   spawn_workers
+  spawn_watchers
   sleep "$LOOP_SECONDS"
 done

@@ -2,16 +2,21 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--no-validation] <node_id>" >&2
+  echo "Usage: $0 [--no-validation] [--plan-only] <node_id>" >&2
 }
 
 NO_VALIDATION=0
+PLAN_ONLY=0
+PLAN_ONLY_DISPATCHED=0
 NODE_ID=""
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-validation)
       NO_VALIDATION=1
+      ;;
+    --plan-only)
+      PLAN_ONLY=1
       ;;
     -h|--help)
       usage
@@ -74,6 +79,10 @@ cleanup_cmd() {
 export CLAUDE_CODE_DISABLE_AUTO_MEMORY=1
 export CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1
 export CLAUDE_CODE_DISABLE_CRON=1
+
+# Source queue library for --plan-only mode
+REPO_ROOT_FOR_QUEUE="$MAIN_CHECKOUT"
+source "$MAIN_CHECKOUT/scripts/gpu_queue.sh" 2>/dev/null || true
 
 REQUIRED_UPSTREAM_CONTEXT_FILES=(
   "$MAIN_CHECKOUT/context/upstream/issue_140.md"
@@ -453,12 +462,15 @@ cleanup() {
       --message "branch cycle exited non-zero"
   fi
 
-  if [ "$JOB_DISPATCHED" -eq 1 ] && [ "$POD_CLEANED" -eq 0 ] && [ -n "$CHILD_NODE_ID" ]; then
+  if [ "$PLAN_ONLY_DISPATCHED" -eq 1 ]; then
+    # Plan-only mode: job was enqueued for watcher. Do NOT clean pod or retract.
+    true
+  elif [ "$JOB_DISPATCHED" -eq 1 ] && [ "$POD_CLEANED" -eq 0 ] && [ -n "$CHILD_NODE_ID" ]; then
     cd "$MAIN_CHECKOUT"
     "$(cleanup_cmd)" --job-id "$CHILD_NODE_ID" --reason "controller_exit" >/dev/null 2>&1 || true
   fi
 
-  if [ "$JOB_DISPATCHED" -eq 0 ]; then
+  if [ "$JOB_DISPATCHED" -eq 0 ] && [ "$PLAN_ONLY_DISPATCHED" -eq 0 ]; then
     retract_child_node "pre_dispatch_exit"
     requeue_parent_node "pre_dispatch_exit"
   fi
@@ -1252,6 +1264,27 @@ announce "Dispatching job via ${DISPATCH_BACKEND}..."
 cd "$MAIN_CHECKOUT"
 CONTROLLER_LOG_LABEL="$BRANCH_NAME" "$(dispatch_cmd)" "$JOB_SPEC"
 JOB_DISPATCHED=1
+
+# --plan-only mode: enqueue the dispatched job and exit. A watcher process
+# will handle wait_remote, collect, diagnose, and reflect.
+if [ "$PLAN_ONLY" -eq 1 ]; then
+  LEASE_FILE="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_lease.json"
+  CONTROLLER_TTL_EPOCH="$(controller_ttl_epoch "$LEASE_FILE")"
+  enqueue_gpu_job \
+    "$CHILD_NODE_ID" \
+    "$NODE_ID" \
+    "$CHILD_NODE_ID" \
+    "$BRANCH_NAME" \
+    "$(jq -r '.commit_sha' "$JOB_SPEC")" \
+    "$PHASE_LOG_DIR" \
+    "$PLAN_WORKTREE" \
+    "$NO_VALIDATION" \
+    "$CONTROLLER_TTL_EPOCH"
+  announce "Job dispatched and enqueued for watcher. Exiting plan-only mode."
+  write_observability_state "dispatch" "completed" "job enqueued for watcher (plan-only)"
+  PLAN_ONLY_DISPATCHED=1
+  exit 0
+fi
 
 SSH_TARGET=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_target.txt" || echo "")
 SSH_PORT=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_port.txt" || echo "22")

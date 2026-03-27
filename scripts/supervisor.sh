@@ -2,16 +2,21 @@
 set -euo pipefail
 
 usage() {
-  echo "Usage: $0 [--no-validation] [--worker-id ID]" >&2
+  echo "Usage: $0 [--no-validation] [--plan-only] [--worker-id ID]" >&2
 }
 
 NO_VALIDATION=0
+PLAN_ONLY=0
 WORKER_ID="0"
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-validation)
       NO_VALIDATION=1
+      shift
+      ;;
+    --plan-only)
+      PLAN_ONLY=1
       shift
       ;;
     --worker-id)
@@ -119,11 +124,10 @@ if [ -n "$PENDING_NODE" ]; then
     --status "running" \
     --message "supervisor/w${WORKER_ID} claimed a pending node and is launching branch_cycle"
   cycle_rc=0
-  if [ "$NO_VALIDATION" -eq 1 ]; then
-    "$REPO_ROOT/scripts/branch_cycle.sh" --no-validation "$PENDING_NODE" || cycle_rc=$?
-  else
-    "$REPO_ROOT/scripts/branch_cycle.sh" "$PENDING_NODE" || cycle_rc=$?
-  fi
+  BC_FLAGS=""
+  [ "$NO_VALIDATION" -eq 1 ] && BC_FLAGS="$BC_FLAGS --no-validation"
+  [ "$PLAN_ONLY" -eq 1 ] && BC_FLAGS="$BC_FLAGS --plan-only"
+  "$REPO_ROOT/scripts/branch_cycle.sh" $BC_FLAGS "$PENDING_NODE" || cycle_rc=$?
   if [ "$cycle_rc" -ne 0 ]; then
     announce "Warning: branch_cycle for $PENDING_NODE exited with code $cycle_rc"
     log_event \
