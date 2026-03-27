@@ -19,9 +19,10 @@
 - **SSH key**: the "Shadeform Managed Key" (key ID `e58f9fb4-...`) is 1024-bit RSA and is rejected by OpenSSH 10.2+ on macOS. Use the 2048-bit RSA SkyPilot key (ID `91516272-31ca-4c03-81ac-f4cab9f13ba4`), stored at `~/.sky/generated/ssh-keys/pg-e2e-test.key` (also copied to `~/.shadeform/ssh_key`). All SkyPilot jobs share the same private key.
 - **SSH opts**: use `-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR` — Hyperstack recycles IPs so known_hosts entries go stale immediately
 - **Instance boot**: typically active in ~3 min; SSH port 22 ready within ~30s of status=active
+- **Docker container boot**: SSH connects to the **host VM** (bare Ubuntu), not the container. The container starts as a separate init script after VM boots — image pull adds several minutes. Use `docker ps --format '{{.ID}}' | head -1` to wait for the container, then `docker exec -i <id> bash -s` to run commands inside it. Do NOT run `python3` or training scripts directly via `ssh_remote`; they will fail with "No module named torch".
 - **Profile keys in `config/shadeform_profiles.json`**: both profiles now use ssh_key_id `91516272-31ca-4c03-81ac-f4cab9f13ba4`
 - **PyTorch wheels for CUDA 12.8**: `pip install torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128`
-- **Official competition template**: `matotezitanka/proteus-pytorch:2.11.0-cuda12.8` — PyTorch 2.11.0, CUDA 12.8, FA3. Reproduced on Shadeform via matching pip installs on `ubuntu22.04_cuda12.8_shade_os`.
+- **Official competition template**: `matotezitanka/proteus-pytorch:2.11.0-cuda12.8` — PyTorch 2.11.0, CUDA 12.8, FA3. Use via Shadeform Docker launch (type="docker"), not bare VM pip install (which requires 90+ min flash-attn source compile).
 
 ## Learned Workspace Facts
 

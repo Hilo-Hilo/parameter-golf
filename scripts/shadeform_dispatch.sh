@@ -57,14 +57,25 @@ PROFILE_KEY="$POD_PREFIX"
 SHADE_INSTANCE_TYPE="$(jq -r --arg k "$PROFILE_KEY" '.[$k].shade_instance_type' "$PROFILE_FILE")"
 CLOUD="$(jq -r --arg k "$PROFILE_KEY" '.[$k].cloud' "$PROFILE_FILE")"
 REGION="$(jq -r --arg k "$PROFILE_KEY" '.[$k].region' "$PROFILE_FILE")"
-OS_IMAGE="$(jq -r --arg k "$PROFILE_KEY" '.[$k].os // "ubuntu22.04_cuda12.8_shade_os"' "$PROFILE_FILE")"
+DOCKER_IMAGE="$(jq -r --arg k "$PROFILE_KEY" '.[$k].docker_image // empty' "$PROFILE_FILE")"
 SSH_KEY_ID="$(jq -r --arg k "$PROFILE_KEY" '.[$k].ssh_key_id // empty' "$PROFILE_FILE")"
 IDLE_ACTION="$(jq -r --arg k "$PROFILE_KEY" '.[$k].idle_action // "none"' "$PROFILE_FILE")"
 FAILURE_ACTION="$(jq -r --arg k "$PROFILE_KEY" '.[$k].failure_action // "down"' "$PROFILE_FILE")"
 LEASE_TTL_MINUTES="$(jq -r --arg k "$PROFILE_KEY" '.[$k].lease_ttl_minutes // 60' "$PROFILE_FILE")"
 
+# Docker registry credentials (optional; for DockerHub rate-limit bypass or private images).
+# Set DOCKER_USERNAME / DOCKER_PASSWORD env vars or store in ~/.shadeform/docker_creds:
+#   echo '{"username":"user","password":"pat"}' > ~/.shadeform/docker_creds
+DOCKER_CREDS_FILE="${SHADEFORM_DOCKER_CREDS:-$HOME/.shadeform/docker_creds}"
+DOCKER_USERNAME="${DOCKER_USERNAME:-$(jq -r '.username // empty' "$DOCKER_CREDS_FILE" 2>/dev/null || echo '')}"
+DOCKER_PASSWORD="${DOCKER_PASSWORD:-$(jq -r '.password // empty' "$DOCKER_CREDS_FILE" 2>/dev/null || echo '')}"
+
 if [ -z "$SSH_KEY_ID" ]; then
   echo "Error: ssh_key_id not set in $PROFILE_FILE for profile $PROFILE_KEY." >&2
+  exit 1
+fi
+if [ -z "$DOCKER_IMAGE" ]; then
+  echo "Error: docker_image not set in $PROFILE_FILE for profile $PROFILE_KEY." >&2
   exit 1
 fi
 
@@ -95,15 +106,36 @@ sf_api() {
 
 sf_create_instance() {
   local name="$1"
-  sf_api POST "/instances/create" -d "{
-    \"cloud\": \"$CLOUD\",
-    \"region\": \"$REGION\",
-    \"shade_instance_type\": \"$SHADE_INSTANCE_TYPE\",
-    \"shade_cloud\": true,
-    \"name\": \"$name\",
-    \"os\": \"$OS_IMAGE\",
-    \"ssh_key_id\": \"$SSH_KEY_ID\"
-  }"
+  # Build optional registry_credentials block if credentials are set.
+  local creds_json="null"
+  if [ -n "$DOCKER_USERNAME" ] && [ -n "$DOCKER_PASSWORD" ]; then
+    creds_json="$(jq -n --arg u "$DOCKER_USERNAME" --arg p "$DOCKER_PASSWORD" '{username:$u,password:$p}')"
+  fi
+  # Build payload with jq to avoid shell quoting / escaping issues.
+  local docker_cfg
+  docker_cfg="$(jq -n \
+    --arg image "$DOCKER_IMAGE" \
+    --argjson creds "$creds_json" \
+    '{image: $image, shared_memory_in_gb: 8, registry_credentials: $creds}')"
+  jq -n \
+    --arg cloud "$CLOUD" \
+    --arg region "$REGION" \
+    --arg type "$SHADE_INSTANCE_TYPE" \
+    --arg name "$name" \
+    --arg key_id "$SSH_KEY_ID" \
+    --argjson docker_cfg "$docker_cfg" \
+    '{
+      cloud: $cloud,
+      region: $region,
+      shade_instance_type: $type,
+      shade_cloud: true,
+      name: $name,
+      ssh_key_id: $key_id,
+      launch_configuration: {
+        type: "docker",
+        docker_configuration: $docker_cfg
+      }
+    }' | sf_api POST "/instances/create" -d @-
 }
 
 sf_get_instance() { sf_api GET "/instances/$1/info"; }
@@ -161,6 +193,7 @@ INSTANCE_NAME=""
 INSTANCE_IP=""
 INSTANCE_SOURCE="created"
 SSH_USER_API=""
+CONTAINER_ID=""
 
 # ---------------------------------------------------------------------------
 # Cleanup trap
@@ -268,7 +301,7 @@ if [ ! -f "$SSH_KEY_FILE" ]; then
   exit 1
 fi
 
-SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR -o ServerAliveInterval=60 -o ServerAliveCountMax=10"
 ssh_remote() {
   # shellcheck disable=SC2086
   ssh $SSH_OPTS -i "$SSH_KEY_FILE" -p "$SSH_PORT" "${SSH_USER}@${INSTANCE_IP}" "$@"
@@ -276,6 +309,41 @@ ssh_remote() {
 scp_to_remote() {
   # shellcheck disable=SC2086
   scp $SSH_OPTS -i "$SSH_KEY_FILE" -P "$SSH_PORT" "$1" "${SSH_USER}@${INSTANCE_IP}:$2"
+}
+
+# ---------------------------------------------------------------------------
+# Docker container helpers
+# SSH connects to the host VM; the Docker container runs separately.
+# Poll docker ps until the container is running, then exec inside it.
+# ---------------------------------------------------------------------------
+wait_for_container() {
+  announce "Waiting for Docker container to start (image pull may take several minutes)..."
+  local cid=""
+  for i in $(seq 1 120); do
+    cid="$(ssh_remote "docker ps --format '{{.ID}}' | head -1" 2>/dev/null || echo '')"
+    if [ -n "$cid" ]; then
+      announce "Container running: $cid"
+      CONTAINER_ID="$cid"
+      return 0
+    fi
+    [ "$((i % 6))" -eq 0 ] && announce "Waiting for container... ($((i * 10))s elapsed)"
+    sleep 10
+  done
+  announce "Error: Docker container did not start within 20 minutes." >&2
+  return 1
+}
+
+container_exec() {
+  # Run a shell command string inside the Docker container via stdin pipe.
+  printf '%s\n' "$1" | ssh_remote "docker exec -i $CONTAINER_ID bash -s"
+}
+
+container_copy_to() {
+  # Copy a local file into the Docker container.
+  local local_src="$1" container_dst="$2"
+  local tmp_host="/tmp/_sf_xfer_$$_$(basename "$local_src")"
+  scp_to_remote "$local_src" "$tmp_host"
+  ssh_remote "docker cp $tmp_host $CONTAINER_ID:$container_dst && rm -f $tmp_host"
 }
 
 announce "Waiting for SSH on ${SSH_USER}@${INSTANCE_IP}..."
@@ -290,34 +358,46 @@ if ! ssh_remote "echo SSH_READY" >/dev/null 2>&1; then
 fi
 
 # ---------------------------------------------------------------------------
-# Setup (only on fresh instance)
+# Wait for Docker container to be running on the host VM
+# ---------------------------------------------------------------------------
+wait_for_container || { announce "Error: no running container found." >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+# Setup (only on fresh instance; all commands run inside the container)
 # ---------------------------------------------------------------------------
 if [ "$INSTANCE_SOURCE" = "created" ]; then
-  # Match the official OpenAI competition template environment:
-  # matotezitanka/proteus-pytorch:2.11.0-cuda12.8
-  # PyTorch 2.11.0, CUDA 12.8, FlashAttention 3 (Hopper).
-  announce "Installing dependencies to match official competition template (torch 2.11.0, cu128, FA3)..."
-  ssh_remote "sudo mkdir -p /workspace && sudo chmod 777 /workspace" 2>/dev/null || true
-  ssh_remote "sudo apt-get update -qq && sudo apt-get install -y -qq git jq tmux rsync 2>/dev/null || true"
-  ssh_remote "sudo pip3 install --no-cache-dir torch==2.11.0 --index-url https://download.pytorch.org/whl/cu128 2>&1 | tail -2"
-  ssh_remote "sudo pip3 install --no-cache-dir flash-attn sentencepiece huggingface_hub numpy zstandard psutil 2>&1 | tail -2"
-  ssh_remote "python3 -c 'import torch; print(f\"torch={torch.__version__} cuda={torch.version.cuda}\"); from flash_attn import flash_attn_func; import flash_attn; print(f\"flash-attn={flash_attn.__version__} OK\")'"
-  announce "Setup complete."
+  # Docker image already has torch, flash-attn, and all competition deps.
+  # Just verify the environment and ensure /workspace is writable.
+  announce "Verifying Docker environment ($DOCKER_IMAGE)..."
+  container_exec "mkdir -p /workspace && chmod 777 /workspace"
+  container_exec "python3 -c '
+import torch
+print(f\"torch={torch.__version__} cuda={torch.version.cuda} cuda_available={torch.cuda.is_available()}\")
+try:
+    import flash_attn; print(f\"flash-attn={flash_attn.__version__} OK\")
+except ImportError as e:
+    print(f\"flash-attn not found ({e}) -- will install if needed\")
+import subprocess, sys
+pkgs = subprocess.check_output([sys.executable, \"-m\", \"pip\", \"list\", \"--format=freeze\"]).decode()
+fa_lines = [l for l in pkgs.splitlines() if \"flash\" in l.lower() or \"triton\" in l.lower()]
+print(\"FA-related:\", fa_lines)
+'"
+  announce "Docker env verified."
 else
-  ssh_remote "sudo mkdir -p /workspace && sudo chmod 777 /workspace" 2>/dev/null || true
+  container_exec "mkdir -p /workspace && chmod 777 /workspace"
 fi
 
 # ---------------------------------------------------------------------------
-# Bootstrap + launch (identical to skypilot_dispatch)
+# Bootstrap + launch (inside Docker container)
 # ---------------------------------------------------------------------------
-ssh_remote "mkdir -p /workspace/scripts"
-scp_to_remote "$SCRIPT_DIR/runpod_bootstrap_remote.sh" "/workspace/scripts/runpod_bootstrap_remote.sh"
-ssh_remote "chmod +x /workspace/scripts/runpod_bootstrap_remote.sh"
+container_exec "mkdir -p /workspace/scripts"
+container_copy_to "$SCRIPT_DIR/runpod_bootstrap_remote.sh" "/workspace/scripts/runpod_bootstrap_remote.sh"
+container_exec "chmod +x /workspace/scripts/runpod_bootstrap_remote.sh"
 
 announce "Bootstrapping commit $COMMIT_SHA..."
 BOOTSTRAP_CMD="RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK=1 /workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
 [ -n "$REMOTE_ENV_SH" ] && BOOTSTRAP_CMD="RUNPOD_BOOTSTRAP_ALLOW_APT_FALLBACK=1 $REMOTE_ENV_SH /workspace/scripts/runpod_bootstrap_remote.sh $JOB_ID $BRANCH $COMMIT_SHA"
-ssh_remote "$BOOTSTRAP_CMD"
+container_exec "$BOOTSTRAP_CMD"
 
 REMOTE_RUN_SCRIPT="/workspace/jobs/$JOB_ID/scripts/runpod_run_remote.sh"
 REQ_GPU_SUBSTRING="$(jq -r '.resource_profile.gpu_type // "H100"' "$JOB_SPEC")"
@@ -325,7 +405,7 @@ REMOTE_RUN_CMD="$REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GP
 [ -n "$REMOTE_ENV_SH" ] && REMOTE_RUN_CMD="$REMOTE_ENV_SH $REMOTE_RUN_SCRIPT $JOB_ID $REQ_GPU_COUNT $(printf '%q' "$REQ_GPU_SUBSTRING") $RUN_ARGV_SH"
 
 announce "Launching remote job..."
-ssh_remote "$REMOTE_RUN_CMD"
+container_exec "$REMOTE_RUN_CMD"
 
 # ---------------------------------------------------------------------------
 # Write lease + spool files
