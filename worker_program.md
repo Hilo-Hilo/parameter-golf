@@ -207,3 +207,8 @@ Instead, focus on ARCHITECTURAL code changes that add capacity:
 2. **GPTQ-lite quantization** — better quantization saves bytes AND improves roundtrip bpb
 3. **Partial RoPE** — reduce rotary dimensions from 64 to 16
 4. **11 layers instead of 10** — if you can fit under 16M with d_model=480
+
+### CRITICAL: Disable TTT (TTT_ENABLED=0)
+The stock baseline WITH TTT gets 1.2240 bpb. WITHOUT TTT gets 1.1797 bpb.
+TTT is HURTING on 8xH100. Always set `TTT_ENABLED=0` in env_overrides.
+This single change improves bpb by 0.044!
