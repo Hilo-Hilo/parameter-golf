@@ -122,7 +122,7 @@ process_job() {
   update_gpu_job_status "$JOB_ID" "collecting"
 
   cd "$MAIN_CHECKOUT"
-  if "$MAIN_CHECKOUT/scripts/runpod_collect.sh" "$CHILD_NODE_ID" "$SSH_TARGET" "$SSH_PORT" 2>/dev/null; then
+  if "$MAIN_CHECKOUT/scripts/runpod_collect.sh" "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID" 2>/dev/null; then
     log_event --event "collect_completed" --job-id "$CHILD_NODE_ID" --status "appended" --message "artifact collection finished"
   else
     announce "Warning: collection failed for $CHILD_NODE_ID (may be partial)"
