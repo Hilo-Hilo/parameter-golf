@@ -107,7 +107,7 @@ sf_create_instance() {
 }
 
 sf_get_instance() { sf_api GET "/instances/$1/info"; }
-sf_delete_instance() { sf_api DELETE "/instances/$1/delete"; }
+sf_delete_instance() { sf_api POST "/instances/$1/delete"; }
 sf_list_instances() { sf_api GET "/instances"; }
 
 # ---------------------------------------------------------------------------
@@ -160,6 +160,7 @@ INSTANCE_ID=""
 INSTANCE_NAME=""
 INSTANCE_IP=""
 INSTANCE_SOURCE="created"
+SSH_USER_API=""
 
 # ---------------------------------------------------------------------------
 # Cleanup trap
@@ -198,8 +199,10 @@ for inst in data.get('instances', []):
 
 if [ -n "$INSTANCE_ID" ]; then
   INSTANCE_SOURCE="existing"
-  INSTANCE_IP="$(sf_get_instance "$INSTANCE_ID" | jq -r '.ip // empty')"
-  INSTANCE_NAME="$(sf_get_instance "$INSTANCE_ID" | jq -r '.name // empty')"
+  INSTANCE_INFO="$(sf_get_instance "$INSTANCE_ID")"
+  INSTANCE_IP="$(echo "$INSTANCE_INFO" | jq -r '.ip // empty')"
+  INSTANCE_NAME="$(echo "$INSTANCE_INFO" | jq -r '.name // empty')"
+  SSH_USER_API="$(echo "$INSTANCE_INFO" | jq -r '.ssh_user // empty')"
   announce "Reusing existing instance $INSTANCE_ID ($INSTANCE_NAME)"
 else
   INSTANCE_NAME="$(build_instance_name)"
@@ -233,6 +236,7 @@ if [ -z "$INSTANCE_IP" ]; then
     INFO="$(sf_get_instance "$INSTANCE_ID")"
     STATUS="$(echo "$INFO" | jq -r '.status // "unknown"')"
     INSTANCE_IP="$(echo "$INFO" | jq -r '.ip // empty')"
+    SSH_USER_API="$(echo "$INFO" | jq -r '.ssh_user // empty')"
     if [ "$STATUS" = "active" ] && [ -n "$INSTANCE_IP" ] && [ "$INSTANCE_IP" != "null" ]; then
       announce "Instance active at $INSTANCE_IP"
       break
@@ -253,7 +257,8 @@ fi
 # ---------------------------------------------------------------------------
 # SSH readiness
 # ---------------------------------------------------------------------------
-SSH_USER="ubuntu"
+# Use ssh_user from Shadeform API (typically "shadeform" on Hyperstack).
+SSH_USER="${SSH_USER_API:-shadeform}"
 SSH_PORT="22"
 SSH_KEY_FILE="${SHADEFORM_SSH_KEY_FILE:-$HOME/.shadeform/ssh_key}"
 
@@ -263,20 +268,25 @@ if [ ! -f "$SSH_KEY_FILE" ]; then
   exit 1
 fi
 
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR"
 ssh_remote() {
-  ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -i "$SSH_KEY_FILE" -p "$SSH_PORT" "${SSH_USER}@${INSTANCE_IP}" "$@"
+  # shellcheck disable=SC2086
+  ssh $SSH_OPTS -i "$SSH_KEY_FILE" -p "$SSH_PORT" "${SSH_USER}@${INSTANCE_IP}" "$@"
 }
 scp_to_remote() {
-  scp -o StrictHostKeyChecking=no -i "$SSH_KEY_FILE" -P "$SSH_PORT" "$1" "${SSH_USER}@${INSTANCE_IP}:$2"
+  # shellcheck disable=SC2086
+  scp $SSH_OPTS -i "$SSH_KEY_FILE" -P "$SSH_PORT" "$1" "${SSH_USER}@${INSTANCE_IP}:$2"
 }
 
 announce "Waiting for SSH on ${SSH_USER}@${INSTANCE_IP}..."
-for _ in $(seq 1 18); do
-  if ssh_remote "echo SSH_READY" >/dev/null 2>&1; then break; fi
+for i in $(seq 1 42); do
+  if ssh_remote "echo SSH_READY" 2>/tmp/ssh_ready_err; then break; fi
+  [ "$i" -eq 1 ] && announce "SSH attempt 1 error: $(cat /tmp/ssh_ready_err 2>/dev/null | head -3)"
   sleep 10
 done
 if ! ssh_remote "echo SSH_READY" >/dev/null 2>&1; then
-  announce "Error: SSH not ready." >&2; exit 1
+  announce "Error: SSH not ready after 7 minutes. Last error: $(cat /tmp/ssh_ready_err 2>/dev/null | head -3)" >&2
+  exit 1
 fi
 
 # ---------------------------------------------------------------------------
