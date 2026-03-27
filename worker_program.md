@@ -191,3 +191,19 @@ estimated_artifact ≈ int6_bytes * zlib_ratio + 62791
 - `journal.md` is append-only from this reset onward. Update it when you reach significant milestones.
 - Preserve exact metric and byte accounting.
 - Check `registry/nodes.jsonl` to avoid repeating past slugs or semantic duplicates.
+### CRITICAL: Stop tweaking hyperparameters!
+All hyperparameter-only experiments have been WORSE than the stock baseline (1.1797 bpb):
+- LeakyReLU(0.5)^2 alone: 1.2212 (worse)
+- Smaller batch + longer warmdown: 1.2173 (worse)
+- Weight decay + batch changes: 1.2266 (worse)
+
+**The stock train_gpt.py with DEFAULT hyperparameters is already well-tuned.**
+
+DO NOT propose experiments that only change env vars (LR, batch size, warmdown, weight decay, TTT epochs).
+These do NOT improve over the baseline.
+
+Instead, focus on ARCHITECTURAL code changes that add capacity:
+1. **EMA weight averaging** — add exponential moving average (new code, not just an env var)
+2. **GPTQ-lite quantization** — better quantization saves bytes AND improves roundtrip bpb
+3. **Partial RoPE** — reduce rotary dimensions from 64 to 16
+4. **11 layers instead of 10** — if you can fit under 16M with d_model=480
