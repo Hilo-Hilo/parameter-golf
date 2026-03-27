@@ -66,17 +66,28 @@ LOCAL_RESULTS_DIR="$REPO_ROOT/experiments/$JOB_ID"
 
 mkdir -p "$LOCAL_RESULTS_DIR"
 
+# Optional SSH identity file (set by Shadeform reconcile for non-default keys).
+SSH_ID_OPTS="${SSH_IDENTITY_FILE:+-i $SSH_IDENTITY_FILE}"
+# shellcheck disable=SC2086
+SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_ID_OPTS -p $SSH_PORT"
+
 announce "Collecting results from $SSH_HOST:$SSH_PORT for $JOB_ID..."
-if ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_HOST" "[ -d \"$PRIMARY_REMOTE_DIR\" ]"; then
-  rsync -avz -e "ssh -o StrictHostKeyChecking=no -p $SSH_PORT" "$SSH_HOST:$PRIMARY_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/"
+# shellcheck disable=SC2086
+if $SSH_CMD "$SSH_HOST" "[ -d \"$PRIMARY_REMOTE_DIR\" ]"; then
+  # shellcheck disable=SC2086
+  rsync -avz -e "$SSH_CMD" "$SSH_HOST:$PRIMARY_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/"
 fi
 
-if ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_HOST" "[ -d \"$FALLBACK_REMOTE_DIR\" ]"; then
-  rsync -avz -e "ssh -o StrictHostKeyChecking=no -p $SSH_PORT" "$SSH_HOST:$FALLBACK_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/wrapper/"
+# shellcheck disable=SC2086
+if $SSH_CMD "$SSH_HOST" "[ -d \"$FALLBACK_REMOTE_DIR\" ]"; then
+  # shellcheck disable=SC2086
+  rsync -avz -e "$SSH_CMD" "$SSH_HOST:$FALLBACK_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/wrapper/"
 fi
 
-if ssh -o StrictHostKeyChecking=no -p "$SSH_PORT" "$SSH_HOST" "[ -f \"$REMOTE_SPOOL_JSON\" ]"; then
-  rsync -avz -e "ssh -o StrictHostKeyChecking=no -p $SSH_PORT" "$SSH_HOST:$REMOTE_SPOOL_JSON" "$LOCAL_RESULTS_DIR/"
+# shellcheck disable=SC2086
+if $SSH_CMD "$SSH_HOST" "[ -f \"$REMOTE_SPOOL_JSON\" ]"; then
+  # shellcheck disable=SC2086
+  rsync -avz -e "$SSH_CMD" "$SSH_HOST:$REMOTE_SPOOL_JSON" "$LOCAL_RESULTS_DIR/"
 fi
 
 # After collecting, append the canonical summary to locked runs.jsonl.

@@ -45,6 +45,12 @@ parts=[f'{k}={shlex.quote(str(v))}' for k,v in sorted(p.items()) if re.match(r'^
 print(' '.join(parts))
 " "$ENV_OVERRIDES_JSON")"
 
+# Propagate HF_TOKEN from controller env if set (needed for HuggingFace data download).
+if [ -n "${HF_TOKEN:-}" ]; then
+  HF_TOKEN_SH="HF_TOKEN=$(printf '%q' "$HF_TOKEN")"
+  REMOTE_ENV_SH="${REMOTE_ENV_SH:+$REMOTE_ENV_SH }$HF_TOKEN_SH"
+fi
+
 [ -z "$REQ_GPU_COUNT" ] || [ "$REQ_GPU_COUNT" = "null" ] && { echo "Error: missing gpu_count" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------

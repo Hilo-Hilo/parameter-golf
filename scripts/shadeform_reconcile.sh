@@ -11,10 +11,46 @@ SHADEFORM_API="https://api.shadeform.ai/v1"
 
 [ -z "$SHADEFORM_API_KEY" ] && exit 0
 
+SSH_KEY_FILE="${SHADEFORM_SSH_KEY_FILE:-$HOME/.shadeform/ssh_key}"
+SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR"
+[ -f "$SSH_KEY_FILE" ] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY_FILE"
+
 dry_run=0; filter_job_id=""
 while [[ $# -gt 0 ]]; do
   case "$1" in --job-id) filter_job_id="${2:-}"; shift 2 ;; --dry-run) dry_run=1; shift ;; *) shift ;; esac
 done
+
+# Get the running Docker container ID on a Shadeform host VM.
+get_container_id() {
+  local ssh_host="$1" ssh_port="$2"
+  # shellcheck disable=SC2086
+  ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" "docker ps --format '{{.ID}}' | head -1" 2>/dev/null || echo ''
+}
+
+# Copy experiment artifacts from inside the Docker container to the host VM's
+# /workspace so that runpod_collect.sh can rsync them to the Mac as normal.
+pre_collect_from_container() {
+  local job_id="$1" ssh_host="$2" ssh_port="$3" cid="$4"
+  [ -z "$cid" ] && return 0
+  # shellcheck disable=SC2086
+  ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" "
+    JOB=\"$job_id\"
+    CID=\"$cid\"
+    for src in \
+      /workspace/parameter-golf/experiments/\$JOB \
+      /workspace/jobs/\$JOB/experiments/\$JOB; do
+      docker exec \"\$CID\" test -d \"\$src\" 2>/dev/null || continue
+      parent=\"\$(dirname \"\$src\")\"
+      mkdir -p \"\$parent\"
+      docker cp \"\$CID\":\"\$src\" \"\$parent/\" 2>/dev/null || true
+    done
+    SPOOL=/workspace/parameter-golf/registry/spool/\$JOB.json
+    if docker exec \"\$CID\" test -f \"\$SPOOL\" 2>/dev/null; then
+      mkdir -p \"\$(dirname \"\$SPOOL\")\"
+      docker cp \"\$CID\":\"\$SPOOL\" \"\$SPOOL\" 2>/dev/null || true
+    fi
+  " 2>/dev/null || true
+}
 
 lease_epoch() {
   python3 -c "
@@ -52,13 +88,25 @@ for lease_file in "$REPO_ROOT"/registry/spool/*_lease.json; do
     continue
   fi
 
-  # Check SSH tmux session
+  # Check tmux session inside the Docker container (SSH connects to host VM).
   session_state="unknown"
+  container_id=""
   if [[ -n "$ssh_host" ]]; then
-    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$ssh_port" "$ssh_host" "tmux has-session -t job_${job_id} 2>/dev/null" >/dev/null 2>&1; then
-      session_state="running"
-    elif ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$ssh_port" "$ssh_host" "true" >/dev/null 2>&1; then
-      session_state="finished"
+    # shellcheck disable=SC2086
+    if ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" "true" >/dev/null 2>&1; then
+      container_id="$(get_container_id "$ssh_host" "$ssh_port")"
+      if [[ -n "$container_id" ]]; then
+        # shellcheck disable=SC2086
+        if ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" \
+            "docker exec $container_id tmux has-session -t job_${job_id} 2>/dev/null" >/dev/null 2>&1; then
+          session_state="running"
+        else
+          session_state="finished"
+        fi
+      else
+        # Container not running — instance may be booting or crashed
+        session_state="finished"
+      fi
     else
       session_state="unreachable"
     fi
@@ -67,7 +115,8 @@ for lease_file in "$REPO_ROOT"/registry/spool/*_lease.json; do
   if [[ "$session_state" = "finished" ]]; then
     echo "Finished session for $job_id."
     [ "$dry_run" -eq 0 ] && {
-      "$SCRIPT_DIR/runpod_collect.sh" "$ssh_host" "$ssh_port" "$job_id" 2>/dev/null || true
+      pre_collect_from_container "$job_id" "$ssh_host" "$ssh_port" "$container_id"
+      SSH_IDENTITY_FILE="$SSH_KEY_FILE" "$SCRIPT_DIR/runpod_collect.sh" "$ssh_host" "$ssh_port" "$job_id" 2>/dev/null || true
       "$SCRIPT_DIR/shadeform_cleanup.sh" --job-id "$job_id" --reason "reconcile_completed"
     }
     continue

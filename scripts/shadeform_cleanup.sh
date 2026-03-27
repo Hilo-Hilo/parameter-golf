@@ -64,7 +64,7 @@ if [[ "$dry_run" -eq 0 ]]; then
       if [[ "$status_before" = "deleted" ]] || [[ "$status_before" = "unknown" ]]; then
         action_applied="none"
       else
-        curl -s -X DELETE -H "X-API-KEY: $SHADEFORM_API_KEY" "$SHADEFORM_API/instances/$instance_id/delete" >/dev/null 2>&1 || true
+        curl -s -X POST -H "X-API-KEY: $SHADEFORM_API_KEY" "$SHADEFORM_API/instances/$instance_id/delete" >/dev/null 2>&1 || true
         action_applied="down"
       fi
       ;;
