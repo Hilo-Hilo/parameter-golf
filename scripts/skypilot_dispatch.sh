@@ -317,18 +317,18 @@ setup: |
   # IMPORTANT: Install to system Python (not the SkyPilot venv) so SSH sessions can find them.
   # Deactivate any venv first, then use sudo pip3 to install system-wide.
   deactivate 2>/dev/null || true
-  sudo /usr/bin/pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu128 || \
+  # Install torch 2.5.1+cu124 (has matching flash-attn wheels available)
+  sudo /usr/bin/pip3 install --no-cache-dir torch==2.5.1 --index-url https://download.pytorch.org/whl/cu124 || \
     sudo /usr/bin/pip3 install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cu124 || \
     sudo /usr/bin/pip3 install --no-cache-dir torch
-  sudo /usr/bin/pip3 install --no-cache-dir sentencepiece huggingface_hub numpy zstandard || true
-  # Flash Attention 3 (required by SOTA PR #549 train_gpt.py)
-  sudo /usr/bin/pip3 install --no-cache-dir flash-attn --no-build-isolation 2>/dev/null || \
-    sudo /usr/bin/pip3 install --no-cache-dir flash-attn 2>/dev/null || \
-    echo "WARNING: flash-attn install failed — SOTA recipe may not work"
-  # Verify system python can import torch
-  /usr/bin/python3 -c "import torch; print(f'System torch={torch.__version__}, cuda={torch.cuda.is_available()}')"
-  # Ensure torchrun is on PATH (sudo pip installs to /usr/local/bin)
-  which torchrun || echo "WARNING: torchrun not found on PATH"
+  sudo /usr/bin/pip3 install --no-cache-dir sentencepiece huggingface_hub numpy zstandard psutil ninja || true
+  # Flash Attention 2 (build from source for H100 Hopper arch, ~5 min with ninja+MAX_JOBS)
+  sudo PATH=\$PATH:/usr/local/cuda/bin TORCH_CUDA_ARCH_LIST='9.0' MAX_JOBS=8 \
+    /usr/bin/pip3 install --no-cache-dir --no-build-isolation flash-attn || \
+    echo "WARNING: flash-attn build failed — will use PyTorch SDPA fallback"
+  /usr/bin/python3 -c "import torch; print(f'torch={torch.__version__}, cuda={torch.cuda.is_available()}')"
+  /usr/bin/python3 -c "from flash_attn import flash_attn_func; print('flash-attn OK')" 2>/dev/null || echo "flash-attn not available"
+  which torchrun || echo "WARNING: torchrun not found"
 YAML
 
 # ---------------------------------------------------------------------------
