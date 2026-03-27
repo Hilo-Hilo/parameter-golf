@@ -13,22 +13,29 @@ Optimize exact final roundtrip `val_bpb` under challenge constraints:
 
 ## Research Strategy
 
-**The repo root `train_gpt.py` IS the current SOTA (PR #549, 1.1194 bpb).** Your job is to beat it.
+**The repo root `train_gpt.py` is the STOCK trainer (not PR #549).** Our 8xH100 baseline: 1.1797 bpb. Upstream SOTA: 1.1194 bpb. Your job is to close the gap.
 
-### What's already in train_gpt.py
-- LeakyReLU(0.5)^2 activation
-- Legal score-first TTT
-- Parallel Muon optimizer
-- 10L d496 architecture, 3x MLP, GQA
+### What train_gpt.py currently has
+- relu^2 activation, Muon optimizer, SWA, sliding window eval
+- 10L d496 architecture, 3x MLP, GQA, TTT (3 epoch default)
+- int6+zlib serialization
 
-### Promising improvement directions (from upstream PRs)
-1. **GPTQ-lite clip search** (PR #414): 5 clip percentiles per row for better quantization. Zero training cost. -0.001 bpb.
-2. **EMA weight averaging** (PR #414): decay=0.997 every step, stacks with SWA. -0.001 bpb.
-3. **Partial RoPE** (PR #315): Only 16/64 head dims get rotary embeddings. -0.002 bpb.
+### BANNED: n-gram rescoring / n-gram cache
+Do NOT propose n-gram eval rescoring, n-gram cache, n-gram backoff, or any variant.
+These have been rejected 4+ times by governance and are blocked.
+
+### Promising TRAINING improvement directions (code changes to train_gpt.py)
+1. **LeakyReLU(0.5)^2** (PR #549): Change `torch.relu(x).square()` to `F.leaky_relu(x, 0.5).square()` in the MLP. -0.003 bpb. ONE LINE CHANGE.
+2. **EMA weight averaging** (PR #414): Add exponential moving average (decay=0.997) every step, stack with SWA. -0.001 bpb.
+3. **Partial RoPE** (PR #315): Apply RoPE to only 16/64 head dims. -0.002 bpb.
 4. **Layerwise LN scale** (PR #315): Scale layernorm by 1/sqrt(layer_idx+1). -0.001 bpb.
-5. **XSA on last 4 layers** (PR #315): Cross-sequence attention. -0.002 bpb.
+5. **GPTQ-lite clip search** (PR #414): 5 clip percentiles per row in quantization. Zero training cost. -0.001 bpb.
 6. **QAT injection** (PR #414): Quantization-aware training from 15% through training. -0.001 bpb.
-7. **Better compression**: lzma or zstd-22 instead of zlib. Saves ~500KB.
+7. **Better compression**: lzma or zstd-22 instead of zlib. Saves ~500KB headroom.
+
+### Priority: start with LeakyReLU(0.5)^2
+This is the single biggest improvement (+0.003 bpb) and is a one-line code change.
+Find the relu^2 activation in the MLP and change it. Then add other improvements incrementally.
 
 ### How to iterate
 - Edit `train_gpt.py` in your worktree with targeted code changes
