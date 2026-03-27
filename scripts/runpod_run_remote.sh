@@ -64,8 +64,8 @@ if [ "$REQ_GPU_COUNT" = "1" ]; then
   proxy_train="${MAX_WALLCLOCK_SECONDS:-4800}"
   DEFAULT_OUTER_TIMEOUT_SECONDS="$(( proxy_train + 5400 ))"
 else
-  # 8xH100: 600s training + 60s compile + 600s eval/TTT/quant = ~1260s. Use 1800s for safety.
-  DEFAULT_OUTER_TIMEOUT_SECONDS="1800"
+  # 8xH100: 600s training + 60s compile + 200s eval + up to 1800s TTT = ~2660s. Use 3600s.
+  DEFAULT_OUTER_TIMEOUT_SECONDS="3600"
 fi
 OUTER_TIMEOUT_SECONDS="${RUNPOD_OUTER_TIMEOUT_SECONDS:-$DEFAULT_OUTER_TIMEOUT_SECONDS}"
 
