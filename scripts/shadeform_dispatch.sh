@@ -118,11 +118,16 @@ sf_create_instance() {
     creds_json="$(jq -n --arg u "$DOCKER_USERNAME" --arg p "$DOCKER_PASSWORD" '{username:$u,password:$p}')"
   fi
   # Build payload with jq to avoid shell quoting / escaping issues.
+  # Omit shared_memory_in_gb to get --ipc=host (better for NCCL on multi-GPU).
+  # Omit registry_credentials entirely when null (API rejects explicit null).
   local docker_cfg
   docker_cfg="$(jq -n \
     --arg image "$DOCKER_IMAGE" \
     --argjson creds "$creds_json" \
-    '{image: $image, shared_memory_in_gb: 8, registry_credentials: $creds}')"
+    'if $creds != null
+     then {image: $image, registry_credentials: $creds}
+     else {image: $image}
+     end')"
   jq -n \
     --arg cloud "$CLOUD" \
     --arg region "$REGION" \
@@ -199,6 +204,7 @@ INSTANCE_NAME=""
 INSTANCE_IP=""
 INSTANCE_SOURCE="created"
 SSH_USER_API=""
+SSH_PORT_API=""
 CONTAINER_ID=""
 
 # ---------------------------------------------------------------------------
@@ -242,6 +248,7 @@ if [ -n "$INSTANCE_ID" ]; then
   INSTANCE_IP="$(echo "$INSTANCE_INFO" | jq -r '.ip // empty')"
   INSTANCE_NAME="$(echo "$INSTANCE_INFO" | jq -r '.name // empty')"
   SSH_USER_API="$(echo "$INSTANCE_INFO" | jq -r '.ssh_user // empty')"
+  SSH_PORT_API="$(echo "$INSTANCE_INFO" | jq -r '.ssh_port // empty')"
   announce "Reusing existing instance $INSTANCE_ID ($INSTANCE_NAME)"
 else
   INSTANCE_NAME="$(build_instance_name)"
@@ -276,11 +283,12 @@ if [ -z "$INSTANCE_IP" ]; then
     STATUS="$(echo "$INFO" | jq -r '.status // "unknown"')"
     INSTANCE_IP="$(echo "$INFO" | jq -r '.ip // empty')"
     SSH_USER_API="$(echo "$INFO" | jq -r '.ssh_user // empty')"
+    SSH_PORT_API="$(echo "$INFO" | jq -r '.ssh_port // empty')"
     if [ "$STATUS" = "active" ] && [ -n "$INSTANCE_IP" ] && [ "$INSTANCE_IP" != "null" ]; then
       announce "Instance active at $INSTANCE_IP"
       break
     fi
-    if [ "$STATUS" = "error" ] || [ "$STATUS" = "deleted" ]; then
+    if [ "$STATUS" = "error" ] || [ "$STATUS" = "deleted" ] || [ "$STATUS" = "deleting" ]; then
       announce "Error: instance entered $STATUS state." >&2
       exit 1
     fi
@@ -298,7 +306,7 @@ fi
 # ---------------------------------------------------------------------------
 # Use ssh_user from Shadeform API (typically "shadeform" on Hyperstack).
 SSH_USER="${SSH_USER_API:-shadeform}"
-SSH_PORT="22"
+SSH_PORT="${SSH_PORT_API:-22}"
 SSH_KEY_FILE="${SHADEFORM_SSH_KEY_FILE:-$HOME/.shadeform/ssh_key}"
 
 if [ ! -f "$SSH_KEY_FILE" ]; then
@@ -341,7 +349,7 @@ wait_for_container() {
 
 container_exec() {
   # Run a shell command string inside the Docker container via stdin pipe.
-  printf '%s\n' "$1" | ssh_remote "docker exec -i $CONTAINER_ID bash -s"
+  printf '%s\n' "$1" | ssh_remote "docker exec -i \"$CONTAINER_ID\" bash -s"
 }
 
 container_copy_to() {
@@ -349,7 +357,7 @@ container_copy_to() {
   local local_src="$1" container_dst="$2"
   local tmp_host="/tmp/_sf_xfer_$$_$(basename "$local_src")"
   scp_to_remote "$local_src" "$tmp_host"
-  ssh_remote "docker cp $tmp_host $CONTAINER_ID:$container_dst && rm -f $tmp_host"
+  ssh_remote "docker cp \"$tmp_host\" \"${CONTAINER_ID}:${container_dst}\" && rm -f \"$tmp_host\""
 }
 
 announce "Waiting for SSH on ${SSH_USER}@${INSTANCE_IP}..."
