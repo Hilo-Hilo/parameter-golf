@@ -13,7 +13,8 @@ SHADEFORM_API="https://api.shadeform.ai/v1"
 
 SSH_KEY_FILE="${SHADEFORM_SSH_KEY_FILE:-$HOME/.shadeform/ssh_key}"
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR"
-[ -f "$SSH_KEY_FILE" ] && SSH_OPTS="$SSH_OPTS -i $SSH_KEY_FILE"
+SSH_ID_OPT=()
+[ -f "$SSH_KEY_FILE" ] && SSH_ID_OPT=(-i "$SSH_KEY_FILE")
 
 dry_run=0; filter_job_id=""
 while [[ $# -gt 0 ]]; do
@@ -24,7 +25,7 @@ done
 get_container_id() {
   local ssh_host="$1" ssh_port="$2"
   # shellcheck disable=SC2086
-  ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" "docker ps --format '{{.ID}}' | head -1" 2>/dev/null || echo ''
+  ssh $SSH_OPTS "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" "docker ps --format '{{.ID}}' | head -1" 2>/dev/null || echo ''
 }
 
 # Copy experiment artifacts from inside the Docker container to the host VM's
@@ -33,7 +34,7 @@ pre_collect_from_container() {
   local job_id="$1" ssh_host="$2" ssh_port="$3" cid="$4"
   [ -z "$cid" ] && return 0
   # shellcheck disable=SC2086
-  ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" "
+  ssh $SSH_OPTS "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" "
     JOB=\"$job_id\"
     CID=\"$cid\"
     for src in \
@@ -83,8 +84,13 @@ for lease_file in "$REPO_ROOT"/registry/spool/*_lease.json; do
   inst_status="$(curl -s -H "X-API-KEY: $SHADEFORM_API_KEY" "$SHADEFORM_API/instances/$instance_id/info" 2>/dev/null | jq -r '.status // "unknown"' || echo "unknown")"
   echo "Reconciling $job_id instance=$instance_id ($inst_status)..."
 
-  if [[ "$inst_status" = "deleted" ]] || [[ "$inst_status" = "unknown" ]]; then
+  if [[ "$inst_status" = "deleted" ]]; then
     [ "$dry_run" -eq 0 ] && "$SCRIPT_DIR/shadeform_cleanup.sh" --job-id "$job_id" --action none --reason "reconcile_deleted"
+    continue
+  fi
+  if [[ "$inst_status" = "unknown" ]]; then
+    # API call failed transiently — skip this cycle rather than prematurely releasing the lease.
+    echo "API returned unknown status for $job_id; skipping cycle."
     continue
   fi
 
@@ -93,12 +99,12 @@ for lease_file in "$REPO_ROOT"/registry/spool/*_lease.json; do
   container_id=""
   if [[ -n "$ssh_host" ]]; then
     # shellcheck disable=SC2086
-    if ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" "true" >/dev/null 2>&1; then
+    if ssh $SSH_OPTS "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" "true" >/dev/null 2>&1; then
       container_id="$(get_container_id "$ssh_host" "$ssh_port")"
       if [[ -n "$container_id" ]]; then
         # shellcheck disable=SC2086
-        if ssh $SSH_OPTS -p "$ssh_port" "$ssh_host" \
-            "docker exec $container_id tmux has-session -t job_${job_id} 2>/dev/null" >/dev/null 2>&1; then
+        if ssh $SSH_OPTS "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" \
+            "docker exec \"$container_id\" tmux has-session -t job_${job_id} 2>/dev/null" >/dev/null 2>&1; then
           session_state="running"
         else
           session_state="finished"

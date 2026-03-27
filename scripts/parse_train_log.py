@@ -219,7 +219,7 @@ def build_row(args: argparse.Namespace) -> dict[str, object]:
     status, reasons = finalize_status(
         requested_status=args.status,
         exit_code=args.exit_code,
-        exact_final_val_bpb=to_float(exact_final_val_bpb),
+        exact_final_val_bpb=exact_final_val_bpb,
         bytes_total=to_int(bytes_total),
         max_bytes=args.max_bytes,
     )

@@ -231,12 +231,13 @@ trap dispatch_cleanup EXIT
 
 # Check for reusable active instance (same prefix, not leased)
 LEASED_IDS="$(active_leased_instances | paste -sd, -)"
-INSTANCE_ID="$(sf_list_instances | python3 -c "
-import json, sys
-leased = set('$LEASED_IDS'.split(',')) - {''}
+INSTANCE_ID="$(sf_list_instances | LEASED_IDS="$LEASED_IDS" POD_PREFIX="$POD_PREFIX" python3 -c "
+import json, os, sys
+leased = set(os.environ['LEASED_IDS'].split(',')) - {''}
+pod_prefix = os.environ['POD_PREFIX']
 data = json.load(sys.stdin)
 for inst in data.get('instances', []):
-    if inst.get('status') == 'active' and inst.get('name','').startswith('$POD_PREFIX'):
+    if inst.get('status') == 'active' and inst.get('name','').startswith(pod_prefix):
         iid = inst.get('id','')
         if iid not in leased:
             print(iid); raise SystemExit(0)
