@@ -302,7 +302,7 @@ log_event \
 # Generate SkyPilot task YAML
 # ---------------------------------------------------------------------------
 
-TASK_YAML="$(mktemp /tmp/skypilot_task_XXXXXX.yaml)"
+TASK_YAML="$(mktemp /tmp/skypilot_task_XXXXXXXXXX).yaml"
 cat > "$TASK_YAML" <<YAML
 resources:
   accelerators: $ACCELERATORS
