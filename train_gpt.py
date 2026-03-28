@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    ttt_q_only = bool(int(os.environ.get("TTT_Q_ONLY", "0")))  # Q-only qTTT mode
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1118,25 +1120,48 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
-    frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
-    for name, p in base_model.named_parameters():
-        freeze = False
-        for bi in frozen_block_ids:
-            if f"blocks.{bi}." in name:
-                freeze = True
-                break
-        if freeze:
+    # Select TTT parameters based on mode
+    ttt_hook = None
+    if args.ttt_q_only:
+        # qTTT: only adapt Q projections (rows 0..num_layers-1 of qo_bank).
+        # Zero O-row gradients via hook so O weights are never updated.
+        for p in base_model.parameters():
             p.requires_grad_(False)
-        else:
-            p.requires_grad_(True)
-            ttt_params.append(p)
+        base_model.qo_bank.requires_grad_(True)
+        ttt_params = [base_model.qo_bank]
+        num_layers_model = base_model.qo_bank.shape[0] // 2
+        def _mask_o_grad(grad):
+            if grad is not None:
+                g = grad.clone()
+                g[num_layers_model:] = 0.0
+                return g
+            return grad
+        ttt_hook = base_model.qo_bank.register_hook(_mask_o_grad)
+    else:
+        # Original: freeze first N blocks, unfreeze rest
+        frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+        ttt_params = []
+        for name, p in base_model.named_parameters():
+            freeze = False
+            for bi in frozen_block_ids:
+                if f"blocks.{bi}." in name:
+                    freeze = True
+                    break
+            if freeze:
+                p.requires_grad_(False)
+            else:
+                p.requires_grad_(True)
+                ttt_params.append(p)
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
+         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)} "
+         f"optimizer={args.ttt_optimizer} q_only={args.ttt_q_only}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0,
+                                      betas=(0.9, 0.95))
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1231,6 +1256,8 @@ def eval_val_sliding_ttt(
     val_loss = (loss_sum / token_count).item()
     val_bpb = val_loss / math.log(2.0) * (token_count.item() / byte_count.item())
 
+    if ttt_hook is not None:
+        ttt_hook.remove()
     for p in base_model.parameters():
         p.requires_grad_(True)
     base_model.eval()
