@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
+    ttt_grad_accum = int(os.environ.get("TTT_GRAD_ACCUM", "1"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1138,14 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_muon:
+        # Muon NS5 TTT: per-parameter BF16 momentum buffers, no SGD optimizer
+        ttt_mom = {id(p): torch.zeros_like(p.data, dtype=torch.bfloat16) for p in ttt_params}
+        optimizer = None
+        log0(f"ttt_sliding:using Muon NS5 optimizer grad_accum={args.ttt_grad_accum}")
+    else:
+        ttt_mom = {}
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,11 +1199,18 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if not args.ttt_muon:
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
+                else:
+                    # Zero any leftover accumulated gradients from prior chunk
+                    for p in ttt_params:
+                        if p.grad is not None:
+                            p.grad.zero_()
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
+                micro_step_count = 0
                 for _ep in range(args.ttt_epochs):
                     for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
@@ -1206,16 +1222,44 @@ def eval_val_sliding_ttt(
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
-                        optimizer.zero_grad(set_to_none=True)
+                        if not args.ttt_muon:
+                            optimizer.zero_grad(set_to_none=True)
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
-                        loss.backward()
-                        if world_size > 1:
-                            for p in ttt_params:
-                                if p.grad is not None:
-                                    dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
-                        torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
-                        optimizer.step()
+                        loss_scale = 1.0 / args.ttt_grad_accum
+                        (loss * loss_scale).backward()
+                        micro_step_count += 1
+                        if not args.ttt_muon:
+                            if world_size > 1:
+                                for p in ttt_params:
+                                    if p.grad is not None:
+                                        dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+                            torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
+                            optimizer.step()
+                        elif micro_step_count % args.ttt_grad_accum == 0:
+                            # Muon NS5 update: accumulate gradients then apply
+                            if world_size > 1:
+                                for p in ttt_params:
+                                    if p.grad is not None:
+                                        dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+                            with torch.no_grad():
+                                for p in ttt_params:
+                                    if p.grad is None:
+                                        continue
+                                    g = p.grad.bfloat16()
+                                    mom = ttt_mom[id(p)]
+                                    mom.mul_(args.ttt_momentum).add_(g)
+                                    g_nesterov = g.add(mom, alpha=args.ttt_momentum)
+                                    if g_nesterov.ndim >= 2:
+                                        orig_shape = g_nesterov.shape
+                                        g2d = g_nesterov.reshape(-1, g_nesterov.shape[-1])
+                                        g2d = zeropower_via_newtonschulz5(g2d, steps=5)
+                                        scale = max(1.0, g2d.size(-2) / g2d.size(-1)) ** 0.5
+                                        g_update = g2d.reshape(orig_shape).mul_(scale)
+                                    else:
+                                        g_update = g_nesterov
+                                    p.data.add_(g_update.to(dtype=p.dtype), alpha=-cos_lr)
+                                    p.grad.zero_()
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
