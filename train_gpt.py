@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
+    ttt_ns_steps = int(os.environ.get("TTT_NS_STEPS", 5))
+    ttt_params_target = os.environ.get("TTT_PARAMS_TARGET", "all")  # "all", "mlp", "attn"
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -132,6 +135,29 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 5, eps: float = 1e-7) ->
     if was_2d:
         X = X.squeeze(0)
     return X
+
+class _MuonTTT(torch.optim.Optimizer):
+    """Muon-style optimizer for TTT: NS orthogonalization for 2D+ params, momentum for 1D."""
+    def __init__(self, params, lr: float, momentum: float = 0.9, ns_steps: int = 5):
+        super().__init__(params, dict(lr=lr, momentum=momentum, ns_steps=ns_steps))
+    def step(self, closure=None):
+        for group in self.param_groups:
+            lr, mu, ns = group['lr'], group['momentum'], group['ns_steps']
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                g = p.grad.detach()
+                state = self.state[p]
+                if 'mom' not in state:
+                    state['mom'] = torch.zeros_like(g)
+                buf = state['mom']
+                buf.mul_(mu).add_(g)
+                if g.ndim >= 2:
+                    update = zeropower_via_newtonschulz5(buf.float(), steps=ns).to(p.dtype)
+                    scale = max(1.0, float(update.size(-2)) / float(update.size(-1))) ** 0.5
+                    p.data.add_(update, alpha=-lr * scale)
+                else:
+                    p.data.add_(buf, alpha=-lr)
 
 # --- Parallel Muon optimizer ---
 
@@ -1118,8 +1144,19 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
+    # Freeze first N blocks; optionally restrict to mlp or attn params
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+    _target = args.ttt_params_target
+    def _keep_by_target(name: str) -> bool:
+        if _target == "all":
+            return True
+        if _target == "mlp":
+            return ("mlp_up_bank" in name or "mlp_down_bank" in name or
+                    ".mlp." in name or "mlp_norm" in name or "mlp_scale" in name)
+        if _target == "attn":
+            return ("qo_bank" in name or "kv_bank" in name or
+                    ".attn." in name or "attn_norm" in name or "attn_scale" in name)
+        return True
     ttt_params = []
     for name, p in base_model.named_parameters():
         freeze = False
@@ -1127,16 +1164,22 @@ def eval_val_sliding_ttt(
             if f"blocks.{bi}." in name:
                 freeze = True
                 break
+        if not freeze and not _keep_by_target(name):
+            freeze = True
         if freeze:
             p.requires_grad_(False)
         else:
             p.requires_grad_(True)
             ttt_params.append(p)
 
-    log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
+    log0(f"ttt_sliding:params target={_target} unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_muon:
+        optimizer = _MuonTTT(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum,
+                             ns_steps=args.ttt_ns_steps)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
