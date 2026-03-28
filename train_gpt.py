@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1214,6 +1215,22 @@ def eval_val_sliding_ttt(
                             for p in ttt_params:
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+                        if args.ttt_perlayer_lr:
+                            nb = len(base_model.blocks)
+                            fr = args.ttt_freeze_blocks
+                            for li in range(fr, nb):
+                                depth = (li - fr) / max(nb - 1 - fr, 1)
+                                mult = 0.5 + 0.5 * depth
+                                if base_model.qo_bank.grad is not None:
+                                    base_model.qo_bank.grad[li].mul_(mult)
+                                    base_model.qo_bank.grad[nb + li].mul_(mult)
+                                if base_model.kv_bank.grad is not None:
+                                    base_model.kv_bank.grad[li].mul_(mult)
+                                    base_model.kv_bank.grad[nb + li].mul_(mult)
+                                if base_model.mlp_up_bank.grad is not None:
+                                    base_model.mlp_up_bank.grad[li].mul_(mult)
+                                if base_model.mlp_down_bank.grad is not None:
+                                    base_model.mlp_down_bank.grad[li].mul_(mult)
                         torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
                         optimizer.step()
 
