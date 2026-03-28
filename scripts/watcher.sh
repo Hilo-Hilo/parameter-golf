@@ -55,24 +55,24 @@ get_shadeform_container_id() {
     "docker ps --format '{{.ID}}' | head -1" 2>/dev/null || echo ''
 }
 
-# Copy experiment artifacts out of the container to the host VM filesystem
-# so runpod_collect.sh can rsync them down normally.
+# Copy experiment artifacts directly from the container to the Mac via tar pipe
+# over SSH. Bypasses the host VM filesystem (which has no /workspace).
 pre_collect_from_container() {
   local job_id="$1" ssh_host="$2" ssh_port="$3" cid="$4"
   [ -z "$cid" ] && return 0
-  ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" "
-    JOB=\"$job_id\"; CID=\"$cid\"
-    for src in /workspace/parameter-golf/experiments/\$JOB /workspace/jobs/\$JOB/experiments/\$JOB; do
-      docker exec \"\$CID\" test -d \"\$src\" 2>/dev/null || continue
-      parent=\"\$(dirname \"\$src\")\"; mkdir -p \"\$parent\"
-      docker cp \"\$CID\":\"\$src\" \"\$parent/\" 2>/dev/null || true
-    done
-    SPOOL=/workspace/parameter-golf/registry/spool/\$JOB.json
-    if docker exec \"\$CID\" test -f \"\$SPOOL\" 2>/dev/null; then
-      mkdir -p \"\$(dirname \"\$SPOOL\")\"
-      docker cp \"\$CID\":\"\$SPOOL\" \"\$SPOOL\" 2>/dev/null || true
-    fi
-  " 2>/dev/null || true
+  local local_exp_parent="$MAIN_CHECKOUT/experiments"
+  local local_spool_dir="$MAIN_CHECKOUT/registry/spool"
+  mkdir -p "$local_exp_parent" "$local_spool_dir"
+  for src in "/workspace/parameter-golf/experiments/$job_id" \
+             "/workspace/jobs/$job_id/experiments/$job_id"; do
+    ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" \
+      "docker exec \"$cid\" test -d \"$src\" 2>/dev/null && docker cp \"$cid\":\"$src\" - 2>/dev/null" \
+      2>/dev/null | tar xf - -C "$local_exp_parent/" 2>/dev/null || true
+  done
+  ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" \
+    "docker exec \"$cid\" test -f \"/workspace/parameter-golf/registry/spool/${job_id}.json\" 2>/dev/null && \
+     docker cp \"$cid\":\"/workspace/parameter-golf/registry/spool/${job_id}.json\" - 2>/dev/null" \
+    2>/dev/null | tar xf - -C "$local_spool_dir/" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
