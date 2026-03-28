@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -737,6 +738,16 @@ class MLP(nn.Module):
         super().__init__()
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
+        if CastedLinear._qat_enabled and self.training:
+            with torch.no_grad():
+                up_w32 = up_w.float()
+                s_up = (up_w32.abs().amax(dim=1) / 31.0).clamp_min(1.0 / 31.0)
+                up_w_q = (torch.clamp(torch.round(up_w32 / s_up[:, None]), -31, 31) * s_up[:, None]).to(up_w.dtype)
+                dn_w32 = down_w.float()
+                s_dn = (dn_w32.abs().amax(dim=1) / 31.0).clamp_min(1.0 / 31.0)
+                dn_w_q = (torch.clamp(torch.round(dn_w32 / s_dn[:, None]), -31, 31) * s_dn[:, None]).to(down_w.dtype)
+            up_w = up_w + (up_w_q - up_w).detach()
+            down_w = down_w + (dn_w_q - down_w).detach()
         x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
         return F.linear(x.square(), down_w.to(x.dtype))
 
@@ -1136,7 +1147,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1817,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
