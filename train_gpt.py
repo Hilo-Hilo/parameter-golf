@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_muon = bool(int(os.environ.get("TTT_USE_MUON", "0")))
+    ttt_ema_decay = float(os.environ.get("TTT_EMA_DECAY", "0.0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -132,6 +134,27 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 5, eps: float = 1e-7) ->
     if was_2d:
         X = X.squeeze(0)
     return X
+
+
+@torch.no_grad()
+def muon_ttt_step(
+    params: list, lr: float, momentum_buffers: list, momentum: float = 0.9
+) -> None:
+    """Muon (NS5) optimizer step for TTT. Modifies params and buffers in-place."""
+    for p, buf in zip(params, momentum_buffers):
+        if p.grad is None:
+            continue
+        g = p.grad.bfloat16()
+        buf.mul_(momentum).add_(g)
+        if p.ndim >= 2:
+            update = g.add(buf, alpha=momentum)
+            update = zeropower_via_newtonschulz5(update, steps=5)
+            scale = max(1.0, update.shape[-2] / update.shape[-1]) ** 0.5
+        else:
+            update = g.add(buf, alpha=momentum)
+            scale = 1.0
+        p.data.add_(update.to(p.dtype), alpha=-lr * scale)
+
 
 # --- Parallel Muon optimizer ---
 
@@ -1136,7 +1159,15 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_use_muon:
+        muon_mom_bufs = [torch.zeros_like(p, dtype=torch.bfloat16) for p in ttt_params]
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_ema_decay > 0.0:
+        ema_model = copy.deepcopy(base_model)
+        ema_model.eval()
+    else:
+        ema_model = None
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1151,7 +1182,8 @@ def eval_val_sliding_ttt(
         my_e = (len(windows) * (rank + 1)) // world_size
         my_windows = windows[my_s:my_e]
 
-        base_model.eval()
+        score_model = ema_model if ema_model is not None else base_model
+        score_model.eval()
         with torch.no_grad():
             for bi in range(0, len(my_windows), batch_seqs):
                 batch_ws = my_windows[bi:bi + batch_seqs]
@@ -1167,7 +1199,7 @@ def eval_val_sliding_ttt(
                     x_batch[i, :wlen] = chunk_tok[:-1]
                     y_batch[i, :wlen] = chunk_tok[1:]
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits = base_model.forward_logits(x_batch)
+                    logits = score_model.forward_logits(x_batch)
                 nll = F.cross_entropy(
                     logits.reshape(-1, logits.size(-1)).float(),
                     y_batch.reshape(-1), reduction="none",
@@ -1190,8 +1222,9 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if not args.ttt_use_muon:
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1206,7 +1239,12 @@ def eval_val_sliding_ttt(
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
-                        optimizer.zero_grad(set_to_none=True)
+                        if args.ttt_use_muon:
+                            for p in ttt_params:
+                                if p.grad is not None:
+                                    p.grad.zero_()
+                        else:
+                            optimizer.zero_grad(set_to_none=True)
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
@@ -1215,7 +1253,15 @@ def eval_val_sliding_ttt(
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
                         torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
-                        optimizer.step()
+                        if args.ttt_use_muon:
+                            muon_ttt_step(ttt_params, cos_lr, muon_mom_bufs, args.ttt_momentum)
+                        else:
+                            optimizer.step()
+                if ema_model is not None:
+                    decay = args.ttt_ema_decay
+                    with torch.no_grad():
+                        for p_ema, p_base in zip(ema_model.parameters(), base_model.parameters()):
+                            p_ema.data.mul_(decay).add_(p_base.data, alpha=1.0 - decay)
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
