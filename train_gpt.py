@@ -101,7 +101,9 @@ class Hyperparameters:
     ve_layers = os.environ.get("VE_LAYERS", "9,10")
     gated_attention = bool(int(os.environ.get("GATED_ATTENTION", "0")))
     value_residual = bool(int(os.environ.get("VALUE_RESIDUAL", "0")))
+    silu_v = bool(int(os.environ.get("SILU_V", "0")))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "0")))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
     ttt_lr = float(os.environ.get("TTT_LR", 0.002))
     ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
     ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 32768))
@@ -620,6 +622,7 @@ class CausalSelfAttention(nn.Module):
         qk_gain_init: float,
         gated_attention: bool = False,
         value_residual: bool = False,
+        silu_v: bool = False,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -645,6 +648,7 @@ class CausalSelfAttention(nn.Module):
         self.value_residual = value_residual
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
+        self.silu_v = silu_v
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
         """Efficient XSA: subtract self-value projection via GQA-aware reshape (no repeat_interleave).
         y: [B, T, H, D], v: [B, T, Hkv, D]. H must be divisible by Hkv."""
@@ -662,6 +666,8 @@ class CausalSelfAttention(nn.Module):
         v = F.linear(x, v_w.to(x.dtype))
         if v_embed is not None:
             v = v + v_embed
+        if self.silu_v:
+            v = F.silu(v)
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
@@ -754,12 +760,14 @@ class Block(nn.Module):
         dtg: bool = False,
         gated_attention: bool = False,
         value_residual: bool = False,
+        silu_v: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init,
-                                        gated_attention=gated_attention, value_residual=value_residual)
+                                        gated_attention=gated_attention, value_residual=value_residual,
+                                        silu_v=silu_v)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -809,6 +817,7 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        silu_v: bool = False,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -850,6 +859,7 @@ class GPT(nn.Module):
                     dtg=dtg,
                     gated_attention=gated_attention,
                     value_residual=value_residual,
+                    silu_v=silu_v,
                 )
                 for i in range(num_layers)
             ]
@@ -1136,7 +1146,16 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    ttt_opt_name = getattr(args, "ttt_optimizer", "sgd")
+    if ttt_opt_name == "muon":
+        # Simplified Muon for TTT: per-step NS5 orthogonalization, no momentum state
+        optimizer = None
+        ttt_muon_matrix = [p for p in ttt_params if p.ndim >= 2 and min(p.shape) >= 2]
+        ttt_muon_scalar = [p for p in ttt_params if not any(p is mp for mp in ttt_muon_matrix)]
+        ttt_scalar_opt = torch.optim.SGD(ttt_muon_scalar, lr=args.ttt_lr, momentum=args.ttt_momentum) if ttt_muon_scalar else None
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+        ttt_muon_matrix, ttt_muon_scalar, ttt_scalar_opt = [], [], None
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,8 +1209,12 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if optimizer is not None:
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
+                if ttt_scalar_opt is not None:
+                    for pg in ttt_scalar_opt.param_groups:
+                        pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1206,7 +1229,12 @@ def eval_val_sliding_ttt(
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
-                        optimizer.zero_grad(set_to_none=True)
+                        if optimizer is not None:
+                            optimizer.zero_grad(set_to_none=True)
+                        else:
+                            for p in ttt_params:
+                                if p.grad is not None:
+                                    p.grad = None
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
@@ -1215,7 +1243,19 @@ def eval_val_sliding_ttt(
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
                         torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
-                        optimizer.step()
+                        if optimizer is not None:
+                            optimizer.step()
+                        else:
+                            # Muon TTT: NS5 orthogonalization then direct update
+                            for p in ttt_muon_matrix:
+                                if p.grad is None:
+                                    continue
+                                g = p.grad.float()
+                                g_orth = zeropower_via_newtonschulz5(g, steps=5)
+                                scale = max(1.0, g.shape[-2] / g.shape[-1]) ** 0.5
+                                p.data.add_(g_orth.to(p.dtype), alpha=-cos_lr * scale)
+                            if ttt_scalar_opt is not None:
+                                ttt_scalar_opt.step()
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
@@ -1490,6 +1530,7 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        silu_v=args.silu_v,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1803,7 +1844,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1833,6 +1874,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        silu_v=args.silu_v,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
