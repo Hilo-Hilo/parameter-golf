@@ -556,8 +556,13 @@ class CastedLinear(nn.Linear):
         if CastedLinear._qat_enabled and self.training and w.ndim == 2:
             with torch.no_grad():
                 w32 = self.weight.float()
-                row_max = w32.abs().amax(dim=1)
-                scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
+                # Use 99.9th-percentile clip per row to remove outliers,
+                # aligning QAT STE with GPTQ-lite final quantization and reducing
+                # the train/inference quantization mismatch.
+                ncols = w32.shape[1]
+                k = max(1, ncols // 1000)  # top-k outliers to skip per row
+                row_clip = torch.topk(w32.abs(), k + 1, dim=1, largest=True).values[:, k]
+                scale = (row_clip / 31.0).clamp_min(1.0 / 31.0)
                 w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -32, 31) * scale[:, None]).to(x.dtype)
             w = w + (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
@@ -1803,7 +1808,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
