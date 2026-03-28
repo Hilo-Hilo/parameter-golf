@@ -134,13 +134,23 @@ This repo is state-driven. The supervisor loop calls `scripts/branch_cycle.sh <n
 
 - **`keep`**: The experiment produced a valid result (under 16M cap) that is our new best bpb. This is rare — only use for genuine breakthroughs.
 - **`branch`**: The experiment showed promise worth iterating on. **Use `branch` if ANY of these are true:**
-  - The result is under the 16M byte cap with bpb < 1.22 (competitive range)
+  - The result is under the 16M byte cap with bpb < 1.22 (competitive range) — **this is the default for any successful run**
   - The result is over cap but bpb < 1.19 (great quality, just needs byte optimization)
   - The approach introduced a technique that clearly improved pre-quant bpb vs prior runs
   - The run revealed a specific, testable next step (e.g. "reducing d_model from 512 to 496 would fit under cap")
 - **`discard`**: The experiment clearly failed — crashed, terrible bpb (>1.25), or no useful signal.
 
-**IMPORTANT: You have been discarding EVERY experiment so far (11/11 discards, 0 branches).** This is too aggressive. A valid under-cap result at 1.20 bpb IS worth branching from — it means the base recipe works and small tweaks (better quantization, TTT tuning, learning rate) could push it to 1.15. Prefer `branch` over `discard` when the result has any positive signal.
+**CRITICAL RULES FOR REFLECT — READ CAREFULLY:**
+
+1. **Do NOT use `success_criteria` as a hard gate for branching.** `success_criteria` in the plan is an aspirational target, not a pass/fail threshold. If the result is under cap and bpb < 1.22, it is ALWAYS worth branching regardless of whether `success_criteria` was met.
+
+2. **Fluctuations are normal and expected.** A result of 1.152 vs a target of 1.150 is a fluctuation of 0.002, not a failure. Do not discard results that are within 0.01 of a target.
+
+3. **The `exact_final_val_bpb` (roundtrip metric) is the primary metric, but if `legal_ttt_exact_val_bpb` is present and lower, note it — the TTT metric may be more meaningful for ranking.**
+
+4. **When in doubt, branch.** The cost of branching a mediocre result is low (one more run). The cost of discarding a good result is high (lost research direction). Default to `branch` unless the result is clearly bad (crash, bpb > 1.25, or bytes way over cap with no path to fix).
+
+5. **History reminder: the planner has been far too aggressive with discards.** Results at 1.15 bpb are significantly better than yesterday's 1.21+ baselines and deserve to be branched even if they miss an arbitrary target by 0.002.
 
 ## Run Pattern (Proposal Example)
 
