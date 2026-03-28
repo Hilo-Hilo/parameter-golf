@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_adamw = bool(int(os.environ.get("TTT_USE_ADAMW", "0")))
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_mult = float(os.environ.get("TTT_MLP_LR_MULT", "3.0"))
+    ttt_attn_lr_mult = float(os.environ.get("TTT_ATTN_LR_MULT", "0.5"))
+    ttt_cosepoch = bool(int(os.environ.get("TTT_COSEPOCH", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1120,7 +1125,7 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
+    ttt_named_params = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1131,12 +1136,28 @@ def eval_val_sliding_ttt(
             p.requires_grad_(False)
         else:
             p.requires_grad_(True)
-            ttt_params.append(p)
+            ttt_named_params.append((name, p))
+    ttt_params = [p for _, p in ttt_named_params]
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_use_adamw:
+        if args.ttt_perlayer_lr:
+            mlp_ps = [p for n, p in ttt_named_params if _classify_param(n) == "mlp"]
+            attn_ps = [p for n, p in ttt_named_params if _classify_param(n) == "attn"]
+            other_ps = [p for n, p in ttt_named_params if _classify_param(n) not in ("mlp", "attn")]
+            pgs = [
+                {"params": mlp_ps, "lr": args.ttt_lr * args.ttt_mlp_lr_mult, "base_lr_mult": args.ttt_mlp_lr_mult},
+                {"params": attn_ps, "lr": args.ttt_lr * args.ttt_attn_lr_mult, "base_lr_mult": args.ttt_attn_lr_mult},
+                {"params": other_ps, "lr": args.ttt_lr, "base_lr_mult": 1.0},
+            ]
+            pgs = [pg for pg in pgs if len(pg["params"]) > 0]
+            optimizer = torch.optim.AdamW(pgs, betas=(0.9, 0.999), weight_decay=0.0, eps=1e-8)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0, eps=1e-8)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,13 +1210,18 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if not args.ttt_cosepoch:
+                    chunk_lr_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = args.ttt_lr * pg.get("base_lr_mult", 1.0) * chunk_lr_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
                 for _ep in range(args.ttt_epochs):
+                    if args.ttt_cosepoch:
+                        epoch_lr_scale = 0.5 * (1.0 + math.cos(math.pi * _ep / max(args.ttt_epochs, 1)))
+                        for pg in optimizer.param_groups:
+                            pg['lr'] = args.ttt_lr * pg.get("base_lr_mult", 1.0) * epoch_lr_scale
                     for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
                         actual_bs = my_seq_s + bs
@@ -1803,7 +1829,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
