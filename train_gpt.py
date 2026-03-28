@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_muon = bool(int(os.environ.get("TTT_MUON", "0")))
+    batch_warmup_steps = int(os.environ.get("BATCH_WARMUP_STEPS", "0"))
+    batch_warmup_start_ratio = float(os.environ.get("BATCH_WARMUP_START_RATIO", "0.33"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1082,6 +1085,45 @@ def eval_val_sliding(
     return val_loss, bits_per_token * tokens_per_byte
 
 
+class _MuonTTTOptimizer:
+    """Drop-in SGD replacement for TTT that applies Newton-Schulz orthogonalization
+    to 2D+ parameter gradients (Muon-style) and plain momentum SGD to 1D params."""
+    def __init__(self, params_mat, params_vec, lr: float, momentum: float):
+        self.params_mat = list(params_mat)
+        self.params_vec = list(params_vec)
+        self.bufs_mat = [torch.zeros_like(p) for p in self.params_mat]
+        self.bufs_vec = [torch.zeros_like(p) for p in self.params_vec]
+        self.momentum = momentum
+        self.param_groups = [{'lr': lr}]
+
+    def zero_grad(self, set_to_none: bool = False) -> None:
+        for p in self.params_mat + self.params_vec:
+            if set_to_none:
+                p.grad = None
+            elif p.grad is not None:
+                p.grad.zero_()
+
+    @torch.no_grad()
+    def step(self) -> None:
+        lr = self.param_groups[0]['lr']
+        for p, buf in zip(self.params_mat, self.bufs_mat):
+            if p.grad is None:
+                continue
+            g = p.grad.float()
+            buf.mul_(self.momentum).add_(g)
+            update = g.add(buf, alpha=self.momentum)  # Nesterov
+            update_orth = zeropower_via_newtonschulz5(update, steps=5)
+            scale = max(1.0, update_orth.shape[-2] / update_orth.shape[-1]) ** 0.5
+            p.add_(update_orth.to(dtype=p.dtype), alpha=-lr * scale)
+        for p, buf in zip(self.params_vec, self.bufs_vec):
+            if p.grad is None:
+                continue
+            g = p.grad.float()
+            buf.mul_(self.momentum).add_(g)
+            update = g.add(buf, alpha=self.momentum)  # Nesterov
+            p.add_(update.to(dtype=p.dtype), alpha=-lr)
+
+
 def eval_val_sliding_ttt(
     args: Hyperparameters, base_model: nn.Module, rank: int, world_size: int,
     device: torch.device, val_tokens: Tensor, base_bytes_lut: Tensor,
@@ -1136,7 +1178,14 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    ttt_params_mat = [p for p in ttt_params if p.ndim >= 2]
+    ttt_params_vec = [p for p in ttt_params if p.ndim < 2]
+    if args.ttt_use_muon:
+        log0(f"ttt_sliding:optimizer=muon_ns5 mat_params={sum(p.numel() for p in ttt_params_mat)} "
+             f"vec_params={sum(p.numel() for p in ttt_params_vec)}")
+        optimizer = _MuonTTTOptimizer(ttt_params_mat, ttt_params_vec, args.ttt_lr, args.ttt_momentum)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1689,8 +1738,15 @@ def main() -> None:
             log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
+        if args.batch_warmup_steps > 0 and step < args.batch_warmup_steps:
+            t = step / args.batch_warmup_steps
+            ratio = args.batch_warmup_start_ratio + (1.0 - args.batch_warmup_start_ratio) * t
+            grain = world_size * grad_accum_steps * args.train_seq_len
+            current_batch_tokens = max(grain, (int(args.train_batch_tokens * ratio) // grain) * grain)
+        else:
+            current_batch_tokens = args.train_batch_tokens
         for micro_step in range(grad_accum_steps):
-            x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
+            x, y = train_loader.next_batch(current_batch_tokens, args.train_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y)
             train_loss += loss.detach()
