@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_adamw = bool(int(os.environ.get("TTT_USE_ADAMW", "0")))
+    soft_round_qat = bool(int(os.environ.get("SOFT_ROUND_QAT", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -551,15 +553,27 @@ class RMSNorm(nn.Module):
         return F.rms_norm(x, (x.size(-1),), eps=self.eps)
 class CastedLinear(nn.Linear):
     _qat_enabled: bool = False
+    _soft_round_enabled: bool = False
     def forward(self, x: Tensor) -> Tensor:
         w = self.weight.to(x.dtype)
         if CastedLinear._qat_enabled and self.training and w.ndim == 2:
-            with torch.no_grad():
-                w32 = self.weight.float()
-                row_max = w32.abs().amax(dim=1)
-                scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
-                w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -32, 31) * scale[:, None]).to(x.dtype)
-            w = w + (w_q - w).detach()
+            if CastedLinear._soft_round_enabled:
+                # Soft-round QAT: differentiable smooth approximation of round().
+                # Gradient = (1 - cos(2pi*w/scale)) / scale > 0, pushing weights toward int6 grid points.
+                # Unlike STE (gradient=1 everywhere), this naturally clusters weights at quantization levels.
+                with torch.no_grad():
+                    s = (self.weight.float().abs().amax(dim=1) / 31.0).clamp_min(1.0 / 31.0)
+                w_sc = self.weight.float() / s[:, None].detach()
+                w_sr = w_sc - torch.sin(2.0 * math.pi * w_sc) / (2.0 * math.pi)
+                w_q = torch.clamp(w_sr, -32.0, 31.0) * s[:, None].detach()
+                w = w_q.to(x.dtype)
+            else:
+                with torch.no_grad():
+                    w32 = self.weight.float()
+                    row_max = w32.abs().amax(dim=1)
+                    scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
+                    w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -32, 31) * scale[:, None]).to(x.dtype)
+                w = w + (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w, bias)
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
@@ -1136,7 +1150,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_use_adamw:
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1465,6 +1482,7 @@ def main() -> None:
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
     CastedLinear._qat_enabled = args.qat_enabled
+    CastedLinear._soft_round_enabled = args.soft_round_qat
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1803,7 +1821,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
