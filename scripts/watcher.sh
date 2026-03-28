@@ -62,17 +62,48 @@ pre_collect_from_container() {
   [ -z "$cid" ] && return 0
   local local_exp_parent="$MAIN_CHECKOUT/experiments"
   local local_spool_dir="$MAIN_CHECKOUT/registry/spool"
+  local log_prefix="[pre_collect/$job_id]"
   mkdir -p "$local_exp_parent" "$local_spool_dir"
+  local copied=0
   for src in "/workspace/parameter-golf/experiments/$job_id" \
              "/workspace/jobs/$job_id/experiments/$job_id"; do
-    ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" \
+    announce "$log_prefix Trying docker cp $src from container $cid..."
+    local tar_out
+    tar_out=$(ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" \
       "docker exec \"$cid\" test -d \"$src\" 2>/dev/null && docker cp \"$cid\":\"$src\" - 2>/dev/null" \
-      2>/dev/null | tar xf - -C "$local_exp_parent/" 2>/dev/null || true
+      2>/tmp/pre_collect_ssh_err | tar xf - -C "$local_exp_parent/" 2>/tmp/pre_collect_tar_err; echo $?)
+    local ssh_err tar_err
+    ssh_err=$(cat /tmp/pre_collect_ssh_err 2>/dev/null | head -3)
+    tar_err=$(cat /tmp/pre_collect_tar_err 2>/dev/null | head -3)
+    if [ -d "$local_exp_parent/$job_id" ] && [ "$(ls -A "$local_exp_parent/$job_id" 2>/dev/null | wc -l)" -gt 0 ]; then
+      announce "$log_prefix Copied experiment dir from $src ($(ls "$local_exp_parent/$job_id" | wc -l) files)"
+      copied=1
+      break
+    else
+      announce "$log_prefix docker cp failed or empty for $src. ssh_err='${ssh_err}' tar_err='${tar_err}'"
+    fi
   done
+  if [ "$copied" -eq 0 ]; then
+    announce "$log_prefix WARNING: all docker cp attempts failed — experiment dir not populated"
+  fi
+  local spool_src="/workspace/parameter-golf/registry/spool/${job_id}.json"
+  announce "$log_prefix Trying to copy spool JSON from container..."
   ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" \
-    "docker exec \"$cid\" test -f \"/workspace/parameter-golf/registry/spool/${job_id}.json\" 2>/dev/null && \
-     docker cp \"$cid\":\"/workspace/parameter-golf/registry/spool/${job_id}.json\" - 2>/dev/null" \
-    2>/dev/null | tar xf - -C "$local_spool_dir/" 2>/dev/null || true
+    "docker exec \"$cid\" test -f \"$spool_src\" 2>/dev/null && \
+     docker cp \"$cid\":\"$spool_src\" - 2>/dev/null" \
+    2>/tmp/pre_collect_spool_err | tar xf - --wildcards --strip-components=4 -C "$local_spool_dir/" 2>/tmp/pre_collect_spool_tar_err || \
+  ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" \
+    "docker exec \"$cid\" cat \"$spool_src\" 2>/dev/null" \
+    2>/dev/null > "$local_spool_dir/${job_id}.json.tmp" && \
+    python3 -c "import json,sys; d=json.load(open(sys.argv[1])); open(sys.argv[1][:-4],'w').write(json.dumps(d))" \
+      "$local_spool_dir/${job_id}.json.tmp" 2>/dev/null && \
+    mv "$local_spool_dir/${job_id}.json.tmp" "$local_spool_dir/${job_id}.json" || \
+    rm -f "$local_spool_dir/${job_id}.json.tmp"
+  if [ -f "$local_spool_dir/${job_id}.json" ]; then
+    announce "$log_prefix Spool JSON collected: $local_spool_dir/${job_id}.json"
+  else
+    announce "$log_prefix WARNING: spool JSON not collected. err='$(cat /tmp/pre_collect_spool_err 2>/dev/null | head -2)'"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -208,11 +239,17 @@ process_job() {
   update_gpu_job_status "$JOB_ID" "collecting"
 
   cd "$MAIN_CHECKOUT"
-  if [ "$DISPATCH_BACKEND" = "shadeform" ] && [ -n "$CONTAINER_ID" ]; then
-    pre_collect_from_container "$CHILD_NODE_ID" "$SSH_TARGET" "$SSH_PORT" "$CONTAINER_ID"
+  if [ "$DISPATCH_BACKEND" = "shadeform" ]; then
+    if [ -n "$CONTAINER_ID" ]; then
+      announce "Running pre_collect_from_container for $CHILD_NODE_ID (container=$CONTAINER_ID)..."
+      pre_collect_from_container "$CHILD_NODE_ID" "$SSH_TARGET" "$SSH_PORT" "$CONTAINER_ID"
+      announce "pre_collect_from_container done. exp_dir=$(ls "$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID" 2>/dev/null | wc -l) files"
+    else
+      announce "WARNING: DISPATCH_BACKEND=shadeform but CONTAINER_ID is empty — skipping pre_collect_from_container. Results may not be collected!"
+    fi
   fi
   if SSH_IDENTITY_FILE="${SSH_KEY_FILE:-}" \
-     "$MAIN_CHECKOUT/scripts/runpod_collect.sh" "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID" 2>/dev/null; then
+     "$MAIN_CHECKOUT/scripts/runpod_collect.sh" "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID"; then
     log_event --event "collect_completed" --job-id "$CHILD_NODE_ID" --status "appended" --message "artifact collection finished"
   else
     announce "Warning: collection failed for $CHILD_NODE_ID (may be partial)"

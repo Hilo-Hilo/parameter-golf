@@ -72,23 +72,80 @@ SSH_ID_OPTS="${SSH_IDENTITY_FILE:+-i $SSH_IDENTITY_FILE}"
 SSH_CMD="ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null $SSH_ID_OPTS -p $SSH_PORT"
 
 announce "Collecting results from $SSH_HOST:$SSH_PORT for $JOB_ID..."
+
+# Try direct rsync (works for RunPod where /workspace is on the host VM).
+_rsync_got_files=0
 # shellcheck disable=SC2086
-if $SSH_CMD "$SSH_HOST" "[ -d \"$PRIMARY_REMOTE_DIR\" ]"; then
+if $SSH_CMD "$SSH_HOST" "[ -d \"$PRIMARY_REMOTE_DIR\" ]" 2>/dev/null; then
   # shellcheck disable=SC2086
-  rsync -avz -e "$SSH_CMD" "$SSH_HOST:$PRIMARY_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/"
+  if rsync -avz -e "$SSH_CMD" "$SSH_HOST:$PRIMARY_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/" 2>/tmp/collect_rsync_err; then
+    _rsync_got_files=1
+  else
+    announce "rsync from $PRIMARY_REMOTE_DIR failed: $(cat /tmp/collect_rsync_err | head -3)"
+  fi
+else
+  announce "rsync: $PRIMARY_REMOTE_DIR not found on host VM (may be inside Docker container — checking fallback)"
 fi
 
 # shellcheck disable=SC2086
-if $SSH_CMD "$SSH_HOST" "[ -d \"$FALLBACK_REMOTE_DIR\" ]"; then
+if $SSH_CMD "$SSH_HOST" "[ -d \"$FALLBACK_REMOTE_DIR\" ]" 2>/dev/null; then
   # shellcheck disable=SC2086
-  rsync -avz -e "$SSH_CMD" "$SSH_HOST:$FALLBACK_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/wrapper/"
+  rsync -avz -e "$SSH_CMD" "$SSH_HOST:$FALLBACK_REMOTE_DIR/" "$LOCAL_RESULTS_DIR/wrapper/" 2>/dev/null || true
 fi
 
 # shellcheck disable=SC2086
-if $SSH_CMD "$SSH_HOST" "[ -f \"$REMOTE_SPOOL_JSON\" ]"; then
+if $SSH_CMD "$SSH_HOST" "[ -f \"$REMOTE_SPOOL_JSON\" ]" 2>/dev/null; then
   # shellcheck disable=SC2086
-  rsync -avz -e "$SSH_CMD" "$SSH_HOST:$REMOTE_SPOOL_JSON" "$LOCAL_RESULTS_DIR/"
+  rsync -avz -e "$SSH_CMD" "$SSH_HOST:$REMOTE_SPOOL_JSON" "$LOCAL_RESULTS_DIR/" 2>/dev/null || true
 fi
+
+# Docker-based fallback: if the experiment dir is still empty, the results are inside
+# a Docker container on the host VM (Shadeform/Hyperstack setup).
+_local_file_count=$(ls -A "$LOCAL_RESULTS_DIR" 2>/dev/null | wc -l)
+if [ "$_local_file_count" -eq 0 ]; then
+  announce "Local results dir empty after rsync — attempting Docker container fallback..."
+  _CONTAINER_ID=""
+  # shellcheck disable=SC2086
+  _CONTAINER_ID=$($SSH_CMD "$SSH_HOST" "docker ps --format '{{.ID}}' | head -1" 2>/dev/null || echo "")
+  if [ -n "$_CONTAINER_ID" ]; then
+    announce "Found container $_CONTAINER_ID — attempting docker cp for $JOB_ID..."
+    for _docker_src in "/workspace/parameter-golf/experiments/$JOB_ID" \
+                       "/workspace/jobs/$JOB_ID/experiments/$JOB_ID"; do
+      # shellcheck disable=SC2086
+      if $SSH_CMD "$SSH_HOST" "docker exec \"$_CONTAINER_ID\" test -d \"$_docker_src\" 2>/dev/null" 2>/dev/null; then
+        announce "Found experiment dir at $_docker_src in container — streaming via docker cp..."
+        # shellcheck disable=SC2086
+        if $SSH_CMD "$SSH_HOST" "docker cp \"$_CONTAINER_ID\":\"$_docker_src\" - 2>/dev/null" \
+             2>/tmp/collect_docker_err | tar xf - -C "$(dirname "$LOCAL_RESULTS_DIR")/" 2>/tmp/collect_docker_tar_err; then
+          _new_count=$(ls -A "$LOCAL_RESULTS_DIR" 2>/dev/null | wc -l)
+          announce "docker cp fallback: extracted $_new_count files to $LOCAL_RESULTS_DIR"
+          break
+        else
+          announce "docker cp fallback failed: ssh='$(cat /tmp/collect_docker_err 2>/dev/null | head -2)' tar='$(cat /tmp/collect_docker_tar_err 2>/dev/null | head -2)'"
+        fi
+      fi
+    done
+    # Also try to get the spool JSON from container
+    _REMOTE_SPOOL_IN_CTR="/workspace/parameter-golf/registry/spool/${JOB_ID}.json"
+    # shellcheck disable=SC2086
+    if ! [ -f "$LOCAL_RESULTS_DIR/${JOB_ID}.json" ] && \
+       $SSH_CMD "$SSH_HOST" "docker exec \"$_CONTAINER_ID\" test -f \"$_REMOTE_SPOOL_IN_CTR\" 2>/dev/null" 2>/dev/null; then
+      announce "Fetching spool JSON from container..."
+      # shellcheck disable=SC2086
+      $SSH_CMD "$SSH_HOST" "docker exec \"$_CONTAINER_ID\" cat \"$_REMOTE_SPOOL_IN_CTR\"" 2>/dev/null \
+        > "$LOCAL_RESULTS_DIR/${JOB_ID}.json.tmp" && \
+        python3 -c "import json,sys; d=json.load(open(sys.argv[1])); print(json.dumps(d))" \
+          "$LOCAL_RESULTS_DIR/${JOB_ID}.json.tmp" > "$LOCAL_RESULTS_DIR/${JOB_ID}.json" && \
+        rm -f "$LOCAL_RESULTS_DIR/${JOB_ID}.json.tmp" || \
+        rm -f "$LOCAL_RESULTS_DIR/${JOB_ID}.json.tmp"
+    fi
+  else
+    announce "Docker fallback: no running container found on $SSH_HOST"
+  fi
+fi
+
+_final_file_count=$(ls -A "$LOCAL_RESULTS_DIR" 2>/dev/null | wc -l)
+announce "Collection complete: $LOCAL_RESULTS_DIR has $_final_file_count files"
 
 # After collecting, append the canonical summary to locked runs.jsonl.
 SUMMARY_FILE="$(
@@ -168,7 +225,10 @@ PY
     collect_status="appended"
   fi
 else
-  announce "Warning: No summary JSON found in $LOCAL_RESULTS_DIR"
+  _dir_contents=$(ls "$LOCAL_RESULTS_DIR" 2>/dev/null | head -10 || echo "(empty)")
+  announce "ERROR: No summary JSON found in $LOCAL_RESULTS_DIR"
+  announce "  Dir contents: $_dir_contents"
+  announce "  This means result collection FAILED for $JOB_ID — bpb will not be recorded!"
   collect_status="no_summary"
 fi
 
