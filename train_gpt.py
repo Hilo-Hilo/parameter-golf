@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -132,6 +133,46 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 5, eps: float = 1e-7) ->
     if was_2d:
         X = X.squeeze(0)
     return X
+
+# --- MuonTTT optimizer (NS5 for test-time training) ---
+
+class MuonTTT(torch.optim.Optimizer):
+    """Muon-style optimizer for TTT: NS5 orthogonalization for 2D params,
+    momentum SGD for 1D params. Non-distributed -- caller all_reduces grads
+    before calling step()."""
+    def __init__(self, params, lr: float = 0.002, momentum: float = 0.9,
+                 backend_steps: int = 5, nesterov: bool = True):
+        super().__init__(params, dict(lr=lr, momentum=momentum,
+                                      backend_steps=backend_steps, nesterov=nesterov))
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            lr = group['lr']
+            mom = group['momentum']
+            nesterov = group['nesterov']
+            steps = group['backend_steps']
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                g = p.grad.float()
+                state = self.state[p]
+                if 'buf' not in state:
+                    state['buf'] = torch.zeros_like(g)
+                buf = state['buf']
+                buf.mul_(mom).add_(g)
+                update = g.add(buf, alpha=mom) if nesterov else buf.clone()
+                if update.ndim == 2:
+                    update = zeropower_via_newtonschulz5(update, steps=steps).to(p.dtype)
+                    scale = max(update.shape[0], update.shape[1]) ** 0.5
+                    p.add_(update, alpha=-lr * scale)
+                else:
+                    p.add_(update.to(p.dtype), alpha=-lr)
+        return loss
 
 # --- Parallel Muon optimizer ---
 
@@ -1136,7 +1177,11 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if getattr(args, 'ttt_muon', False):
+        optimizer = MuonTTT(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum,
+                            backend_steps=args.muon_backend_steps)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1848,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
