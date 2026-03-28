@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_freeze_emb = bool(int(os.environ.get("TTT_FREEZE_EMB", "1")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1127,6 +1128,12 @@ def eval_val_sliding_ttt(
             if f"blocks.{bi}." in name:
                 freeze = True
                 break
+        # Optionally freeze embedding weights: token statistics are domain-stable,
+        # adapting embeddings during TTT adds noise without improving compression.
+        if args.ttt_freeze_emb and (
+            "tok_emb" in name or "bigram.embed" in name or "lm_head" in name
+        ):
+            freeze = True
         if freeze:
             p.requires_grad_(False)
         else:
@@ -1136,7 +1143,8 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999),
+                                   weight_decay=0.0, eps=1e-8)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1811,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
