@@ -562,6 +562,20 @@ class CastedLinear(nn.Linear):
             w = w + (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w, bias)
+def _fake_quant_bank(w: Tensor, strength: float) -> Tensor:
+    """Progressive fake int6 quantization via STE. strength in [0.0, 1.0].
+    Forward pass uses a blend of original and quantized weights.
+    Backward pass (STE): gradient flows through the original weight unchanged."""
+    if strength <= 0.0:
+        return w
+    clip_range = 31
+    with torch.no_grad():
+        row_max = w.float().abs().amax(dim=-1, keepdim=True).clamp_min(1.0 / clip_range)
+        q_scale = row_max / clip_range
+        w_q = torch.clamp(torch.round(w.float() / q_scale), -clip_range, clip_range) * q_scale
+        delta = (w_q.to(w.dtype) - w) * strength
+    return w + delta
+
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
     with torch.no_grad():
         for name, param in module.named_parameters():
@@ -926,11 +940,13 @@ class GPT(nn.Module):
         v0 = None
         skips: list[Tensor] = []
         ve_cache: dict = {}
+        _bqs = getattr(self, '_bank_qat_strength', 0.0)
+        _fq = (lambda w: _fake_quant_bank(w, _bqs)) if (self.training and _bqs > 0.0) else (lambda w: w)
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
             x, raw_v = self.blocks[i](x, x0,
-                self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
+                _fq(self.qo_bank[i]), _fq(self.kv_bank[i]), _fq(self.kv_bank[n + i]),
+                _fq(self.qo_bank[n + i]), _fq(self.mlp_up_bank[i]), _fq(self.mlp_down_bank[i]),
                 v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
@@ -941,8 +957,8 @@ class GPT(nn.Module):
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             ve = self._get_ve(bi, input_ids, ve_cache)
             x, _ = self.blocks[bi](x, x0,
-                self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
+                _fq(self.qo_bank[bi]), _fq(self.kv_bank[bi]), _fq(self.kv_bank[n + bi]),
+                _fq(self.qo_bank[n + bi]), _fq(self.mlp_up_bank[bi]), _fq(self.mlp_down_bank[bi]),
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
         x_flat = x.reshape(-1, x.size(-1))
@@ -984,11 +1000,13 @@ class GPT(nn.Module):
         v0 = None
         skips: list[Tensor] = []
         ve_cache: dict = {}
+        _bqs = getattr(self, '_bank_qat_strength', 0.0)
+        _fq = (lambda w: _fake_quant_bank(w, _bqs)) if (self.training and _bqs > 0.0) else (lambda w: w)
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
             x, raw_v = self.blocks[i](x, x0,
-                self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
+                _fq(self.qo_bank[i]), _fq(self.kv_bank[i]), _fq(self.kv_bank[n + i]),
+                _fq(self.qo_bank[n + i]), _fq(self.mlp_up_bank[i]), _fq(self.mlp_down_bank[i]),
                 v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
@@ -999,8 +1017,8 @@ class GPT(nn.Module):
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             ve = self._get_ve(bi, input_ids, ve_cache)
             x, _ = self.blocks[bi](x, x0,
-                self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
+                _fq(self.qo_bank[bi]), _fq(self.kv_bank[bi]), _fq(self.kv_bank[n + bi]),
+                _fq(self.qo_bank[n + bi]), _fq(self.mlp_up_bank[bi]), _fq(self.mlp_down_bank[bi]),
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
         if self.tie_embeddings:
@@ -1136,7 +1154,7 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1684,6 +1702,8 @@ def main() -> None:
             break
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
+        _prog_ramp_start = 0.5
+        base_model._bank_qat_strength = max(0.0, (_prog_ramp_start - scale) / _prog_ramp_start) if scale < _prog_ramp_start else 0.0
         if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
             CastedLinear._qat_enabled = True
             log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
@@ -1803,7 +1823,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
