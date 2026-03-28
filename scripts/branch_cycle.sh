@@ -521,7 +521,6 @@ stage_plan_changes() {
   git add -A -- . \
     ':(exclude)worktrees/**' \
     ':(exclude)experiments/**' \
-    ':(exclude)registry/**' \
     ':(exclude).cursor/hooks/state/**' \
     ':(exclude)tmp/**'
 }
