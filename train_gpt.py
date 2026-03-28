@@ -1769,6 +1769,15 @@ def main() -> None:
             avg_state[name] /= len(lawa_queue)
             avg_state[name] = avg_state[name].to(dtype=current_state[name].dtype)
         base_model.load_state_dict(avg_state, strict=True)
+    elif args.swa_enabled and swa_state is not None and swa_count > 0:
+        log0(f"swa_ema:applying SWA+EMA stack swa_count={swa_count}")
+        current_state = base_model.state_dict()
+        avg_state = {}
+        for name in current_state:
+            swa_avg = (swa_state[name] / swa_count).float()
+            ema_avg = ema_state[name].float()
+            avg_state[name] = ((swa_avg + ema_avg) * 0.5).to(dtype=current_state[name].dtype)
+        base_model.load_state_dict(avg_state, strict=True)
     else:
         log0("ema:applying EMA weights")
         current_state = base_model.state_dict()
@@ -1803,7 +1812,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
