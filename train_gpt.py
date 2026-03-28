@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -132,6 +133,42 @@ def zeropower_via_newtonschulz5(G: Tensor, steps: int = 5, eps: float = 1e-7) ->
     if was_2d:
         X = X.squeeze(0)
     return X
+
+# --- MuonTTT: Muon-style optimizer for test-time training ---
+
+class MuonTTT(torch.optim.Optimizer):
+    """Muon-style TTT optimizer: NS5 ortho for 2D/3D params, Nesterov SGD for 1D.
+    Non-distributed: caller must all_reduce gradients before calling step()."""
+    def __init__(self, params, lr: float = 0.002, momentum: float = 0.9, backend_steps: int = 5):
+        super().__init__(params, dict(lr=lr, momentum=momentum, backend_steps=backend_steps))
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            ns_steps = group['backend_steps']
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                g = p.grad.float()
+                state = self.state[p]
+                if 'buf' not in state:
+                    state['buf'] = torch.zeros_like(g)
+                buf = state['buf']
+                buf.mul_(momentum).add_(g)
+                g_nes = buf.mul(momentum).add(g)  # Nesterov
+                if p.ndim >= 2:
+                    update = zeropower_via_newtonschulz5(g_nes, steps=ns_steps)
+                    scale = max(1.0, p.shape[-2] / p.shape[-1]) ** 0.5
+                    p.add_(update.to(dtype=p.dtype) * (lr * scale))
+                else:
+                    p.add_(g_nes.to(dtype=p.dtype), alpha=-lr)
+        return loss
 
 # --- Parallel Muon optimizer ---
 
@@ -645,8 +682,13 @@ class CausalSelfAttention(nn.Module):
         self.value_residual = value_residual
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
+        # GatedXSA: learned gate on the exclusive self-attention subtraction.
+        # Initialized so sigmoid(0)*2 = 1.0 = same as standard XSA.
+        # Only used when use_xsa=True; the parameter exists on all layers (negligible cost).
+        self.xsa_gate = nn.Parameter(torch.zeros(1, dtype=torch.float32))
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
-        """Efficient XSA: subtract self-value projection via GQA-aware reshape (no repeat_interleave).
+        """GatedXSA: subtract gate-scaled self-value projection.
+        Gate = sigmoid(xsa_gate)*2, initialized to 1.0 (same as standard XSA).
         y: [B, T, H, D], v: [B, T, Hkv, D]. H must be divisible by Hkv."""
         B, T, H, D = y.shape
         Hkv = v.size(-2)
@@ -654,7 +696,8 @@ class CausalSelfAttention(nn.Module):
         y_g = y.reshape(B, T, Hkv, group, D)        # [B, T, Hkv, group, D]
         vn = F.normalize(v, dim=-1).unsqueeze(-2)    # [B, T, Hkv, 1, D] -- broadcast ready
         proj = (y_g * vn).sum(dim=-1, keepdim=True) * vn
-        return (y_g - proj).reshape(B, T, H, D)
+        gate = torch.sigmoid(self.xsa_gate.to(dtype=y.dtype)) * 2.0
+        return (y_g - gate * proj).reshape(B, T, H, D)
     def forward(self, x: Tensor, q_w: Tensor, k_w: Tensor, v_w: Tensor, out_w: Tensor, v_embed: Tensor | None = None, v0: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
         bsz, seqlen, dim = x.shape
         q = F.linear(x, q_w.to(x.dtype)).reshape(bsz, seqlen, self.num_heads, self.head_dim)
@@ -1136,7 +1179,11 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_muon:
+        optimizer = MuonTTT(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum,
+                            backend_steps=args.muon_backend_steps)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1850,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
