@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    ttt_qonly = bool(int(os.environ.get("TTT_QONLY", "0")))  # optimize only Q projections
+    ttt_perlayer = bool(int(os.environ.get("TTT_PERLAYER", "0")))  # scale Q grads by layer depth
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1139,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1210,6 +1216,25 @@ def eval_val_sliding_ttt(
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
+                        if args.ttt_qonly:
+                            # Zero all gradients except Q projections (qo_bank rows 0..n-1)
+                            n = args.num_layers
+                            if hasattr(base_model, 'qo_bank') and base_model.qo_bank.grad is not None:
+                                base_model.qo_bank.grad[n:].zero_()
+                            for attr in ('kv_bank', 'mlp_up_bank', 'mlp_down_bank'):
+                                bank = getattr(base_model, attr, None)
+                                if bank is not None and bank.grad is not None:
+                                    bank.grad.zero_()
+                            for name, p in base_model.named_parameters():
+                                if name.startswith('blocks.') and p.grad is not None:
+                                    p.grad.zero_()
+                        if args.ttt_perlayer:
+                            # Scale Q gradients by layer depth: 0.5x at layer 0, 1.5x at last layer
+                            n = args.num_layers
+                            if hasattr(base_model, 'qo_bank') and base_model.qo_bank.grad is not None:
+                                for i in range(n):
+                                    layer_scale = 0.5 + i / max(n - 1, 1)
+                                    base_model.qo_bank.grad[i] *= layer_scale
                         if world_size > 1:
                             for p in ttt_params:
                                 if p.grad is not None:
@@ -1803,7 +1828,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
