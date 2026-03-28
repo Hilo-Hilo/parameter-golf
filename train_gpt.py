@@ -1136,7 +1136,7 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1576,9 +1576,21 @@ def main() -> None:
             fused=True,
         )
         replicated_params.append(base_model.lm_head.weight)
+    optimizer_mtp = None
+    if base_model.mtp_heads:
+        optimizer_mtp = torch.optim.Adam(
+            [{"params": [h.weight for h in base_model.mtp_heads],
+              "lr": args.head_lr, "base_lr": args.head_lr}],
+            betas=(args.beta1, args.beta2),
+            eps=args.adam_eps,
+            fused=True,
+        )
+        replicated_params.extend(h.weight for h in base_model.mtp_heads)
     optimizers: list[torch.optim.Optimizer] = [optimizer_tok, optimizer_muon, optimizer_scalar]
     if optimizer_head is not None:
         optimizers.append(optimizer_head)
+    if optimizer_mtp is not None:
+        optimizers.append(optimizer_mtp)
     n_params = sum(p.numel() for p in base_model.parameters())
     mtp_params = sum(p.numel() for p in base_model.mtp_heads.parameters())
     log0(f"model_params:{n_params}")
@@ -1717,6 +1729,8 @@ def main() -> None:
         optimizer_scalar.step()
         if optimizer_head is not None:
             optimizer_head.step()
+        if optimizer_mtp is not None:
+            optimizer_mtp.step()
         # Phase 3: Wait for RS, local NS5, all-gather (banks processed last)
         optimizer_muon.step()
         zero_grad_all()
@@ -1803,7 +1817,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
