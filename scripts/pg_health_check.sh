@@ -70,9 +70,10 @@ else
   printf '%s\n' "$INSTANCES_JSON" > "$_INST_TMP"
   NOW_EPOCH="$(date -u +%s)"
 
+  GPU_QUEUE="$REPO_ROOT/registry/gpu_queue.jsonl"
   while IFS= read -r _line; do
     anomaly "$_line"
-  done < <(python3 - "$SPOOL" "$MAX_JOB_AGE_MINUTES" "$NOW_EPOCH" "$_INST_TMP" <<'PY'
+  done < <(python3 - "$SPOOL" "$MAX_JOB_AGE_MINUTES" "$NOW_EPOCH" "$_INST_TMP" "$GPU_QUEUE" <<'PY'
 import json, pathlib, sys
 from datetime import datetime, timezone
 
@@ -80,6 +81,7 @@ spool = pathlib.Path(sys.argv[1])
 max_age_min = int(sys.argv[2])
 now_epoch = int(sys.argv[3])
 inst_file = sys.argv[4]
+gpu_queue_path = pathlib.Path(sys.argv[5])
 
 try:
     instances = json.loads(open(inst_file).read()).get("instances", [])
@@ -101,13 +103,40 @@ for lf in spool.glob("*_lease.json"):
     if inst_id:
         leased_instance_ids.add(inst_id)
 
+# Count dispatched queue jobs that have no lease yet — these are waiting to be
+# sent to a warm instance. While such jobs exist, unleased active instances are
+# NOT orphaned: the watcher will claim them imminently.
+pending_dispatch_count = 0
+if gpu_queue_path.exists():
+    leased_job_ids = set()
+    for lf in spool.glob("*_lease.json"):
+        try:
+            d = json.loads(lf.read_text())
+        except Exception:
+            continue
+        jid = d.get("job_id")
+        if jid:
+            leased_job_ids.add(jid)
+    for raw in gpu_queue_path.read_text(encoding="utf-8").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        try:
+            entry = json.loads(raw)
+        except Exception:
+            continue
+        if entry.get("status") == "dispatched" and entry.get("job_id") not in leased_job_ids:
+            pending_dispatch_count += 1
+
 for inst in active_instances:
     iid = inst["id"]
     name = inst.get("name", "?")
     if iid not in leased_instance_ids:
+        if pending_dispatch_count > 0:
+            # Instance has no lease but the queue has jobs waiting for dispatch —
+            # this instance is warm and will be claimed. Not an anomaly.
+            continue
         print(f"Shadeform instance {iid} ({name}) is active but has no unreleased lease — potential GPU waste.")
-    # Only flag age if also has no active lease (leased instances are in use)
-    if iid not in leased_instance_ids:
         created = inst.get("created_at") or inst.get("createdAt") or ""
         if created:
             try:
