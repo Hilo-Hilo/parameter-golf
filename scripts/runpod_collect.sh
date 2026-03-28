@@ -129,6 +129,8 @@ ledger_path.parent.mkdir(parents=True, exist_ok=True)
 lock_path.parent.mkdir(parents=True, exist_ok=True)
 summary_text = summary_path.read_text(encoding="utf-8").strip()
 summary_payload = json.loads(summary_text)
+# Ensure single-line JSON for JSONL format (spool files may be pretty-printed)
+summary_text = json.dumps(summary_payload)
 run_id = summary_payload.get("run_id")
 
 with lock_path.open("a+", encoding="utf-8") as lock_file:
