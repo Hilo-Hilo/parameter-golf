@@ -1136,7 +1136,31 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    # Build per-layer AdamW param groups: deeper blocks get higher LR (range [0.5x, 1.5x])
+    num_blocks = len(base_model.blocks)
+    block_param_groups: dict[int, list] = {}
+    non_block_ttt_params: list = []
+    for name, p in base_model.named_parameters():
+        if not p.requires_grad:
+            continue
+        matched = False
+        for bi in range(num_blocks):
+            if f"blocks.{bi}." in name:
+                if bi not in block_param_groups:
+                    block_param_groups[bi] = []
+                block_param_groups[bi].append(p)
+                matched = True
+                break
+        if not matched:
+            non_block_ttt_params.append(p)
+    adamw_groups = []
+    for bi in sorted(block_param_groups.keys()):
+        depth_frac = bi / max(num_blocks - 1, 1)
+        lr_scale = 0.5 + depth_frac  # 0.5 at first unfrozen block, 1.5 at last
+        adamw_groups.append({"params": block_param_groups[bi], "lr": args.ttt_lr * lr_scale, "base_lr_scale": lr_scale})
+    if non_block_ttt_params:
+        adamw_groups.append({"params": non_block_ttt_params, "lr": args.ttt_lr, "base_lr_scale": 1.0})
+    optimizer = torch.optim.AdamW(adamw_groups, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,12 +1214,13 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
-                for _ep in range(args.ttt_epochs):
+                for epoch_idx in range(args.ttt_epochs):
+                    ep_factor = 1.0 / (1.0 + epoch_idx)
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr * pg.get('base_lr_scale', 1.0) * ep_factor
                     for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
                         actual_bs = my_seq_s + bs
@@ -1803,7 +1828,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
