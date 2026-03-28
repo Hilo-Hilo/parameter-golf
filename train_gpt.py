@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_mlponly = bool(int(os.environ.get("TTT_MLPONLY", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1118,25 +1120,29 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
-    frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
-    for name, p in base_model.named_parameters():
-        freeze = False
-        for bi in frozen_block_ids:
-            if f"blocks.{bi}." in name:
-                freeze = True
-                break
-        if freeze:
+    # Select TTT parameter set
+    if args.ttt_mlponly:
+        for p in base_model.parameters():
             p.requires_grad_(False)
-        else:
+        ttt_params = [base_model.mlp_up_bank, base_model.mlp_down_bank]
+        for p in ttt_params:
             p.requires_grad_(True)
-            ttt_params.append(p)
+        log0(f"ttt_sliding:mlponly params={sum(p.numel() for p in ttt_params)}")
+    else:
+        frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+        ttt_params = []
+        for name, p in base_model.named_parameters():
+            freeze = any(f"blocks.{bi}." in name for bi in frozen_block_ids)
+            p.requires_grad_(not freeze)
+            if not freeze:
+                ttt_params.append(p)
+        log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
+             f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
-
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1809,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
