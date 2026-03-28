@@ -36,9 +36,43 @@ log_event() {
 
 cleanup_cmd() {
   case "$DISPATCH_BACKEND" in
-    skypilot) echo "$MAIN_CHECKOUT/scripts/skypilot_cleanup.sh" ;;
-    *) echo "$MAIN_CHECKOUT/scripts/runpod_cleanup.sh" ;;
+    shadeform) echo "$MAIN_CHECKOUT/scripts/shadeform_cleanup.sh" ;;
+    skypilot)  echo "$MAIN_CHECKOUT/scripts/skypilot_cleanup.sh" ;;
+    *)         echo "$MAIN_CHECKOUT/scripts/runpod_cleanup.sh" ;;
   esac
+}
+
+SSH_KEY_FILE="${SHADEFORM_SSH_KEY_FILE:-$HOME/.shadeform/ssh_key}"
+SSH_ID_OPT=()
+[ "$DISPATCH_BACKEND" = "shadeform" ] && [ -f "$SSH_KEY_FILE" ] && SSH_ID_OPT=(-i "$SSH_KEY_FILE")
+BASE_SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o BatchMode=yes -o LogLevel=ERROR)
+
+# For Shadeform: SSH connects to the host VM; tmux sessions live inside
+# the Docker container. Returns running container ID or empty string.
+get_shadeform_container_id() {
+  local ssh_host="$1" ssh_port="$2"
+  ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" \
+    "docker ps --format '{{.ID}}' | head -1" 2>/dev/null || echo ''
+}
+
+# Copy experiment artifacts out of the container to the host VM filesystem
+# so runpod_collect.sh can rsync them down normally.
+pre_collect_from_container() {
+  local job_id="$1" ssh_host="$2" ssh_port="$3" cid="$4"
+  [ -z "$cid" ] && return 0
+  ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$ssh_port" "$ssh_host" "
+    JOB=\"$job_id\"; CID=\"$cid\"
+    for src in /workspace/parameter-golf/experiments/\$JOB /workspace/jobs/\$JOB/experiments/\$JOB; do
+      docker exec \"\$CID\" test -d \"\$src\" 2>/dev/null || continue
+      parent=\"\$(dirname \"\$src\")\"; mkdir -p \"\$parent\"
+      docker cp \"\$CID\":\"\$src\" \"\$parent/\" 2>/dev/null || true
+    done
+    SPOOL=/workspace/parameter-golf/registry/spool/\$JOB.json
+    if docker exec \"\$CID\" test -f \"\$SPOOL\" 2>/dev/null; then
+      mkdir -p \"\$(dirname \"\$SPOOL\")\"
+      docker cp \"\$CID\":\"\$SPOOL\" \"\$SPOOL\" 2>/dev/null || true
+    fi
+  " 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -60,12 +94,30 @@ process_job() {
 
   announce "Processing job $JOB_ID (node=$NODE_ID)"
 
-  # Load SSH details from lease
+  # Dispatch to GPU cluster if not yet dispatched (plan-only mode enqueues
+  # before dispatch so the watcher serializes cluster creation).
   local LEASE_FILE="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_lease.json"
-  if [ ! -f "$LEASE_FILE" ]; then
-    announce "Error: lease file not found for $CHILD_NODE_ID"
-    update_gpu_job_status "$JOB_ID" "failed"
-    return 1
+  local JOB_SPEC="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_job.json"
+  if [ ! -f "$LEASE_FILE" ] || ! jq -e '.ssh.host' "$LEASE_FILE" >/dev/null 2>&1; then
+    if [ ! -f "$JOB_SPEC" ]; then
+      announce "Error: no job spec for $CHILD_NODE_ID"
+      update_gpu_job_status "$JOB_ID" "failed"
+      return 1
+    fi
+    announce "Dispatching $CHILD_NODE_ID to GPU cluster..."
+    update_gpu_job_status "$JOB_ID" "dispatching"
+    local dispatch_script
+    case "$DISPATCH_BACKEND" in
+      shadeform) dispatch_script="$MAIN_CHECKOUT/scripts/shadeform_dispatch.sh" ;;
+      skypilot)  dispatch_script="$MAIN_CHECKOUT/scripts/skypilot_dispatch.sh" ;;
+      *)         dispatch_script="$MAIN_CHECKOUT/scripts/runpod_dispatch.sh" ;;
+    esac
+    if ! CONTROLLER_LOG_LABEL="$BRANCH_NAME" "$dispatch_script" "$JOB_SPEC"; then
+      announce "Dispatch failed for $CHILD_NODE_ID"
+      update_gpu_job_status "$JOB_ID" "failed"
+      return 1
+    fi
+    update_gpu_job_status "$JOB_ID" "collecting"
   fi
 
   local SSH_TARGET SSH_PORT
@@ -84,33 +136,67 @@ process_job() {
   fi
 
   local POLL_INTERVAL=15
+  # Grace period: number of consecutive "no session" checks required before
+  # declaring the job done. Prevents false-finish when the bootstrap is still
+  # launching the tmux session on a warm reused instance (~60s window).
+  local GRACE_CHECKS=4   # 4 × 15s = 60s grace
+  local no_session_streak=0
+  local session_seen=0   # flips to 1 once the session has existed at least once
 
   # -----------------------------------------------------------------------
   # PHASE: wait_remote (SSH poll for tmux session)
   # -----------------------------------------------------------------------
   announce "Waiting for remote job $CHILD_NODE_ID on $SSH_TARGET:$SSH_PORT..."
 
+  local CONTAINER_ID=""
   while true; do
-    if ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT" "$SSH_TARGET" "tmux has-session -t job_${CHILD_NODE_ID} 2>/dev/null" >/dev/null 2>&1; then
-      # Still running
-      true
-    elif ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 -p "$SSH_PORT" "$SSH_TARGET" "true" >/dev/null 2>&1; then
-      # SSH works but tmux gone = job finished
-      announce "Tmux session ended for $CHILD_NODE_ID. Job complete."
-      log_event --event "remote_job_completed" --job-id "$CHILD_NODE_ID" --node-id "$NODE_ID" --phase "wait_remote" --status "completed" --message "remote tmux session ended"
-      break
-    else
-      # SSH failed
-      announce "SSH check failed for $CHILD_NODE_ID; retrying."
-      # Check TTL
-      local NOW_EPOCH
-      NOW_EPOCH="$(date -u +%s)"
-      if [ "$TTL_EPOCH" -gt 0 ] && [ "$NOW_EPOCH" -gt "$TTL_EPOCH" ]; then
-        announce "Lease TTL expired for $CHILD_NODE_ID. Aborting."
-        "$(cleanup_cmd)" --job-id "$CHILD_NODE_ID" --reason "controller_ttl_exceeded" >/dev/null 2>&1 || true
-        update_gpu_job_status "$JOB_ID" "failed"
-        return 1
+    if ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$SSH_PORT" "$SSH_TARGET" "true" >/dev/null 2>&1; then
+      # SSH reachable — for Shadeform check tmux inside container, otherwise check host directly.
+      if [ "$DISPATCH_BACKEND" = "shadeform" ]; then
+        [ -z "$CONTAINER_ID" ] && CONTAINER_ID="$(get_shadeform_container_id "$SSH_TARGET" "$SSH_PORT")"
+        if [ -n "$CONTAINER_ID" ]; then
+          if ssh "${BASE_SSH_OPTS[@]}" "${SSH_ID_OPT[@]}" -p "$SSH_PORT" "$SSH_TARGET" \
+              "docker exec \"$CONTAINER_ID\" tmux has-session -t job_${CHILD_NODE_ID} 2>/dev/null" >/dev/null 2>&1; then
+            session_seen=1
+            no_session_streak=0
+          else
+            no_session_streak=$(( no_session_streak + 1 ))
+            # Only declare done if session was seen before OR grace period exhausted
+            if [ "$session_seen" -eq 1 ] || [ "$no_session_streak" -gt "$GRACE_CHECKS" ]; then
+              announce "Tmux session ended for $CHILD_NODE_ID. Job complete."
+              log_event --event "remote_job_completed" --job-id "$CHILD_NODE_ID" --node-id "$NODE_ID" --phase "wait_remote" --status "completed" --message "remote tmux session ended"
+              break
+            fi
+            announce "No tmux session yet for $CHILD_NODE_ID (streak=$no_session_streak/${GRACE_CHECKS}, still in grace)..."
+          fi
+        fi
+        # Container not up yet — keep waiting
+      else
+        if ssh "${BASE_SSH_OPTS[@]}" -p "$SSH_PORT" "$SSH_TARGET" \
+            "tmux has-session -t job_${CHILD_NODE_ID} 2>/dev/null" >/dev/null 2>&1; then
+          session_seen=1
+          no_session_streak=0
+        else
+          no_session_streak=$(( no_session_streak + 1 ))
+          if [ "$session_seen" -eq 1 ] || [ "$no_session_streak" -gt "$GRACE_CHECKS" ]; then
+            announce "Tmux session ended for $CHILD_NODE_ID. Job complete."
+            log_event --event "remote_job_completed" --job-id "$CHILD_NODE_ID" --node-id "$NODE_ID" --phase "wait_remote" --status "completed" --message "remote tmux session ended"
+            break
+          fi
+          announce "No tmux session yet for $CHILD_NODE_ID (streak=$no_session_streak/${GRACE_CHECKS}, still in grace)..."
+        fi
       fi
+    else
+      announce "SSH check failed for $CHILD_NODE_ID; retrying."
+    fi
+    # Check TTL
+    local NOW_EPOCH
+    NOW_EPOCH="$(date -u +%s)"
+    if [ "$TTL_EPOCH" -gt 0 ] && [ "$NOW_EPOCH" -gt "$TTL_EPOCH" ]; then
+      announce "Lease TTL expired for $CHILD_NODE_ID. Aborting."
+      "$(cleanup_cmd)" --job-id "$CHILD_NODE_ID" --reason "controller_ttl_exceeded" >/dev/null 2>&1 || true
+      update_gpu_job_status "$JOB_ID" "failed"
+      return 1
     fi
     sleep "$POLL_INTERVAL"
   done
@@ -122,7 +208,11 @@ process_job() {
   update_gpu_job_status "$JOB_ID" "collecting"
 
   cd "$MAIN_CHECKOUT"
-  if "$MAIN_CHECKOUT/scripts/runpod_collect.sh" "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID" 2>/dev/null; then
+  if [ "$DISPATCH_BACKEND" = "shadeform" ] && [ -n "$CONTAINER_ID" ]; then
+    pre_collect_from_container "$CHILD_NODE_ID" "$SSH_TARGET" "$SSH_PORT" "$CONTAINER_ID"
+  fi
+  if SSH_IDENTITY_FILE="${SSH_KEY_FILE:-}" \
+     "$MAIN_CHECKOUT/scripts/runpod_collect.sh" "$SSH_TARGET" "$SSH_PORT" "$CHILD_NODE_ID" 2>/dev/null; then
     log_event --event "collect_completed" --job-id "$CHILD_NODE_ID" --status "appended" --message "artifact collection finished"
   else
     announce "Warning: collection failed for $CHILD_NODE_ID (may be partial)"
@@ -132,7 +222,35 @@ process_job() {
   "$(cleanup_cmd)" --job-id "$CHILD_NODE_ID" --reason "job_complete" >/dev/null 2>&1 || true
 
   # -----------------------------------------------------------------------
-  # PHASE: diagnose + reflect (Claude analysis)
+  # PHASE: pipeline next job (dispatch while we analyze current)
+  # Claim the next queued job and dispatch it NOW so the cluster is busy
+  # during diagnose+reflect instead of sitting idle for ~2-3 minutes.
+  # -----------------------------------------------------------------------
+  local NEXT_JOB_JSON NEXT_JOB_ID NEXT_CHILD_ID NEXT_BRANCH
+  NEXT_JOB_JSON="$(claim_gpu_job "dispatched" "dispatching" 2>/dev/null || echo "")"
+  if [ -n "$NEXT_JOB_JSON" ]; then
+    NEXT_JOB_ID="$(echo "$NEXT_JOB_JSON" | jq -r '.job_id')"
+    NEXT_CHILD_ID="$(echo "$NEXT_JOB_JSON" | jq -r '.child_node_id')"
+    NEXT_BRANCH="$(echo "$NEXT_JOB_JSON" | jq -r '.branch_name')"
+    local next_job_spec="$MAIN_CHECKOUT/registry/spool/${NEXT_CHILD_ID}_job.json"
+    announce "Pipelining next job $NEXT_JOB_ID onto warm cluster..."
+    local dispatch_script
+    case "$DISPATCH_BACKEND" in
+      shadeform) dispatch_script="$MAIN_CHECKOUT/scripts/shadeform_dispatch.sh" ;;
+      skypilot)  dispatch_script="$MAIN_CHECKOUT/scripts/skypilot_dispatch.sh" ;;
+      *)         dispatch_script="$MAIN_CHECKOUT/scripts/runpod_dispatch.sh" ;;
+    esac
+    if CONTROLLER_LOG_LABEL="$NEXT_BRANCH" "$dispatch_script" "$next_job_spec"; then
+      update_gpu_job_status "$NEXT_JOB_ID" "dispatched"
+      announce "Next job $NEXT_JOB_ID dispatched. Cluster busy — analyzing current job now."
+    else
+      announce "Warning: pipeline dispatch failed for $NEXT_JOB_ID; requeueing."
+      update_gpu_job_status "$NEXT_JOB_ID" "dispatched"
+    fi
+  fi
+
+  # -----------------------------------------------------------------------
+  # PHASE: diagnose + reflect (Claude analysis — runs while next job trains)
   # -----------------------------------------------------------------------
   update_gpu_job_status "$JOB_ID" "analyzing"
 
@@ -145,13 +263,34 @@ process_job() {
   local LOG_FILE
   LOG_FILE="$(find "$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID" -name '*.log' -type f 2>/dev/null | head -1 || echo "")"
 
+  # Detect crash: no summary JSON means training did not complete successfully
+  local SUMMARY_JSON JOB_OUTCOME CRASH_CONTEXT
+  SUMMARY_JSON="$(find "$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID" -name '*.json' \
+    ! -name 'dirty.patch' -type f 2>/dev/null | head -1 || echo "")"
+  if [ -z "$SUMMARY_JSON" ] && [ -n "$LOG_FILE" ]; then
+    JOB_OUTCOME="CRASHED (no results JSON produced)"
+    CRASH_CONTEXT="$(grep -m 10 -E 'Error|Traceback|RuntimeError|CUDA|OOM|assert|Exception|Signal' \
+      "$LOG_FILE" 2>/dev/null | head -15 | cut -c1-200 | tr '\n' '|')"
+    CRASH_CONTEXT="Crash excerpt: ${CRASH_CONTEXT:-(log exists but no matching error lines found)}"
+  elif [ -z "$SUMMARY_JSON" ]; then
+    JOB_OUTCOME="FAILED (no log or results found)"
+    CRASH_CONTEXT="No log file found — likely dispatch or bootstrap failure."
+  else
+    JOB_OUTCOME="completed"
+    CRASH_CONTEXT=""
+  fi
+
   local DIAGNOSE_PROMPT="You are analyzing experiment $CHILD_NODE_ID.
-The remote experiment has finished. Logs are at $LOG_FILE.
-Please analyze the logs and summarize any issues.
+Job outcome: $JOB_OUTCOME.
+${CRASH_CONTEXT:+$CRASH_CONTEXT
+}Log file: ${LOG_FILE:-(none)}.
+Read the log file and identify the root cause. If this was a crash, give a precise one-line description of the error (e.g. 'GQA heads mismatch in SDPA fallback — num_kv_heads=4 vs num_heads=8').
 Output JSON."
 
   local REFLECT_PROMPT="You are reflecting on experiment $CHILD_NODE_ID.
-Review the diagnosis and outcome. Determine if this was a success and what to do next.
+Job outcome: $JOB_OUTCOME.
+${CRASH_CONTEXT:+$CRASH_CONTEXT
+}Review the diagnosis and outcome. Set failure_reason to a precise one-line root cause if is_success=false, empty string otherwise.
 Output JSON."
 
   # Diagnose
@@ -188,12 +327,13 @@ Output JSON."
     announce "Warning: reflect phase exited non-zero for $CHILD_NODE_ID"
   fi
 
-  # Parse action from reflect output
-  local ACTION
+  # Parse action and failure_reason from reflect output
+  local ACTION FAILURE_REASON
   ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$REFLECT_OUTPUT" 2>/dev/null || echo "discard")
+  FAILURE_REASON=$(jq -r '.structured_output.failure_reason // ""' "$REFLECT_OUTPUT" 2>/dev/null || echo "")
 
-  # Update node status
-  python3 - "$MAIN_CHECKOUT/registry/nodes.jsonl" "$MAIN_CHECKOUT/registry/.nodes.lock" "$CHILD_NODE_ID" "$ACTION" <<'PY'
+  # Update node status (include failure_reason for planners to see)
+  python3 - "$MAIN_CHECKOUT/registry/nodes.jsonl" "$MAIN_CHECKOUT/registry/.nodes.lock" "$CHILD_NODE_ID" "$ACTION" "$FAILURE_REASON" <<'PY'
 import fcntl
 import json
 import pathlib
@@ -203,13 +343,17 @@ db_path = pathlib.Path(sys.argv[1])
 lock_path = pathlib.Path(sys.argv[2])
 node_id = sys.argv[3]
 action = sys.argv[4]
+failure_reason = sys.argv[5] if len(sys.argv) > 5 else ""
 
 lock_path.touch(exist_ok=True)
 
 with lock_path.open("a+", encoding="utf-8") as lock_file:
     fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
     with db_path.open("a", encoding="utf-8") as db_file:
-        db_file.write(json.dumps({"node_id": node_id, "status": action}) + "\n")
+        entry = {"node_id": node_id, "status": action}
+        if failure_reason:
+            entry["failure_reason"] = failure_reason
+        db_file.write(json.dumps(entry) + "\n")
     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 PY
 

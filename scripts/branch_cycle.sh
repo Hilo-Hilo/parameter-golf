@@ -677,6 +677,47 @@ def list_spool_json(path):
     return "\n".join(f"- {name}" for name in names)
 
 
+def nodes_queue_summary(path):
+    """Show pending/running nodes and recent failures so the planner avoids duplicates and understands past crashes."""
+    import json as _json
+    node_path = pathlib.Path(path)
+    if not node_path.exists():
+        return "<missing: registry/nodes.jsonl>"
+    seen = {}
+    reasons = {}
+    try:
+        for line in node_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = _json.loads(line)
+            except Exception:
+                continue
+            nid = row.get("node_id", "")
+            seen[nid] = row.get("status", "")
+            if row.get("failure_reason"):
+                reasons[nid] = row["failure_reason"]
+    except Exception as exc:
+        return f"<error: {exc}>"
+    active = [f"  [{s:8s}] {n}" for n, s in seen.items() if s in ("pending", "running")]
+    failed = [
+        f"  [failed  ] {n}: {reasons.get(n, '(no reason recorded)')}"
+        for n, s in seen.items()
+        if s in ("discard", "failed") and n != "root"
+    ][-20:]  # last 20 failures only
+    lines = []
+    if active:
+        lines.append("ALREADY QUEUED — do NOT propose a slug matching or semantically equivalent to any of these:")
+        lines.extend(active)
+    if failed:
+        lines.append("RECENT FAILURES — understand why these failed before proposing similar approaches:")
+        lines.extend(failed)
+    if not lines:
+        return "No nodes currently pending, running, or recently failed."
+    return "\n".join(lines)
+
+
 def section(title, body):
     return f"## {title}\n{body.rstrip()}".rstrip()
 
@@ -707,6 +748,7 @@ prompt_sections = [
     section("Bundled issue_140.md Excerpt", read_lines(repo / "context/upstream/issue_140.md", start=1, limit=160)),
     section("Bundled pr_digest.md", read_lines(repo / "context/upstream/pr_digest.md")),
     section("Bundled frontier_digest.md", read_lines(repo / "context/upstream/frontier_digest.md")),
+    section("Bundled registry/nodes.jsonl (Pending/Running Queue)", nodes_queue_summary(repo / "registry/nodes.jsonl")),
     section("Bundled registry/runs.jsonl Tail", tail_lines(repo / "registry/runs.jsonl", 12)),
     section("Bundled registry/jobs.jsonl Tail", tail_lines(repo / "registry/jobs.jsonl", 12)),
     section("Bundled registry/spool JSON Files", list_spool_json(repo / "registry/spool")),
@@ -1269,31 +1311,31 @@ write_job_spec "$JOB_SPEC"
 CURRENT_PHASE="job_spec_written"
 write_observability_state "job_spec_written" "running" "job spec written for dispatch"
 
-announce "Dispatching job via ${DISPATCH_BACKEND}..."
-cd "$MAIN_CHECKOUT"
-CONTROLLER_LOG_LABEL="$BRANCH_NAME" "$(dispatch_cmd)" "$JOB_SPEC"
-JOB_DISPATCHED=1
-
-# --plan-only mode: enqueue the dispatched job and exit. A watcher process
-# will handle wait_remote, collect, diagnose, and reflect.
+# --plan-only mode: enqueue the job spec for the watcher to dispatch.
+# The watcher owns GPU dispatch so only one cluster runs at a time.
 if [ "$PLAN_ONLY" -eq 1 ]; then
-  LEASE_FILE="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}_lease.json"
-  CONTROLLER_TTL_EPOCH="$(controller_ttl_epoch "$LEASE_FILE")"
+  # TTL: 4 hours from now as a safe upper bound before the watcher dispatches.
+  CONTROLLER_TTL_EPOCH="$(python3 -c 'import time; print(int(time.time()) + 14400)')"
   enqueue_gpu_job \
     "$CHILD_NODE_ID" \
     "$NODE_ID" \
     "$CHILD_NODE_ID" \
     "$BRANCH_NAME" \
-    "$(jq -r '.commit_sha' "$JOB_SPEC")" \
+    "$COMMIT_SHA" \
     "$PHASE_LOG_DIR" \
     "$PLAN_WORKTREE" \
     "$NO_VALIDATION" \
     "$CONTROLLER_TTL_EPOCH"
-  announce "Job dispatched and enqueued for watcher. Exiting plan-only mode."
+  announce "Job spec enqueued for watcher (no dispatch yet). Exiting plan-only mode."
   write_observability_state "dispatch" "completed" "job enqueued for watcher (plan-only)"
   PLAN_ONLY_DISPATCHED=1
   exit 0
 fi
+
+announce "Dispatching job via ${DISPATCH_BACKEND}..."
+cd "$MAIN_CHECKOUT"
+CONTROLLER_LOG_LABEL="$BRANCH_NAME" "$(dispatch_cmd)" "$JOB_SPEC"
+JOB_DISPATCHED=1
 
 SSH_TARGET=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_target.txt" || echo "")
 SSH_PORT=$(cat "registry/spool/${CHILD_NODE_ID}_ssh_port.txt" || echo "22")

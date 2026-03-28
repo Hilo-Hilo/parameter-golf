@@ -14,8 +14,12 @@
       "type": "string",
       "enum": ["keep", "discard", "branch"],
       "description": "The recommended next step for the controller."
+    },
+    "failure_reason": {
+      "type": "string",
+      "description": "One-line root cause if is_success is false (e.g. 'GQA crash in SDPA fallback'). Empty string if success."
     }
   },
-  "required": ["reflection_notes", "is_success", "recommended_action"],
+  "required": ["reflection_notes", "is_success", "recommended_action", "failure_reason"],
   "additionalProperties": false
 }
