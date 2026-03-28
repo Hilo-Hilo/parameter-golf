@@ -124,6 +124,11 @@ for lease_file in "${lease_files[@]}"; do
     continue
   fi
 
+  backend="$(jq -r '.backend // "runpod"' "$lease_file")"
+  if [[ "$backend" != "runpod" ]]; then
+    continue
+  fi
+
   pod_id="$(jq -r '.pod_id // empty' "$lease_file")"
   ssh_host="$(jq -r '.ssh.host // empty' "$lease_file")"
   ssh_port="$(jq -r '.ssh.port // 22' "$lease_file")"
