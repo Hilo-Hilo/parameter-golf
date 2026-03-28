@@ -926,12 +926,20 @@ class GPT(nn.Module):
         v0 = None
         skips: list[Tensor] = []
         ve_cache: dict = {}
+        _bank_qat = CastedLinear._qat_enabled and self.training
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
-            x, raw_v = self.blocks[i](x, x0,
-                self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
-                v_embed=ve, v0=v0)
+            if _bank_qat:
+                q_w = _qat_fake_row(self.qo_bank[i], 31)
+                k_w = _qat_fake_row(self.kv_bank[i], 31)
+                v_w = _qat_fake_row(self.kv_bank[n + i], 31)
+                o_w = _qat_fake_row(self.qo_bank[n + i], 31)
+                up_w = _qat_fake_row(self.mlp_up_bank[i], 15)
+                dn_w = _qat_fake_row(self.mlp_down_bank[i], 15)
+            else:
+                q_w, k_w, v_w, o_w = self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i], self.qo_bank[n + i]
+                up_w, dn_w = self.mlp_up_bank[i], self.mlp_down_bank[i]
+            x, raw_v = self.blocks[i](x, x0, q_w, k_w, v_w, o_w, up_w, dn_w, v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
             skips.append(x)
@@ -940,10 +948,17 @@ class GPT(nn.Module):
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             ve = self._get_ve(bi, input_ids, ve_cache)
-            x, _ = self.blocks[bi](x, x0,
-                self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
-                v_embed=ve, v0=v0)
+            if _bank_qat:
+                q_w = _qat_fake_row(self.qo_bank[bi], 31)
+                k_w = _qat_fake_row(self.kv_bank[bi], 31)
+                v_w = _qat_fake_row(self.kv_bank[n + bi], 31)
+                o_w = _qat_fake_row(self.qo_bank[n + bi], 31)
+                up_w = _qat_fake_row(self.mlp_up_bank[bi], 15)
+                dn_w = _qat_fake_row(self.mlp_down_bank[bi], 15)
+            else:
+                q_w, k_w, v_w, o_w = self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi], self.qo_bank[n + bi]
+                up_w, dn_w = self.mlp_up_bank[bi], self.mlp_down_bank[bi]
+            x, _ = self.blocks[bi](x, x0, q_w, k_w, v_w, o_w, up_w, dn_w, v_embed=ve, v0=v0)
         x = self.final_norm(x)
         x_flat = x.reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
@@ -1250,6 +1265,14 @@ def _classify_param(name: str) -> str:
     if ".attn." in name or (".proj." in name and ".mlp." not in name):
         return "attn"
     return "other"
+def _qat_fake_row(w: Tensor, clip: int = 31) -> Tensor:
+    """STE per-row fake quantization for bank weights. clip=31 → int6, clip=15 → int5."""
+    w32 = w.detach().float()
+    row_max = w32.abs().amax(dim=1)
+    scale = (row_max / clip).clamp_min(1.0 / clip)
+    w_q = torch.clamp((w32 / scale[:, None]).round(), -clip, clip) * scale[:, None]
+    return w + (w_q.to(w.dtype) - w).detach()
+
 def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
@@ -1338,7 +1361,7 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str], int5_cats: set[str] = frozenset()):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1357,7 +1380,12 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             result[name] = t.float()
             meta[name] = "passthrough_ctrl"
             continue
-        if cat in int6_cats and t.ndim >= 1:
+        if cat in int5_cats and t.ndim >= 1:
+            q, s = quantize_int6_per_row(t, clip_range=15)
+            result[name + ".q"] = q
+            result[name + ".scale"] = s
+            meta[name] = {"type": "int5"}
+        elif cat in int6_cats and t.ndim >= 1:
             q, s = quantize_int6_per_row(t)
             result[name + ".q"] = q
             result[name + ".scale"] = s
@@ -1799,11 +1827,11 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"attn"}, int5_cats={"mlp"})
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
