@@ -40,9 +40,12 @@ FINAL_RE = re.compile(r"final_int8_zlib_roundtrip\s+val_loss:([0-9.]+)\s+val_bpb
 FINAL_EXACT_RE = re.compile(r"final_int8_zlib_roundtrip_exact\s+val_loss:([0-9.]+)\s+val_bpb:([0-9.]+)")
 RUN_ID_RE = re.compile(r"run_id:(\S+)")
 CODE_SIZE_RE = re.compile(r"Code size:\s*(\d+)\s+bytes", re.IGNORECASE)
-TOTAL_SIZE_RE = re.compile(r"Total submission size int8\+zlib:\s*(\d+)\s+bytes", re.IGNORECASE)
+TOTAL_SIZE_RE = re.compile(
+    r"Total submission size (?:int8\+zlib|int6\+lzma|int\d+\+\w+):\s*(\d+)\s+bytes",
+    re.IGNORECASE,
+)
 MODEL_BYTES_RE = re.compile(
-    r"(?:Serialized model int8\+zlib|serialized_model_int8_zlib:)\s*:?\s*(\d+)\s+bytes",
+    r"(?:Serialized model (?:int8\+zlib|int6\+lzma|int\d+\+\w+)|serialized_model_int8_zlib:)\s*:?\s*(\d+)\s+bytes",
     re.IGNORECASE,
 )
 
