@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    complement_alpha = float(os.environ.get("COMPLEMENT_ALPHA", "0.0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -915,7 +917,7 @@ class GPT(nn.Module):
         ve_base = ve_cache['ve'] if ve_cache is not None else self.ve_shared(input_ids)
         ve_idx = self.ve_layer_indices.index(layer_idx)
         return ve_base * self.ve_layer_scales[ve_idx].to(dtype=ve_base.dtype)
-    def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
+    def forward(self, input_ids: Tensor, target_ids: Tensor, complement_weights: Tensor | None = None) -> Tensor:
         n = self.num_layers
         x = self.tok_emb(input_ids)
         if self.bigram is not None:
@@ -954,7 +956,11 @@ class GPT(nn.Module):
                 raise RuntimeError("lm_head is required when tie_embeddings=False")
             logits_proj = self.lm_head(x_flat)
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
-        main_loss = F.cross_entropy(logits.float(), targets, reduction="mean")
+        if complement_weights is not None:
+            per_token_loss = F.cross_entropy(logits.float(), targets, reduction="none")
+            main_loss = (per_token_loss * complement_weights.reshape(-1)).sum() / complement_weights.sum().clamp(min=1.0)
+        else:
+            main_loss = F.cross_entropy(logits.float(), targets, reduction="mean")
         if self.training and self.mtp_num_heads > 0 and self.mtp_loss_weight > 0.0:
             _, seqlen, dim = x.shape
             mtp_loss_sum = x.new_zeros(())
@@ -1136,7 +1142,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1600,6 +1609,32 @@ def main() -> None:
     )
     log0(f"seed:{args.seed}")
     train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+    # Build complement training bigram table from first 10M training tokens
+    bigram_table: torch.Tensor | None = None
+    if args.complement_alpha > 0:
+        vocab = args.vocab_size
+        if master_process:
+            stream_pre = TokenStream(args.train_files)
+            bigram_flat = torch.zeros(vocab * vocab, dtype=torch.float32)
+            prebuild_target = 10_000_000
+            tokens_read = 0
+            while tokens_read < prebuild_target:
+                chunk = stream_pre.take(min(786433, prebuild_target - tokens_read + 1))
+                if chunk.numel() < 2:
+                    break
+                prev_toks = chunk[:-1].long()
+                next_toks = chunk[1:].long()
+                flat_idx = (prev_toks * vocab + next_toks).clamp(0, vocab * vocab - 1)
+                bigram_flat.scatter_add_(0, flat_idx, torch.ones(flat_idx.shape[0]))
+                tokens_read += chunk.numel() - 1
+            bigram_matrix = bigram_flat.reshape(vocab, vocab)
+            row_sums = bigram_matrix.sum(dim=1, keepdim=True).clamp(min=1.0)
+            bigram_table = (bigram_matrix / row_sums).to(device)
+            log0(f"complement:bigram_table built tokens={tokens_read} alpha={args.complement_alpha}")
+        else:
+            bigram_table = torch.zeros(vocab, vocab, device=device)
+        if distributed:
+            dist.broadcast(bigram_table, src=0)
     def zero_grad_all() -> None:
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
@@ -1692,7 +1727,12 @@ def main() -> None:
         for micro_step in range(grad_accum_steps):
             x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
-                loss = model(x, y)
+                if bigram_table is not None:
+                    bp = bigram_table[x.reshape(-1).long(), y.reshape(-1).long()].detach()
+                    comp_w = (1.0 - args.complement_alpha * bp).clamp(min=0.1)
+                    loss = model(x, y, comp_w)
+                else:
+                    loss = model(x, y)
             train_loss += loss.detach()
             (loss * grad_scale).backward()
         train_loss /= grad_accum_steps
@@ -1803,7 +1843,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
