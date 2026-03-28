@@ -31,6 +31,10 @@ except ImportError:
     # flash_attn signature: (q, k, v, causal) -> y  all (batch, seqlen, nheads, headdim)
     def flash_attn_3_func(q, k, v, causal=True):
         q2, k2, v2 = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+        if k2.size(1) != q2.size(1):
+            groups = q2.size(1) // k2.size(1)
+            k2 = k2.repeat_interleave(groups, dim=1)
+            v2 = v2.repeat_interleave(groups, dim=1)
         return F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal).transpose(1, 2)
 class Hyperparameters:
     data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
