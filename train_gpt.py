@@ -1136,7 +1136,7 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1250,7 +1250,7 @@ def _classify_param(name: str) -> str:
     if ".attn." in name or (".proj." in name and ".mlp." not in name):
         return "attn"
     return "other"
-def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tensor]:
+def quantize_int6_per_row(t: Tensor, clip_range: int = 31, col_weights: Tensor | None = None) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
         best_q, best_s, best_err = None, None, float('inf')
@@ -1262,7 +1262,13 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
             s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
             q = torch.clamp(torch.round(t32 / s.float()[:, None]), -clip_range, clip_range).to(torch.int8)
             recon = q.float() * s.float()[:, None]
-            err = (t32 - recon).pow(2).mean().item()
+            diff_sq = (t32 - recon).pow(2)
+            if col_weights is not None and col_weights.shape[0] == diff_sq.shape[1]:
+                w = col_weights.float().to(diff_sq.device)
+                w = w * (w.numel() / (w.sum() + 1e-8))
+                err = (diff_sq * w[None, :]).mean().item()
+            else:
+                err = diff_sq.mean().item()
             if err < best_err:
                 best_q, best_s, best_err = q, s, err
         return best_q, best_s
@@ -1338,7 +1344,7 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str], act_stats: dict[str, Tensor] | None = None):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1358,7 +1364,8 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             meta[name] = "passthrough_ctrl"
             continue
         if cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            col_w = act_stats.get(name) if act_stats is not None else None
+            q, s = quantize_int6_per_row(t, col_weights=col_w)
             result[name + ".q"] = q
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
@@ -1388,6 +1395,71 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
         else:
             out[name] = (q.float() * float(s.item())).to(orig_dtype)
     return out
+
+def collect_gptq_act_stats(
+    model: nn.Module,
+    device: torch.device,
+    vocab_size: int,
+    num_seqs: int = 64,
+    seq_len: int = 256,
+) -> dict[str, Tensor]:
+    """Collect per-layer pre-norm activation statistics for activation-weighted GPTQ.
+
+    Hooks into each block's attn_norm and mlp_norm to collect the residual stream
+    statistics before normalization. Returns a dict mapping unbanked weight names
+    to column-importance weights (shape: in_features).
+    """
+    attn_stats: dict[int, Tensor] = {}
+    mlp_stats: dict[int, Tensor] = {}
+    call_counts: dict[int, int] = {}
+
+    hooks = []
+    num_blocks = len(model.blocks)
+
+    for i in range(num_blocks):
+        def _make_attn_hook(li: int):
+            def _hook(mod, inp, out):
+                x = inp[0].detach().float()
+                s = x.pow(2).mean(dim=(0, 1)).cpu()
+                attn_stats[li] = attn_stats.get(li, torch.zeros_like(s)) + s
+                call_counts[li] = call_counts.get(li, 0) + 1
+            return _hook
+
+        def _make_mlp_hook(li: int):
+            def _hook(mod, inp, out):
+                x = inp[0].detach().float()
+                s = x.pow(2).mean(dim=(0, 1)).cpu()
+                mlp_stats[li] = mlp_stats.get(li, torch.zeros_like(s)) + s
+            return _hook
+
+        hooks.append(model.blocks[i].attn_norm.register_forward_hook(_make_attn_hook(i)))
+        hooks.append(model.blocks[i].mlp_norm.register_forward_hook(_make_mlp_hook(i)))
+
+    model.eval()
+    with torch.no_grad():
+        for si in range(0, num_seqs, 8):
+            bsz = min(8, num_seqs - si)
+            x = torch.randint(0, vocab_size, (bsz, seq_len), device=device)
+            model.forward_logits(x)
+
+    for h in hooks:
+        h.remove()
+
+    result: dict[str, Tensor] = {}
+    for li in range(num_blocks):
+        cnt = max(call_counts.get(li, 1), 1)
+        attn_w = attn_stats.get(li)
+        if attn_w is not None:
+            attn_w = attn_w / cnt
+            result[f"blocks.{li}.attn.c_q.weight"] = attn_w
+            result[f"blocks.{li}.attn.c_k.weight"] = attn_w
+            result[f"blocks.{li}.attn.c_v.weight"] = attn_w
+        mlp_w = mlp_stats.get(li)
+        if mlp_w is not None:
+            mlp_w = mlp_w / cnt
+            result[f"blocks.{li}.mlp.fc.weight"] = mlp_w
+
+    return result
 
 # --- Training ---
 
@@ -1796,14 +1868,18 @@ def main() -> None:
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
+    # Collect activation statistics for activation-weighted GPTQ calibration
+    log0("act_gptq:collecting calibration activation statistics")
+    act_stats = collect_gptq_act_stats(base_model, device, args.vocab_size)
+    log0(f"act_gptq:collected stats for {len(act_stats)} weight tensors")
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"}, act_stats=act_stats)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
