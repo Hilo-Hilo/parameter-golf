@@ -145,13 +145,16 @@ class Muon(torch.optim.Optimizer):
     4. Each all-gather overlaps with next bank's NS5
     """
     def __init__(self, params, lr: float, momentum: float, backend_steps: int,
-                 nesterov: bool = True, weight_decay: float = 0.0):
+                 nesterov: bool = True, weight_decay: float = 0.0,
+                 use_mousse: bool = False, mousse_decay: float = 0.999):
         super().__init__(
             params,
             dict(lr=lr, momentum=momentum, backend_steps=backend_steps,
                  nesterov=nesterov, weight_decay=weight_decay),
         )
         self._built = False
+        self._use_mousse = use_mousse
+        self._mousse_decay = mousse_decay
 
     def _build(self):
         self._distributed = dist.is_available() and dist.is_initialized()
@@ -167,7 +170,7 @@ class Muon(torch.optim.Optimizer):
                 shard_B = padded_B // ws
                 tail = p.shape[1:]
                 dev = p.device
-                self._bank_meta.append({
+                entry = {
                     'p': p,
                     'B': B,
                     'padded_grad': torch.zeros(padded_B, *tail, device=dev, dtype=torch.bfloat16),
@@ -175,7 +178,12 @@ class Muon(torch.optim.Optimizer):
                     'shard_mom': torch.zeros(shard_B, *tail, device=dev, dtype=torch.bfloat16),
                     'full_update': torch.zeros(padded_B, *tail, device=dev, dtype=torch.bfloat16),
                     'scale': max(1, p.shape[-2] / p.shape[-1]) ** 0.5,
-                })
+                }
+                # Mousse: left-side Shampoo on shard (shard_B x shard_B, small when distributed)
+                # Initialize to identity so preconditioning is neutral at step 0
+                if self._use_mousse and self._world_size > 1:
+                    entry['L_ema'] = torch.eye(shard_B, device=dev, dtype=torch.float32)
+                self._bank_meta.append(entry)
         # Sort by size descending -- launch biggest reduce-scatters first
         self._bank_meta.sort(key=lambda m: -m['p'].numel())
         self._built = True
@@ -252,6 +260,20 @@ class Muon(torch.optim.Optimizer):
                 else:
                     update = buf
 
+                # Mousse: one-sided Shampoo preconditioning on left (row-space)
+                if 'L_ema' in m:
+                    g_f = g.float()
+                    m['L_ema'].mul_(self._mousse_decay).add_(
+                        g_f @ g_f.T, alpha=1.0 - self._mousse_decay)
+                    n = m['L_ema'].size(0)
+                    L_reg = m['L_ema'] + 1e-6 * torch.eye(n, device=m['L_ema'].device, dtype=torch.float32)
+                    try:
+                        evals, evecs = torch.linalg.eigh(L_reg)
+                        evals_inv_sqrt = evals.clamp(min=1e-12).rsqrt()
+                        L_inv_sqrt = evecs @ (evals_inv_sqrt.unsqueeze(-1) * evecs.T)
+                        update = (L_inv_sqrt.to(update.dtype) @ update.float()).to(update.dtype)
+                    except Exception:
+                        pass  # fallback: skip preconditioning if eigendecomp fails
                 update = zeropower_via_newtonschulz5(update, steps=backend_steps)
 
                 if sharded:
@@ -1136,7 +1158,7 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1551,6 +1573,7 @@ def main() -> None:
         momentum=args.muon_momentum,
         backend_steps=args.muon_backend_steps,
         weight_decay=args.muon_wd,
+        use_mousse=True,
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
@@ -1576,9 +1599,21 @@ def main() -> None:
             fused=True,
         )
         replicated_params.append(base_model.lm_head.weight)
+    optimizer_mtp = None
+    if len(base_model.mtp_heads) > 0:
+        mtp_head_params = [p for p in base_model.mtp_heads.parameters()]
+        optimizer_mtp = torch.optim.Adam(
+            [{"params": mtp_head_params, "lr": args.head_lr, "base_lr": args.head_lr}],
+            betas=(args.beta1, args.beta2),
+            eps=args.adam_eps,
+            fused=True,
+        )
+        replicated_params.extend(mtp_head_params)
     optimizers: list[torch.optim.Optimizer] = [optimizer_tok, optimizer_muon, optimizer_scalar]
     if optimizer_head is not None:
         optimizers.append(optimizer_head)
+    if optimizer_mtp is not None:
+        optimizers.append(optimizer_mtp)
     n_params = sum(p.numel() for p in base_model.parameters())
     mtp_params = sum(p.numel() for p in base_model.mtp_heads.parameters())
     log0(f"model_params:{n_params}")
@@ -1803,7 +1838,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
