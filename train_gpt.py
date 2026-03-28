@@ -109,6 +109,10 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
+    ttt_perlayer = bool(int(os.environ.get("TTT_PERLAYER", "0")))
+    ttt_mlp_down_lr_mult = float(os.environ.get("TTT_MLP_DOWN_LR_MULT", "2.0"))
+    ttt_attn_lr_mult = float(os.environ.get("TTT_ATTN_LR_MULT", "0.5"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -275,6 +279,49 @@ class Muon(torch.optim.Optimizer):
                 del self._rs_futures
 
         return loss
+
+# --- MuonTTT: non-distributed Muon for test-time training ---
+
+class MuonTTT:
+    """Non-distributed Muon for TTT: NS5 for 2D/3D params, Nesterov momentum for 1D."""
+    def __init__(self, param_groups: list, momentum: float = 0.9, backend_steps: int = 5):
+        self.param_groups = param_groups
+        self.momentum = momentum
+        self.backend_steps = backend_steps
+        self._bufs: dict[int, Tensor] = {}
+        for group in param_groups:
+            for p in group['params']:
+                self._bufs[id(p)] = torch.zeros_like(p.data, dtype=torch.float32)
+
+    def zero_grad(self, set_to_none: bool = True) -> None:
+        for group in self.param_groups:
+            for p in group['params']:
+                if set_to_none:
+                    p.grad = None
+                elif p.grad is not None:
+                    p.grad.zero_()
+
+    @torch.no_grad()
+    def step(self) -> None:
+        for group in self.param_groups:
+            lr = group['lr']
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                buf = self._bufs[id(p)]
+                if p.grad.ndim >= 2:
+                    g_orth = zeropower_via_newtonschulz5(
+                        p.grad.bfloat16(), steps=self.backend_steps
+                    ).float()
+                    buf.mul_(self.momentum).add_(g_orth)
+                    update = g_orth.add(buf, alpha=self.momentum)  # Nesterov
+                    scale = max(1.0, p.grad.shape[-2] / p.grad.shape[-1]) ** 0.5
+                else:
+                    g = p.grad.float()
+                    buf.mul_(self.momentum).add_(g)
+                    update = g.add(buf, alpha=self.momentum)  # Nesterov
+                    scale = 1.0
+                p.data.add_(update.to(p.dtype), alpha=-lr * scale)
 
 # --- Tokenizer evaluation helpers ---
 
@@ -1118,9 +1165,11 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
+    # Freeze first N blocks; classify remaining params for optional per-layer LR
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
+    mlp_down_params: list = []
+    attn_params: list = []
+    other_params: list = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1131,12 +1180,39 @@ def eval_val_sliding_ttt(
             p.requires_grad_(False)
         else:
             p.requires_grad_(True)
-            ttt_params.append(p)
+            if 'mlp_down_bank' in name:
+                mlp_down_params.append(p)
+            elif 'qo_bank' in name or 'kv_bank' in name:
+                attn_params.append(p)
+            else:
+                other_params.append(p)
+    ttt_params = mlp_down_params + attn_params + other_params
+
+    if args.ttt_perlayer:
+        mlp_lr = args.ttt_lr * args.ttt_mlp_down_lr_mult
+        attn_lr = args.ttt_lr * args.ttt_attn_lr_mult
+        mlp_lr_mult = args.ttt_mlp_down_lr_mult
+        attn_lr_mult = args.ttt_attn_lr_mult
+    else:
+        mlp_lr = attn_lr = args.ttt_lr
+        mlp_lr_mult = attn_lr_mult = 1.0
+
+    param_groups = [
+        pg for pg in [
+            {'params': mlp_down_params, 'lr': mlp_lr, 'lr_mult': mlp_lr_mult},
+            {'params': attn_params, 'lr': attn_lr, 'lr_mult': attn_lr_mult},
+            {'params': other_params, 'lr': args.ttt_lr, 'lr_mult': 1.0},
+        ] if pg['params']
+    ]
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
+         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)} "
+         f"ttt_muon={args.ttt_muon} ttt_perlayer={args.ttt_perlayer}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_muon:
+        optimizer = MuonTTT(param_groups, momentum=args.ttt_momentum)
+    else:
+        optimizer = torch.optim.SGD(param_groups, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1191,7 +1267,7 @@ def eval_val_sliding_ttt(
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = cos_lr * pg.get('lr_mult', 1.0)
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1803,7 +1879,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
