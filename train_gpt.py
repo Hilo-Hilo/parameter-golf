@@ -91,6 +91,7 @@ class Hyperparameters:
     qat_enabled = bool(int(os.environ.get("QAT_ENABLED", "0")))
     bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 2048))
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 128))
+    bigram_num_heads = int(os.environ.get("BIGRAM_NUM_HEADS", 1))
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 4))
     rope_dims = int(os.environ.get("ROPE_DIMS", 16))
     ln_scale = bool(int(os.environ.get("LN_SCALE", "1")))
@@ -693,24 +694,48 @@ class SmearGate(nn.Module):
         return (1 - g) * x + g * x_prev
 
 class BigramHashEmbedding(nn.Module):
-    def __init__(self, bigram_vocab_size: int, bigram_dim: int, model_dim: int):
+    # Different multiplier pairs per head for hash independence.
+    # All values chosen so (mult * 1023) fits in int32 (< 2^31).
+    _HASH_MULTS = [(36313, 27191), (48271, 12289), (65521, 34501), (51913, 44893)]
+
+    def __init__(self, bigram_vocab_size: int, bigram_dim: int, model_dim: int, num_heads: int = 1):
         super().__init__()
         self.bigram_vocab_size = bigram_vocab_size
+        self.num_heads = max(1, num_heads)
+        self.head_vocab = bigram_vocab_size // self.num_heads
         self.embed = nn.Embedding(bigram_vocab_size, bigram_dim)
         nn.init.zeros_(self.embed.weight)
         self.proj = CastedLinear(bigram_dim, model_dim, bias=False) if bigram_dim != model_dim else None
         if self.proj is not None:
             nn.init.zeros_(self.proj.weight)
         self.scale = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
+
     def bigram_hash(self, tokens: Tensor) -> Tensor:
+        # Original single-head hash (backward compat when num_heads==1).
         t = tokens.to(torch.int32)
         mod = self.bigram_vocab_size - 1
         out = torch.empty_like(t)
         out[..., 0] = mod
         out[..., 1:] = torch.bitwise_xor(36313 * t[..., 1:], 27191 * t[..., :-1]) % mod
         return out.long()
+
+    def _bigram_hash_head(self, tokens: Tensor, head: int) -> Tensor:
+        t = tokens.to(torch.int32)
+        a, b = self._HASH_MULTS[head % len(self._HASH_MULTS)]
+        hv = self.head_vocab
+        offset = head * hv
+        head_mod = hv - 1
+        out = torch.empty_like(t)
+        out[..., 0] = offset + head_mod
+        out[..., 1:] = offset + (torch.bitwise_xor(a * t[..., 1:], b * t[..., :-1]) % head_mod)
+        return out.long()
+
     def forward(self, token_ids: Tensor) -> Tensor:
-        h = self.embed(self.bigram_hash(token_ids))
+        if self.num_heads == 1:
+            h = self.embed(self.bigram_hash(token_ids))
+        else:
+            h = sum(self.embed(self._bigram_hash_head(token_ids, k)) for k in range(self.num_heads))
+            h = h * (1.0 / self.num_heads)
         if self.proj is not None:
             h = self.proj(h)
         return h * self.scale.to(dtype=h.dtype)
@@ -800,6 +825,7 @@ class GPT(nn.Module):
         mtp_loss_weight: float = 0.1,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        bigram_num_heads: int = 1,
         xsa_last_n: int = 0,
         rope_dims: int = 0,
         ln_scale: bool = False,
@@ -821,7 +847,7 @@ class GPT(nn.Module):
         self.mtp_num_heads = mtp_num_heads
         self.mtp_loss_weight = mtp_loss_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
-        self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
+        self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim, bigram_num_heads) if bigram_vocab_size > 0 else None
         self.smear = SmearGate(model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -1481,6 +1507,7 @@ def main() -> None:
         mtp_loss_weight=args.mtp_loss_weight,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        bigram_num_heads=args.bigram_num_heads,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims,
         ln_scale=args.ln_scale,
@@ -1829,6 +1856,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap, rope_base=args.rope_base, qk_gain_init=args.qk_gain_init,
         mtp_num_heads=0, mtp_loss_weight=0.0,
         bigram_vocab_size=args.bigram_vocab_size, bigram_dim=args.bigram_dim,
+        bigram_num_heads=args.bigram_num_heads,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
