@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1120,7 +1122,9 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+    n_blocks = len(base_model.blocks)
     ttt_params = []
+    muon_meta: list[dict] = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1132,11 +1136,27 @@ def eval_val_sliding_ttt(
         else:
             p.requires_grad_(True)
             ttt_params.append(p)
+            if args.ttt_muon and p.ndim >= 2:
+                block_idx = None
+                for bi in range(n_blocks):
+                    if f"blocks.{bi}." in name:
+                        block_idx = bi
+                        break
+                if args.ttt_perlayer_lr and block_idx is not None:
+                    frac = block_idx / max(n_blocks - 1, 1)
+                    lr_mult = 0.5 + 1.5 * frac
+                else:
+                    lr_mult = 1.0
+                muon_meta.append({"p": p, "lr_mult": lr_mult, "buf": torch.zeros_like(p.data)})
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_muon:
+        scalar_params = [p for p in ttt_params if p.ndim < 2]
+        optimizer = torch.optim.SGD(scalar_params, lr=args.ttt_lr, momentum=args.ttt_momentum) if scalar_params else None
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,8 +1210,9 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if optimizer is not None:
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1206,7 +1227,8 @@ def eval_val_sliding_ttt(
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
-                        optimizer.zero_grad(set_to_none=True)
+                        for p in ttt_params:
+                            p.grad = None
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
@@ -1215,7 +1237,18 @@ def eval_val_sliding_ttt(
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
                         torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
-                        optimizer.step()
+                        if args.ttt_muon:
+                            for meta in muon_meta:
+                                p_m = meta["p"]
+                                if p_m.grad is None:
+                                    continue
+                                g = zeropower_via_newtonschulz5(p_m.grad.float(), steps=5)
+                                meta["buf"].mul_(args.ttt_momentum).add_(g)
+                                p_m.data.add_(meta["buf"], alpha=-(cos_lr * meta["lr_mult"]))
+                            if optimizer is not None:
+                                optimizer.step()
+                        else:
+                            optimizer.step()
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
