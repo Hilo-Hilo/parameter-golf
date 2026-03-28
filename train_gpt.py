@@ -89,7 +89,7 @@ class Hyperparameters:
     muon_wd = float(os.environ.get("MUON_WD", 0.04))
     adam_wd = float(os.environ.get("ADAM_WD", 0.04))
     qat_enabled = bool(int(os.environ.get("QAT_ENABLED", "0")))
-    bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 2048))
+    bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 1536))
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 128))
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 4))
     rope_dims = int(os.environ.get("ROPE_DIMS", 16))
@@ -105,10 +105,11 @@ class Hyperparameters:
     ttt_lr = float(os.environ.get("TTT_LR", 0.002))
     ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
     ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 32768))
-    ttt_freeze_blocks = int(os.environ.get("TTT_FREEZE_BLOCKS", 2))
+    ttt_freeze_blocks = int(os.environ.get("TTT_FREEZE_BLOCKS", 0))
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_score_weight = bool(int(os.environ.get("TTT_SCORE_WEIGHT", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1139,6 +1140,10 @@ def eval_val_sliding_ttt(
     optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
+    # For score-adaptive LR: track running NLL EMA across chunks
+    _score_ema_nll: float | None = None
+    _score_ema_alpha = 0.1
+
     for ci in range(num_chunks):
         windows = chunk_windows[ci]
         if not windows:
@@ -1150,6 +1155,10 @@ def eval_val_sliding_ttt(
         my_s = (len(windows) * rank) // world_size
         my_e = (len(windows) * (rank + 1)) // world_size
         my_windows = windows[my_s:my_e]
+
+        # Snapshot accumulators before scoring this chunk (for score-adaptive LR)
+        _prev_loss = loss_sum.item()
+        _prev_tokens = token_count.item()
 
         base_model.eval()
         with torch.no_grad():
@@ -1183,13 +1192,28 @@ def eval_val_sliding_ttt(
                     tb += (has_leading_space_lut[tgt] & ~is_boundary_token_lut[prev]).to(torch.float64)
                     byte_count += tb.sum()
 
+        # Compute score-adaptive LR scale: high-loss chunks get higher training LR
+        if args.ttt_score_weight:
+            _delta_tokens = token_count.item() - _prev_tokens
+            if _delta_tokens > 0:
+                _chunk_nll = (loss_sum.item() - _prev_loss) / _delta_tokens
+                if _score_ema_nll is None:
+                    _score_ema_nll = _chunk_nll
+                else:
+                    _score_ema_nll = _score_ema_alpha * _chunk_nll + (1.0 - _score_ema_alpha) * _score_ema_nll
+                _score_scale = min(_chunk_nll / max(_score_ema_nll, 1e-6), 2.0)
+            else:
+                _score_scale = 1.0
+        else:
+            _score_scale = 1.0
+
         # --- Phase 2: TRAIN on this chunk (already scored = legal) ---
         is_last_chunk = (ci == num_chunks - 1)
         if not is_last_chunk and args.ttt_epochs > 0:
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1))) * _score_scale
                 for pg in optimizer.param_groups:
                     pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
