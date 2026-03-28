@@ -1136,7 +1136,7 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1250,7 +1250,44 @@ def _classify_param(name: str) -> str:
     if ".attn." in name or (".proj." in name and ".mlp." not in name):
         return "attn"
     return "other"
-def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tensor]:
+def collect_hessian_diags(model: nn.Module, device: torch.device, model_dim: int,
+                           n_batches: int = 4, batch_size: int = 4, seq_len: int = 2048,
+                           seed: int = 42, log0=print) -> tuple[list, list]:
+    """Collect diagonal Hessian E[x^2] for GPTQ calibration via random-seed forward passes.
+    Hooks into attn_norm and mlp_norm outputs to gather per-dimension squared activation stats.
+    Returns (h_attn, h_mlp) where each is a list of float32 tensors [model_dim] per layer."""
+    model.eval()
+    n_layers = len(model.blocks)
+    h_attn = [torch.zeros(model_dim, dtype=torch.float32) for _ in range(n_layers)]
+    h_mlp = [torch.zeros(model_dim, dtype=torch.float32) for _ in range(n_layers)]
+    hooks = []
+    for i, block in enumerate(model.blocks):
+        def _make_attn_hook(li):
+            def hook(module, inp, out):
+                h_attn[li].add_(out.float().detach().pow(2).mean(dim=(0, 1)).cpu())
+            return hook
+        def _make_mlp_hook(li):
+            def hook(module, inp, out):
+                h_mlp[li].add_(out.float().detach().pow(2).mean(dim=(0, 1)).cpu())
+            return hook
+        hooks.append(block.attn_norm.register_forward_hook(_make_attn_hook(i)))
+        hooks.append(block.mlp_norm.register_forward_hook(_make_mlp_hook(i)))
+    rng = torch.Generator(device=device)
+    rng.manual_seed(seed)
+    vocab_size = model.tok_emb.num_embeddings
+    with torch.inference_mode():
+        for _ in range(n_batches):
+            x = torch.randint(0, vocab_size, (batch_size, seq_len), device=device, generator=rng)
+            model.forward_logits(x)
+    for h in hooks:
+        h.remove()
+    for i in range(n_layers):
+        h_attn[i].div_(n_batches)
+        h_mlp[i].div_(n_batches)
+    log0(f"hess_gptq:collected diagonal Hessian for {n_layers} layers ({n_batches} batches x {batch_size} seqs x {seq_len} tokens)")
+    return h_attn, h_mlp
+
+def quantize_int6_per_row(t: Tensor, clip_range: int = 31, hess_diag: Tensor | None = None) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
         best_q, best_s, best_err = None, None, float('inf')
@@ -1262,7 +1299,12 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
             s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
             q = torch.clamp(torch.round(t32 / s.float()[:, None]), -clip_range, clip_range).to(torch.int8)
             recon = q.float() * s.float()[:, None]
-            err = (t32 - recon).pow(2).mean().item()
+            if hess_diag is not None and hess_diag.shape[0] == t32.shape[1]:
+                # Weight MSE by diagonal Hessian E[x^2]: minimizes expected output reconstruction error
+                h = hess_diag.to(device=t32.device, dtype=torch.float32).clamp_min(1e-8)
+                err = ((t32 - recon).pow(2) * h.unsqueeze(0)).mean().item()
+            else:
+                err = (t32 - recon).pow(2).mean().item()
             if err < best_err:
                 best_q, best_s, best_err = q, s, err
         return best_q, best_s
@@ -1338,7 +1380,8 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str],
+                          h_attn: list | None = None, h_mlp: list | None = None):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1358,7 +1401,19 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             meta[name] = "passthrough_ctrl"
             continue
         if cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            # Select diagonal Hessian for this weight based on layer index and type
+            hess_diag = None
+            if (h_attn is not None or h_mlp is not None) and name.startswith("blocks."):
+                parts = name.split(".")
+                try:
+                    layer_idx = int(parts[1])
+                    if "attn" in name and h_attn is not None and layer_idx < len(h_attn):
+                        hess_diag = h_attn[layer_idx]
+                    elif "mlp" in name and h_mlp is not None and layer_idx < len(h_mlp):
+                        hess_diag = h_mlp[layer_idx]
+                except (ValueError, IndexError):
+                    pass
+            q, s = quantize_int6_per_row(t, hess_diag=hess_diag)
             result[name + ".q"] = q
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
@@ -1799,11 +1854,21 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    # Collect diagonal Hessian on rank 0 for calibration-aware GPTQ clip search
+    h_attn_cal, h_mlp_cal = None, None
+    if master_process:
+        try:
+            h_attn_cal, h_mlp_cal = collect_hessian_diags(
+                base_model, device, args.model_dim, n_batches=4, batch_size=4,
+                seq_len=args.train_seq_len, seed=42, log0=log0)
+        except Exception as e:
+            log0(f"hess_gptq:skipping Hessian calibration due to error: {e}")
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"},
+                                                     h_attn=h_attn_cal, h_mlp=h_mlp_cal)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
