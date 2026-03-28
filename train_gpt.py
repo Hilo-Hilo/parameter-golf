@@ -1136,7 +1136,7 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,12 +1190,13 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
                 for _ep in range(args.ttt_epochs):
+                    ep_lr = cos_lr * 0.5 * (1.0 + math.cos(math.pi * _ep / max(args.ttt_epochs, 1)))
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = ep_lr
                     for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
                         actual_bs = my_seq_s + bs
@@ -1214,6 +1215,16 @@ def eval_val_sliding_ttt(
                             for p in ttt_params:
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+                        # QTTT: zero out O-projection, K/V, and MLP gradients; update only Q projections
+                        n_l = len(base_model.blocks)
+                        if base_model.qo_bank.grad is not None:
+                            base_model.qo_bank.grad[n_l:].zero_()
+                        if base_model.kv_bank.grad is not None:
+                            base_model.kv_bank.grad.zero_()
+                        if base_model.mlp_up_bank.grad is not None:
+                            base_model.mlp_up_bank.grad.zero_()
+                        if base_model.mlp_down_bank.grad is not None:
+                            base_model.mlp_down_bank.grad.zero_()
                         torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
                         optimizer.step()
 
