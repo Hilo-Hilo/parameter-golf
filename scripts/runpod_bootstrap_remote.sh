@@ -80,6 +80,22 @@ if [ "$ACTUAL_SHA" != "$COMMIT_SHA" ]; then
   exit 1
 fi
 
+# Always sync train_gpt.py from origin/main unless the planner intentionally
+# modified it in this approach branch (detected by diff from the merge base).
+# This ensures infrastructure bug fixes on main propagate to all queued jobs.
+_MERGE_BASE="$(git merge-base origin/main "$COMMIT_SHA" 2>/dev/null || echo "")"
+if [ -n "$_MERGE_BASE" ]; then
+  _APPROACH_PY="$(git rev-parse "${COMMIT_SHA}:train_gpt.py" 2>/dev/null || echo "")"
+  _BASE_PY="$(git rev-parse "${_MERGE_BASE}:train_gpt.py" 2>/dev/null || echo "")"
+  if [ -n "$_APPROACH_PY" ] && [ -n "$_BASE_PY" ] && [ "$_APPROACH_PY" = "$_BASE_PY" ]; then
+    echo "Approach branch has unmodified train_gpt.py — syncing from origin/main..."
+    git show origin/main:train_gpt.py > "$JOB_DIR/train_gpt.py"
+    echo "train_gpt.py synced from origin/main."
+  else
+    echo "Approach branch has planner-modified train_gpt.py — using as-is."
+  fi
+fi
+
 # Ensure data path exists for potential datasets
 mkdir -p "$WORKSPACE/data"
 

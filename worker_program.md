@@ -63,6 +63,24 @@ Read before taking action:
 - If you need more detail from a large file, use targeted `Read` calls with `offset` and `limit`, or use `Grep` / `Glob` first.
 - Keep exploration bounded. Prefer one well-motivated hypothesis over exhaustive repo-wide scanning.
 
+## Edit Permissions
+
+**`--dangerously-skip-permissions` is set.** You CAN and SHOULD edit `train_gpt.py` in your worktree. File edits are auto-approved — no user confirmation needed. Use the `Edit` tool directly. This is the primary way to make code improvements. Do NOT skip code changes just because you think permissions are blocked — they are NOT blocked.
+
+## Critical Crash Pattern: GQA + torch.compile
+
+**SYMPTOM**: `RuntimeError('Invalid backend')` from `F.scaled_dot_product_attention` with q heads ≠ kv heads (e.g., q=(B,8,T,D) k=(B,4,T,D)).
+
+**ROOT CAUSE**: The model uses GQA (`num_heads=8`, `num_kv_heads=4`). The `flash_attn_3_func` fallback (used when flash_attn library is not installed, which is the case on Shadeform) must expand k/v heads before calling SDPA. The fix is already in `train_gpt.py` (lines 32-38):
+```python
+if k2.size(1) != q2.size(1):
+    groups = q2.size(1) // k2.size(1)
+    k2 = k2.repeat_interleave(groups, dim=1)
+    v2 = v2.repeat_interleave(groups, dim=1)
+```
+
+**IMPLICATION**: Any code you add that calls attention must respect GQA. When adding new attention paths, ensure k/v are expanded to match q heads before calling SDPA or flash_attn_3_func. The existing `flash_attn_3_func` already handles this — just route through it.
+
 ## 8xH100 Official Track (CURRENT MODE)
 
 This swarm runs on **8xH100 via SkyPilot/Shadeform** — the official contest setup.

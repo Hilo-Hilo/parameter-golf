@@ -808,6 +808,7 @@ run_claude_phase() {
     --max-turns "$max_turns" \
     --max-budget-usd "$max_budget" \
     --tools "Read,Edit,Glob,Grep" \
+    --dangerously-skip-permissions \
     --settings "$MAIN_CHECKOUT/.claude/settings.json" \
     --mcp-config "$MAIN_CHECKOUT/.mcp.json" \
     --strict-mcp-config \
