@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_weight_decay = float(os.environ.get("TTT_WEIGHT_DECAY", "0.0"))
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1120,7 +1123,10 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+    num_ttt_layers = len(base_model.blocks)
+    frozen_until = min(args.ttt_freeze_blocks, num_ttt_layers)
     ttt_params = []
+    ttt_lr_mults = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1132,11 +1138,35 @@ def eval_val_sliding_ttt(
         else:
             p.requires_grad_(True)
             ttt_params.append(p)
+            lr_mult = 1.0
+            if args.ttt_perlayer_lr:
+                for bi in range(frozen_until, num_ttt_layers):
+                    if f"blocks.{bi}." in name:
+                        depth = (bi - frozen_until) / max(num_ttt_layers - 1 - frozen_until, 1)
+                        lr_mult = 0.5 + 0.5 * depth
+                        break
+            ttt_lr_mults.append(lr_mult)
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_perlayer_lr:
+        opt_param_groups = [
+            {'params': [p], 'lr': args.ttt_lr * m, 'lr_mult': m}
+            for p, m in zip(ttt_params, ttt_lr_mults)
+        ]
+    else:
+        opt_param_groups = ttt_params
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            optimizer = torch.optim.AdamW(opt_param_groups, weight_decay=args.ttt_weight_decay)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=args.ttt_weight_decay)
+    else:
+        if args.ttt_perlayer_lr:
+            optimizer = torch.optim.SGD(opt_param_groups, momentum=args.ttt_momentum)
+        else:
+            optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1219,14 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                if args.ttt_perlayer_lr:
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = args.ttt_lr * cos_scale * pg.get('lr_mult', 1.0)
+                else:
+                    cos_lr = args.ttt_lr * cos_scale
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
