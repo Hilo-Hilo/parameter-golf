@@ -1389,6 +1389,39 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
             out[name] = (q.float() * float(s.item())).to(orig_dtype)
     return out
 
+def apply_optrot(unbanked_sd: dict, num_layers: int, model_dim: int,
+                 num_heads: int, num_kv_heads: int) -> dict:
+    """Apply random orthogonal V-O rotation before int6 quantization.
+
+    For each KV head g: V_g' = S_g @ V_g, O_h' = O_h @ S_g^T for all Q heads h
+    that share V head g (GQA groups). Preserves model outputs exactly while
+    redistributing weight outliers uniformly for better int6 quantization quality.
+    Reference: OptRot, arXiv:2512.24124.
+    """
+    head_dim = model_dim // num_heads
+    groups = num_heads // num_kv_heads
+    gen = torch.Generator()
+    gen.manual_seed(42)
+    for i in range(num_layers):
+        v_name = f"blocks.{i}.attn.c_v.weight"
+        o_name = f"blocks.{i}.attn.proj.weight"
+        if v_name not in unbanked_sd or o_name not in unbanked_sd:
+            continue
+        V = unbanked_sd[v_name].float()  # (num_kv_heads * head_dim, model_dim)
+        O = unbanked_sd[o_name].float()  # (model_dim, num_heads * head_dim)
+        V_new = V.clone()
+        O_new = O.clone()
+        for g in range(num_kv_heads):
+            S = torch.linalg.qr(torch.randn(head_dim, head_dim, generator=gen))[0]
+            V_new[g * head_dim:(g + 1) * head_dim] = S @ V[g * head_dim:(g + 1) * head_dim]
+            for h in range(g * groups, (g + 1) * groups):
+                O_new[:, h * head_dim:(h + 1) * head_dim] = (
+                    O[:, h * head_dim:(h + 1) * head_dim] @ S.T
+                )
+        unbanked_sd[v_name] = V_new.to(unbanked_sd[v_name].dtype)
+        unbanked_sd[o_name] = O_new.to(unbanked_sd[o_name].dtype)
+    return unbanked_sd
+
 # --- Training ---
 
 def main() -> None:
@@ -1799,6 +1832,7 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
+    unbanked_sd = apply_optrot(unbanked_sd, args.num_layers, args.model_dim, args.num_heads, args.num_kv_heads)
     quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
