@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    int5_mlp = bool(int(os.environ.get("INT5_MLP", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1138,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if getattr(args, 'ttt_optimizer', 'sgd') == 'adamw':
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1240,6 +1245,83 @@ def eval_val_sliding_ttt(
     return val_loss, val_bpb
 
 
+# --- AR Self-Gen Activation-Aware GPTQ Calibration ---
+
+@torch.no_grad()
+def ar_gen_calib_tokens(model: nn.Module, n_seqs: int, seq_len: int,
+                         device: torch.device, temperature: float = 0.8,
+                         seed: int = 7919) -> Tensor:
+    """Generate calibration token sequences auto-regressively from the trained model.
+    All ranks produce the same sequences (deterministic seed) so quantization is consistent."""
+    torch.manual_seed(seed)
+    model.eval()
+    vocab = model.tok_emb.weight.size(0)
+    seqs = []
+    batch = 8
+    for s in range(0, n_seqs, batch):
+        bsz = min(batch, n_seqs - s)
+        tokens = torch.randint(0, vocab, (bsz, 1), device=device, dtype=torch.long)
+        for _ in range(seq_len - 1):
+            with torch.autocast("cuda", torch.bfloat16):
+                logits = model.forward_logits(tokens)[:, -1, :].float()
+            probs = F.softmax(logits / temperature, dim=-1)
+            nxt = torch.multinomial(probs, 1)
+            tokens = torch.cat([tokens, nxt], dim=1)
+        seqs.append(tokens.cpu())
+    return torch.cat(seqs, dim=0)
+
+
+def collect_mlp_act_scales(model: nn.Module, calib_tokens: Tensor,
+                            device: torch.device) -> dict:
+    """Run calibration forward passes and collect per-input-column squared activation
+    norms for MLP up and down weight matrices. Temporarily patches each MLP instance's
+    forward method to intercept activations. Returns dict of weight_name -> act_scale."""
+    n = model.num_layers
+    up_accs: list[list[Tensor]] = [[] for _ in range(n)]
+    down_accs: list[list[Tensor]] = [[] for _ in range(n)]
+    orig_forwards: dict[int, object] = {}
+
+    for li in range(n):
+        mlp = model.blocks[li].mlp
+        orig_forwards[li] = mlp.forward
+
+        def _make_fwd(layer_idx: int) -> object:
+            def _fwd(x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
+                a = x.detach().float().reshape(-1, x.size(-1))
+                up_accs[layer_idx].append((a * a).mean(0).cpu())
+                h = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+                h2 = h.square()
+                d = h2.detach().float().reshape(-1, h2.size(-1))
+                down_accs[layer_idx].append((d * d).mean(0).cpu())
+                return F.linear(h2, down_w.to(x.dtype))
+            return _fwd
+
+        mlp.forward = _make_fwd(li)
+
+    model.eval()
+    bs = 8
+    with torch.no_grad():
+        for s in range(0, calib_tokens.size(0), bs):
+            batch = calib_tokens[s:s + bs, :512].to(device=device, dtype=torch.long)
+            with torch.autocast("cuda", torch.bfloat16):
+                model.forward_logits(batch)
+
+    for li in range(n):
+        model.blocks[li].mlp.forward = orig_forwards[li]
+
+    act_scales: dict[str, Tensor] = {}
+    for i in range(n):
+        if up_accs[i]:
+            s_up = torch.stack(up_accs[i]).mean(0)
+            s_up = s_up / s_up.mean().clamp_min(1e-8)
+            act_scales[f"blocks.{i}.mlp.fc.weight"] = s_up
+        if down_accs[i]:
+            s_dn = torch.stack(down_accs[i]).mean(0)
+            s_dn = s_dn / s_dn.mean().clamp_min(1e-8)
+            act_scales[f"blocks.{i}.mlp.proj.weight"] = s_dn
+    return act_scales
+
+
 # --- GPTQ-lite int6 quantization ---
 
 def _classify_param(name: str) -> str:
@@ -1250,10 +1332,12 @@ def _classify_param(name: str) -> str:
     if ".attn." in name or (".proj." in name and ".mlp." not in name):
         return "attn"
     return "other"
-def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tensor]:
+def quantize_int6_per_row(t: Tensor, clip_range: int = 31,
+                           act_weights: Tensor | None = None) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
         best_q, best_s, best_err = None, None, float('inf')
+        aw = act_weights.to(t32.device).unsqueeze(0) if act_weights is not None else None
         for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
             if pct < 1.0:
                 row_clip = torch.quantile(t32.abs(), pct, dim=1)
@@ -1262,7 +1346,8 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
             s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
             q = torch.clamp(torch.round(t32 / s.float()[:, None]), -clip_range, clip_range).to(torch.int8)
             recon = q.float() * s.float()[:, None]
-            err = (t32 - recon).pow(2).mean().item()
+            diff = (t32 - recon).pow(2)
+            err = (diff * aw).mean().item() if aw is not None else diff.mean().item()
             if err < best_err:
                 best_q, best_s, best_err = q, s, err
         return best_q, best_s
@@ -1338,7 +1423,8 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str],
+                         act_stats: dict | None = None, int5_mlp: bool = False):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1358,10 +1444,12 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             meta[name] = "passthrough_ctrl"
             continue
         if cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            cr = 15 if (int5_mlp and cat == "mlp") else 31
+            act_w = act_stats.get(name) if act_stats else None
+            q, s = quantize_int6_per_row(t, clip_range=cr, act_weights=act_w)
             result[name + ".q"] = q
             result[name + ".scale"] = s
-            meta[name] = {"type": "int6"}
+            meta[name] = {"type": "int5" if cr == 15 else "int6"}
         else:
             q, s = quantize_float_tensor(t)
             result[name + ".q"] = q
@@ -1799,7 +1887,14 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    log0("ar_gptq: generating 64 calibration sequences (AR self-gen)...")
+    ar_calib = ar_gen_calib_tokens(base_model, n_seqs=64, seq_len=256, device=device)
+    log0("ar_gptq: collecting MLP activation scales for act-aware quantization...")
+    mlp_act_scales = collect_mlp_act_scales(base_model, ar_calib, device)
+    log0(f"ar_gptq: collected scales for {len(mlp_act_scales)} weight matrices")
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"},
+                                                    act_stats=mlp_act_scales,
+                                                    int5_mlp=args.int5_mlp)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
