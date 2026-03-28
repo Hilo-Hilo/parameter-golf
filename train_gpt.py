@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    adaptive_eval_stride = int(os.environ.get("ADAPTIVE_EVAL_STRIDE", "0"))
+    adaptive_eval_refine_quantile = float(os.environ.get("ADAPTIVE_EVAL_REFINE_QUANTILE", "0.5"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1082,6 +1084,138 @@ def eval_val_sliding(
     return val_loss, bits_per_token * tokens_per_byte
 
 
+def eval_val_sliding_adaptive_stride(
+    args: Hyperparameters,
+    base_model: nn.Module,
+    rank: int,
+    world_size: int,
+    device: torch.device,
+    val_tokens: Tensor,
+    base_bytes_lut: Tensor,
+    has_leading_space_lut: Tensor,
+    is_boundary_token_lut: Tensor,
+    primary_stride: int,
+    refine_stride: int,
+    refine_top_fraction: float = 0.5,
+    eval_seq_len: int | None = None,
+    batch_seqs: int = 32,
+) -> tuple[float, float]:
+    """Entropy-adaptive two-pass sliding window evaluation.
+
+    Pass 1: score all tokens with primary_stride, record per-token NLL.
+    Pass 2: re-score the top refine_top_fraction hardest tokens using
+            refine_stride (smaller = more left context). Each hard token gets
+            scored with up to refine_stride more tokens of causal context.
+
+    Strictly backward-looking: pass-2 windows are selected based on pass-1
+    scores only. No future token information is used.
+    """
+    seq_len = eval_seq_len or args.train_seq_len
+    total_tokens = val_tokens.numel() - 1
+
+    base_model.eval()
+    compiled_logits = torch.compile(base_model.forward_logits, dynamic=False, fullgraph=True)
+
+    def _run_window_list(window_starts: list, stride: int) -> Tensor:
+        """Run inference for the given window list. Returns per-token NLL tensor
+        (float32, shape=(total_tokens,), 0 for unscored positions)."""
+        total_w = len(window_starts)
+        my_s = (total_w * rank) // world_size
+        my_e = (total_w * (rank + 1)) // world_size
+        my_windows = window_starts[my_s:my_e]
+
+        local_nll = torch.zeros(total_tokens, dtype=torch.float32, device=device)
+
+        with torch.no_grad():
+            for bi in range(0, len(my_windows), batch_seqs):
+                batch_ws = my_windows[bi:bi + batch_seqs]
+                bsz = len(batch_ws)
+                x_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
+                y_batch = torch.zeros(bsz, seq_len, dtype=torch.int64, device=device)
+                wlens: list[int] = []
+                for i, ws in enumerate(batch_ws):
+                    end = min(ws + seq_len, total_tokens)
+                    wlen = end - ws
+                    wlens.append(wlen)
+                    chunk = val_tokens[ws:end + 1].to(dtype=torch.int64, device=device)
+                    x_batch[i, :wlen] = chunk[:-1]
+                    y_batch[i, :wlen] = chunk[1:]
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits = compiled_logits(x_batch)
+                nll_b = F.cross_entropy(
+                    logits.reshape(-1, logits.size(-1)).float(),
+                    y_batch.reshape(-1),
+                    reduction="none",
+                ).reshape(bsz, seq_len)
+                for i, ws in enumerate(batch_ws):
+                    wlen = wlens[i]
+                    s = 0 if ws == 0 else max(wlen - stride, 0)
+                    local_nll[ws + s: ws + wlen] = nll_b[i, s:wlen]
+
+        if dist.is_available() and dist.is_initialized():
+            dist.all_reduce(local_nll, op=dist.ReduceOp.SUM)
+        return local_nll
+
+    # ---- Pass 1: primary stride ----
+    p1_windows = [ws for ws in range(0, total_tokens, primary_stride)
+                  if min(ws + seq_len, total_tokens) - ws >= 1]
+    nll_p1 = _run_window_list(p1_windows, primary_stride)
+
+    # Identify hardest tokens (highest NLL) to refine
+    refine_threshold = torch.quantile(nll_p1, 1.0 - refine_top_fraction).item()
+    hard_mask = nll_p1 > refine_threshold  # (total_tokens,)
+
+    # Build pass-2 window list: only windows whose scored range overlaps hard_mask.
+    # Use vectorized cumsum to avoid a slow Python loop with per-window D2H copies.
+    p2_ws_tensor = torch.arange(0, total_tokens, refine_stride, device=device)  # all candidate starts
+    # For each window ws: scored_start = ws + s, scored_end = min(ws + seq_len, total_tokens)
+    # where s = max(wlen - refine_stride, 0), wlen = min(ws + seq_len, total_tokens) - ws
+    p2_ends = (p2_ws_tensor + seq_len).clamp(max=total_tokens)
+    p2_wlens = p2_ends - p2_ws_tensor
+    p2_s_vals = (p2_wlens - refine_stride).clamp(min=0)
+    p2_s_vals[0] = 0  # first window always scores from position 0
+    p2_scored_starts = p2_ws_tensor + p2_s_vals
+    # Compute range sums using cumsum of hard_mask
+    hard_cumsum = torch.zeros(total_tokens + 1, dtype=torch.float32, device=device)
+    hard_cumsum[1:] = hard_mask.float().cumsum(0)
+    range_sums = hard_cumsum[p2_ends] - hard_cumsum[p2_scored_starts]
+    active_flags = range_sums > 0
+    p2_windows_active = p2_ws_tensor[active_flags].tolist()
+
+    # ---- Pass 2: refine stride (more left context for hard tokens) ----
+    nll_p2 = _run_window_list(p2_windows_active, refine_stride)
+
+    # Merge: hard tokens get the pass-2 score (better context), others keep pass-1
+    p2_scored = nll_p2 > 0  # only positions actually scored in pass 2
+    use_p2 = hard_mask & p2_scored
+    final_nll = torch.where(use_p2, nll_p2, nll_p1)
+
+    # Compute BPB: partition token range by rank to avoid double-counting
+    t_start = (total_tokens * rank) // world_size
+    t_end = (total_tokens * (rank + 1)) // world_size
+
+    local_nll_slice = final_nll[t_start:t_end].to(dtype=torch.float64)
+    y_slice = val_tokens[t_start + 1:t_end + 1].to(device=device, dtype=torch.int64)
+    x_slice = val_tokens[t_start:t_end].to(device=device, dtype=torch.int64)
+
+    loss_sum = local_nll_slice.sum()
+    token_count = torch.tensor(float(t_end - t_start), dtype=torch.float64, device=device)
+    tb = base_bytes_lut[y_slice].to(torch.float64)
+    tb += (has_leading_space_lut[y_slice] & ~is_boundary_token_lut[x_slice]).to(torch.float64)
+    byte_count = tb.sum()
+
+    if dist.is_available() and dist.is_initialized():
+        dist.all_reduce(loss_sum, op=dist.ReduceOp.SUM)
+        dist.all_reduce(token_count, op=dist.ReduceOp.SUM)
+        dist.all_reduce(byte_count, op=dist.ReduceOp.SUM)
+
+    val_loss = (loss_sum / token_count).item()
+    bits_per_token = val_loss / math.log(2.0)
+    tokens_per_byte = token_count.item() / byte_count.item()
+    base_model.train()
+    return val_loss, bits_per_token * tokens_per_byte
+
+
 def eval_val_sliding_ttt(
     args: Hyperparameters, base_model: nn.Module, rank: int, world_size: int,
     device: torch.device, val_tokens: Tensor, base_bytes_lut: Tensor,
@@ -1874,6 +2008,26 @@ def main() -> None:
         )
         log0(f"final_int6_sliding_window_exact val_loss:{sw_val_loss:.8f} val_bpb:{sw_val_bpb:.8f}")
         log0(f"final_int8_zlib_roundtrip_exact val_loss:{sw_val_loss:.8f} val_bpb:{sw_val_bpb:.8f}")
+    if args.adaptive_eval_stride > 0 and args.adaptive_eval_stride < args.eval_stride and args.eval_stride > 0:
+        torch.cuda.synchronize()
+        t_adap = time.perf_counter()
+        adap_val_loss, adap_val_bpb = eval_val_sliding_adaptive_stride(
+            args, eval_model, rank, world_size, device,
+            val_tokens, base_bytes_lut, has_leading_space_lut, is_boundary_token_lut,
+            primary_stride=args.eval_stride,
+            refine_stride=args.adaptive_eval_stride,
+            refine_top_fraction=args.adaptive_eval_refine_quantile,
+            eval_seq_len=sw_seq_len,
+        )
+        torch.cuda.synchronize()
+        log0(
+            f"final_int6_adaptive_stride val_loss:{adap_val_loss:.4f} val_bpb:{adap_val_bpb:.4f} "
+            f"primary_stride:{args.eval_stride} refine_stride:{args.adaptive_eval_stride} "
+            f"refine_top_frac:{args.adaptive_eval_refine_quantile} "
+            f"eval_time:{1000.0 * (time.perf_counter() - t_adap):.0f}ms"
+        )
+        log0(f"final_int6_adaptive_stride_exact val_loss:{adap_val_loss:.8f} val_bpb:{adap_val_bpb:.8f}")
+        log0(f"final_int8_zlib_roundtrip_exact val_loss:{adap_val_loss:.8f} val_bpb:{adap_val_bpb:.8f}")
     if args.eval_stride != 64 and 64 < sw_seq_len:
         torch.cuda.synchronize()
         t_slide64 = time.perf_counter()
