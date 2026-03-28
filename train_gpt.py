@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1137,18 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_muon:
+        ttt_muon_meta = []
+        for p in ttt_params:
+            buf = torch.zeros_like(p, dtype=torch.bfloat16)
+            scale = max(1.0, (p.shape[-2] / p.shape[-1]) ** 0.5) if p.ndim >= 2 else 1.0
+            ttt_muon_meta.append({'p': p, 'buf': buf, 'scale': scale})
+        optimizer = None
+        log0(f"ttt_sliding:optimizer=muon_ns5 ns_steps=5")
+    else:
+        ttt_muon_meta = None
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+        log0(f"ttt_sliding:optimizer=sgd")
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,8 +1202,9 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if optimizer is not None:
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1206,7 +1219,11 @@ def eval_val_sliding_ttt(
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
-                        optimizer.zero_grad(set_to_none=True)
+                        if args.ttt_muon:
+                            for m in ttt_muon_meta:
+                                m['p'].grad = None
+                        else:
+                            optimizer.zero_grad(set_to_none=True)
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
@@ -1214,8 +1231,23 @@ def eval_val_sliding_ttt(
                             for p in ttt_params:
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
-                        torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
-                        optimizer.step()
+                        if args.ttt_muon:
+                            with torch.no_grad():
+                                for m in ttt_muon_meta:
+                                    if m['p'].grad is None:
+                                        continue
+                                    g = m['p'].grad.bfloat16()
+                                    if g.ndim >= 2:
+                                        g = zeropower_via_newtonschulz5(g, steps=5)
+                                    else:
+                                        g_norm = g.norm()
+                                        if g_norm > 1e-7:
+                                            g = g / (g_norm + 1e-7)
+                                    m['buf'].mul_(args.ttt_momentum).add_(g)
+                                    m['p'].data.add_(m['buf'].to(dtype=m['p'].dtype), alpha=-cos_lr * m['scale'])
+                        else:
+                            torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
+                            optimizer.step()
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
