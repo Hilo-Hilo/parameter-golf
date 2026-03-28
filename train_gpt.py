@@ -1728,12 +1728,12 @@ def main() -> None:
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         if args.swa_enabled and scale < 0.2 and step % args.swa_every == 0:
             if swa_state is None:
-                swa_state = {name: t.detach().cpu().clone() for name, t in base_model.state_dict().items()}
+                swa_state = {name: t.clone() for name, t in ema_state.items()}
                 swa_count = 1
-                log0(f"swa:start step:{step}")
+                log0(f"swa_ema:start step:{step}")
             else:
-                for name, t in base_model.state_dict().items():
-                    swa_state[name] += t.detach().cpu()
+                for name in swa_state:
+                    swa_state[name] += ema_state[name]
                 swa_count += 1
         if args.lawa_enabled and step % args.lawa_freq == 0:
             lawa_queue.append({name: t.detach().cpu().clone() for name, t in base_model.state_dict().items()})
@@ -1768,6 +1768,11 @@ def main() -> None:
         for name in avg_state:
             avg_state[name] /= len(lawa_queue)
             avg_state[name] = avg_state[name].to(dtype=current_state[name].dtype)
+        base_model.load_state_dict(avg_state, strict=True)
+    elif args.swa_enabled and swa_state is not None and swa_count > 1:
+        log0(f"swa_ema:applying SWA-of-EMA weights count:{swa_count}")
+        current_state = base_model.state_dict()
+        avg_state = {name: (swa_state[name] / swa_count).to(dtype=current_state[name].dtype) for name in swa_state}
         base_model.load_state_dict(avg_state, strict=True)
     else:
         log0("ema:applying EMA weights")
