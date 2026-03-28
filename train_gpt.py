@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    diff_attn = bool(int(os.environ.get("DIFF_ATTN", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -375,7 +376,7 @@ CONTROL_TENSOR_NAME_PATTERNS = tuple(
     pattern
     for pattern in os.environ.get(
         "CONTROL_TENSOR_NAME_PATTERNS",
-        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,smear,dtg_gate,ve_layer_scales,ve_shared.scale,attn_gate,vr_lambda",
+        "attn_scale,attn_scales,mlp_scale,mlp_scales,resid_mix,resid_mixes,q_gain,skip_weight,skip_weights,smear,dtg_gate,ve_layer_scales,ve_shared.scale,attn_gate,vr_lambda,diff_lambda",
     ).split(",")
     if pattern
 )
@@ -620,6 +621,7 @@ class CausalSelfAttention(nn.Module):
         qk_gain_init: float,
         gated_attention: bool = False,
         value_residual: bool = False,
+        diff_attn: bool = False,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -645,6 +647,11 @@ class CausalSelfAttention(nn.Module):
         self.value_residual = value_residual
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
+        # Differential attention: two attention maps, weighted difference
+        self.diff_attn = diff_attn
+        if diff_attn:
+            # sigmoid(1.386) ≈ 0.8 — start near-standard (lambda ≈ 0.8 cancels noise)
+            self.diff_lambda = nn.Parameter(torch.tensor(1.386, dtype=torch.float32))
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
         """Efficient XSA: subtract self-value projection via GQA-aware reshape (no repeat_interleave).
         y: [B, T, H, D], v: [B, T, Hkv, D]. H must be divisible by Hkv."""
@@ -673,7 +680,21 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin, self.rope_dims)
         k = apply_rotary_emb(k, cos, sin, self.rope_dims)
         q = q * self.q_gain.to(dtype=q.dtype)[None, None, :, None]
-        y = flash_attn_3_func(q, k, v, causal=True)
+        if self.diff_attn:
+            # Split Q and K along head_dim into two halves for differential attention.
+            # Each half is head_dim//2 dims; V stays at full head_dim.
+            # Two memory-efficient SDPA calls; output dim is head_dim (from V).
+            hd = self.head_dim // 2
+            q1 = q[..., :hd].contiguous()
+            q2 = q[..., hd:].contiguous()
+            k1 = k[..., :hd].contiguous()
+            k2 = k[..., hd:].contiguous()
+            y1 = flash_attn_3_func(q1, k1, v, causal=True)  # (B, T, H, head_dim)
+            y2 = flash_attn_3_func(q2, k2, v, causal=True)  # (B, T, H, head_dim)
+            lam = torch.sigmoid(self.diff_lambda.to(dtype=y1.dtype))
+            y = y1 - lam * y2
+        else:
+            y = flash_attn_3_func(q, k, v, causal=True)
         if self.use_xsa:
             y = self._xsa_efficient(y, v)
         if self.gated_attention:
@@ -754,12 +775,14 @@ class Block(nn.Module):
         dtg: bool = False,
         gated_attention: bool = False,
         value_residual: bool = False,
+        diff_attn: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init,
-                                        gated_attention=gated_attention, value_residual=value_residual)
+                                        gated_attention=gated_attention, value_residual=value_residual,
+                                        diff_attn=diff_attn)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -809,6 +832,7 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        diff_attn: bool = False,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -850,6 +874,7 @@ class GPT(nn.Module):
                     dtg=dtg,
                     gated_attention=gated_attention,
                     value_residual=value_residual,
+                    diff_attn=diff_attn,
                 )
                 for i in range(num_layers)
             ]
@@ -1490,6 +1515,7 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        diff_attn=args.diff_attn,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1833,6 +1859,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        diff_attn=args.diff_attn,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
