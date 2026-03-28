@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
+    ttt_grad_accum = int(os.environ.get("TTT_GRAD_ACCUM", "1"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1138,13 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    ttt_mom: dict = {}
+    if args.ttt_muon:
+        for p in ttt_params:
+            ttt_mom[id(p)] = torch.zeros_like(p, dtype=torch.bfloat16)
+        optimizer = None
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,12 +1198,14 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if not args.ttt_muon:
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
                 for _ep in range(args.ttt_epochs):
+                    grad_step = 0
                     for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
                         actual_bs = my_seq_s + bs
@@ -1206,16 +1216,50 @@ def eval_val_sliding_ttt(
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
-                        optimizer.zero_grad(set_to_none=True)
+                        if not args.ttt_muon:
+                            optimizer.zero_grad(set_to_none=True)
+                        else:
+                            for p in ttt_params:
+                                p.grad = None
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
-                        loss.backward()
-                        if world_size > 1:
-                            for p in ttt_params:
-                                if p.grad is not None:
-                                    dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
-                        torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
-                        optimizer.step()
+                        (loss / args.ttt_grad_accum).backward()
+                        grad_step += 1
+                        if grad_step % args.ttt_grad_accum == 0:
+                            if world_size > 1:
+                                for p in ttt_params:
+                                    if p.grad is not None:
+                                        dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
+                            torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
+                            if args.ttt_muon:
+                                with torch.no_grad():
+                                    for p in ttt_params:
+                                        if p.grad is None:
+                                            continue
+                                        g = p.grad.to(torch.bfloat16)
+                                        m = ttt_mom[id(p)]
+                                        m.mul_(args.ttt_momentum).add_(g)
+                                        nesterov_g = g.add(m, alpha=args.ttt_momentum)
+                                        if nesterov_g.ndim == 3:
+                                            # 3D bank: apply batched NS5 per-slice (B, M, N)
+                                            rows, cols = nesterov_g.shape[-2], nesterov_g.shape[-1]
+                                            scale = max(1.0, rows / cols) ** 0.5
+                                            update = zeropower_via_newtonschulz5(nesterov_g) * scale
+                                            p.data.add_(update, alpha=-cos_lr)
+                                        elif nesterov_g.ndim == 2:
+                                            rows, cols = nesterov_g.shape
+                                            scale = max(1.0, rows / cols) ** 0.5
+                                            update = zeropower_via_newtonschulz5(nesterov_g) * scale
+                                            p.data.add_(update, alpha=-cos_lr)
+                                        else:
+                                            p.data.add_(nesterov_g, alpha=-cos_lr)
+                                        p.grad = None
+                            else:
+                                optimizer.step()
+                    # Clear leftover accumulated gradients to prevent cross-chunk contamination
+                    if args.ttt_muon and grad_step % args.ttt_grad_accum != 0:
+                        for p in ttt_params:
+                            p.grad = None
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
