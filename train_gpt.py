@@ -1082,6 +1082,42 @@ def eval_val_sliding(
     return val_loss, bits_per_token * tokens_per_byte
 
 
+class _TTTMuon:
+    """Muon-style optimizer for TTT: NS5 orthogonalization for 2D matrix params."""
+    def __init__(self, params, lr: float, momentum: float, backend_steps: int = 5):
+        self.params = list(params)
+        self.lr = lr
+        self.momentum = momentum
+        self.backend_steps = backend_steps
+        self.bufs = [torch.zeros_like(p.data, dtype=torch.float32) for p in self.params]
+        self.param_groups = [{"lr": lr}]
+
+    def zero_grad(self, set_to_none: bool = False) -> None:
+        for p in self.params:
+            if p.grad is not None:
+                if set_to_none:
+                    p.grad = None
+                else:
+                    p.grad.detach_()
+                    p.grad.zero_()
+
+    @torch.no_grad()
+    def step(self) -> None:
+        lr = self.param_groups[0]["lr"]
+        for p, buf in zip(self.params, self.bufs):
+            if p.grad is None:
+                continue
+            g = p.grad.float()
+            buf.mul_(self.momentum).add_(g)
+            update = g.add(buf, alpha=self.momentum)  # Nesterov momentum
+            if update.ndim >= 2 and min(update.shape[-2], update.shape[-1]) >= 4:
+                upd_bf16 = zeropower_via_newtonschulz5(update.bfloat16(), steps=self.backend_steps)
+                scale = max(1.0, update.shape[-2] / update.shape[-1]) ** 0.5
+                p.data.add_(upd_bf16.to(p.dtype), alpha=-lr * scale)
+            else:
+                p.data.add_(update.to(p.dtype), alpha=-lr)
+
+
 def eval_val_sliding_ttt(
     args: Hyperparameters, base_model: nn.Module, rank: int, world_size: int,
     device: torch.device, val_tokens: Tensor, base_bytes_lut: Tensor,
@@ -1136,7 +1172,8 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = _TTTMuon(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum,
+                         backend_steps=args.muon_backend_steps)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1840,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
