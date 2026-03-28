@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
+    ttt_q_only = bool(int(os.environ.get("TTT_Q_ONLY", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1120,23 +1122,36 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+    n_layers = base_model.num_layers
     ttt_params = []
-    for name, p in base_model.named_parameters():
-        freeze = False
-        for bi in frozen_block_ids:
-            if f"blocks.{bi}." in name:
-                freeze = True
-                break
-        if freeze:
-            p.requires_grad_(False)
-        else:
-            p.requires_grad_(True)
-            ttt_params.append(p)
+
+    if args.ttt_q_only:
+        # Q-only mode: only qo_bank participates; all other params frozen
+        for name, p in base_model.named_parameters():
+            if name == 'qo_bank':
+                p.requires_grad_(True)
+                ttt_params.append(p)
+            else:
+                p.requires_grad_(False)
+    else:
+        for name, p in base_model.named_parameters():
+            freeze = any(f"blocks.{bi}." in name for bi in frozen_block_ids)
+            if freeze:
+                p.requires_grad_(False)
+            else:
+                p.requires_grad_(True)
+                ttt_params.append(p)
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
+         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)} "
+         f"q_only={args.ttt_q_only} muon={args.ttt_muon}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_muon:
+        muon_bufs = [torch.zeros_like(p.data) for p in ttt_params]
+        optimizer = None
+    else:
+        muon_bufs = []
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,8 +1205,9 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if optimizer is not None:
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1206,7 +1222,11 @@ def eval_val_sliding_ttt(
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
-                        optimizer.zero_grad(set_to_none=True)
+                        if optimizer is not None:
+                            optimizer.zero_grad(set_to_none=True)
+                        else:
+                            for p in ttt_params:
+                                p.grad = None
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
@@ -1214,8 +1234,34 @@ def eval_val_sliding_ttt(
                             for p in ttt_params:
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
-                        torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
-                        optimizer.step()
+                        if args.ttt_q_only:
+                            # Zero O-projection gradients (second half of qo_bank)
+                            # and frozen Q-projection gradients (first ttt_freeze_blocks rows)
+                            for p in ttt_params:
+                                if p.grad is not None and p.ndim == 3 and p.shape[0] == 2 * n_layers:
+                                    p.grad[n_layers:] = 0.0
+                                    p.grad[:args.ttt_freeze_blocks] = 0.0
+                        if args.ttt_muon:
+                            # Newton-Schulz5 orthogonalized Muon update with Nesterov momentum
+                            for p, buf in zip(ttt_params, muon_bufs):
+                                if p.grad is None:
+                                    continue
+                                g = p.grad.float()
+                                if g.ndim == 2 and min(g.shape) >= 2:
+                                    g_ns5 = zeropower_via_newtonschulz5(g, steps=5)
+                                elif g.ndim == 3:
+                                    g_ns5 = g.clone()
+                                    for si in range(g.shape[0]):
+                                        if g_ns5[si].norm() > 1e-8 and min(g_ns5[si].shape) >= 2:
+                                            g_ns5[si] = zeropower_via_newtonschulz5(g_ns5[si], steps=5)
+                                else:
+                                    g_ns5 = g
+                                buf.mul_(args.ttt_momentum).add_(g_ns5)
+                                update = g_ns5.add(buf, alpha=args.ttt_momentum)
+                                p.data.add_(update.to(p.data.dtype), alpha=-cos_lr)
+                        else:
+                            torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
+                            optimizer.step()
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
