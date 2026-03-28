@@ -369,6 +369,34 @@ Output JSON."
   ACTION=$(jq -r '.structured_output.recommended_action // "discard"' "$REFLECT_OUTPUT" 2>/dev/null || echo "discard")
   FAILURE_REASON=$(jq -r '.structured_output.failure_reason // ""' "$REFLECT_OUTPUT" 2>/dev/null || echo "")
 
+  # Hard floor override: if reflect said discard but metrics meet the floor, force branch.
+  if [ "$ACTION" = "discard" ]; then
+    # Prefer spool JSON (always named exactly ${CHILD_NODE_ID}.json, no timestamp prefix).
+    local SUMMARY_JSON="$MAIN_CHECKOUT/registry/spool/${CHILD_NODE_ID}.json"
+    if [ ! -f "$SUMMARY_JSON" ]; then
+      # Fall back to experiment dir: exact name first, then timestamped glob.
+      SUMMARY_JSON="$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID/$CHILD_NODE_ID.json"
+    fi
+    if [ ! -f "$SUMMARY_JSON" ]; then
+      SUMMARY_JSON="$(ls "$MAIN_CHECKOUT/experiments/$CHILD_NODE_ID/"*"$CHILD_NODE_ID.json" 2>/dev/null | head -1)"
+    fi
+    if [ -f "$SUMMARY_JSON" ]; then
+      local FLOOR
+      FLOOR=$(python3 -c "
+import json, sys
+d = json.load(open(sys.argv[1]))
+bpb = d.get('exact_final_val_bpb')
+b = d.get('bytes_total')
+ec = d.get('exit_code', 1)
+print('branch' if bpb and b and float(bpb)<1.22 and int(b)<16000000 and int(ec)==0 else 'discard')
+" "$SUMMARY_JSON" 2>/dev/null || echo "discard")
+      if [ "$FLOOR" = "branch" ]; then
+        announce "Hard floor override: reflect said discard but bpb<1.22 and bytes<16M — forcing branch."
+        ACTION="branch"
+      fi
+    fi
+  fi
+
   # Update node status (include failure_reason for planners to see)
   python3 - "$MAIN_CHECKOUT/registry/nodes.jsonl" "$MAIN_CHECKOUT/registry/.nodes.lock" "$CHILD_NODE_ID" "$ACTION" "$FAILURE_REASON" <<'PY'
 import fcntl
