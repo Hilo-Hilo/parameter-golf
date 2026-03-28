@@ -102,6 +102,7 @@ class Hyperparameters:
     gated_attention = bool(int(os.environ.get("GATED_ATTENTION", "0")))
     value_residual = bool(int(os.environ.get("VALUE_RESIDUAL", "0")))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "0")))
+    ttt_muon = bool(int(os.environ.get("TTT_MUON", "0")))
     ttt_lr = float(os.environ.get("TTT_LR", 0.002))
     ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
     ttt_chunk_tokens = int(os.environ.get("TTT_CHUNK_TOKENS", 32768))
@@ -274,6 +275,44 @@ class Muon(torch.optim.Optimizer):
             if hasattr(self, '_rs_futures'):
                 del self._rs_futures
 
+        return loss
+
+class MuonTTT(torch.optim.Optimizer):
+    """Simplified Muon for test-time training: local NS5, no distributed sharding.
+    2D/3D params are NS5-orthogonalized; 1D params use plain SGD."""
+    def __init__(self, params, lr: float = 0.002, momentum: float = 0.9, backend_steps: int = 5, nesterov: bool = True):
+        super().__init__(params, dict(lr=lr, momentum=momentum, backend_steps=backend_steps, nesterov=nesterov))
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        loss = None
+        if closure is not None:
+            with torch.enable_grad():
+                loss = closure()
+        for group in self.param_groups:
+            lr = group['lr']
+            momentum = group['momentum']
+            steps = group['backend_steps']
+            nesterov = group['nesterov']
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+                g = p.grad.bfloat16()
+                state = self.state[p]
+                if 'momentum_buffer' not in state:
+                    state['momentum_buffer'] = torch.zeros_like(g)
+                buf = state['momentum_buffer']
+                buf.mul_(momentum).add_(g)
+                if nesterov:
+                    update = g + momentum * buf
+                else:
+                    update = buf.clone()
+                if update.ndim >= 2:
+                    update = zeropower_via_newtonschulz5(update, steps=steps)
+                    scale = max(1, update.shape[-2] / update.shape[-1]) ** 0.5
+                    p.data.add_(update.to(dtype=p.dtype), alpha=-lr * scale)
+                else:
+                    p.data.add_(update.to(dtype=p.dtype), alpha=-lr)
         return loss
 
 # --- Tokenizer evaluation helpers ---
@@ -1136,7 +1175,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_muon:
+        optimizer = MuonTTT(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum, backend_steps=5)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1845,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
