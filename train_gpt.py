@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer_name = os.environ.get("TTT_OPTIMIZER", "sgd").lower()
+    stochastic_depth_rate = float(os.environ.get("STOCHASTIC_DEPTH_RATE", "0.0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -771,6 +773,7 @@ class Block(nn.Module):
             nn.init.constant_(self.dtg_gate.bias, 2.0)
         else:
             self.dtg_gate = None
+        self.stochastic_depth_prob = 0.0  # set by GPT.__init__ per layer
     def forward(self, x: Tensor, x0: Tensor, q_w: Tensor, k_w: Tensor, v_w: Tensor, out_w: Tensor, up_w: Tensor, down_w: Tensor, v_embed: Tensor | None = None, v0: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
         mix = self.resid_mix.to(dtype=x.dtype)
         x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
@@ -780,6 +783,10 @@ class Block(nn.Module):
         if self.dtg_gate is not None:
             gate = torch.sigmoid(self.dtg_gate(x_in.detach()))
             x_out = x_in + gate * (x_out - x_in)
+        if self.stochastic_depth_prob > 0.0 and self.training:
+            keep_prob = 1.0 - self.stochastic_depth_prob
+            survive = torch.floor(torch.rand(1, device=x_out.device, dtype=x_out.dtype) + keep_prob)
+            x_out = x_in + survive * (x_out - x_in)
         return x_out, raw_v
 
 class GPT(nn.Module):
@@ -809,6 +816,7 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        stochastic_depth_rate: float = 0.0,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -882,6 +890,9 @@ class GPT(nn.Module):
         if xsa_last_n > 0:
             for i in range(max(0, num_layers - xsa_last_n), num_layers):
                 self.blocks[i].attn.use_xsa = True
+        if stochastic_depth_rate > 0.0:
+            for i, block in enumerate(self.blocks):
+                block.stochastic_depth_prob = stochastic_depth_rate * (i / max(num_layers - 1, 1))
         self._init_weights()
     def _init_weights(self) -> None:
         if self.tie_embeddings:
@@ -1136,7 +1147,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer_name == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1490,6 +1504,7 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        stochastic_depth_rate=args.stochastic_depth_rate,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1803,7 +1818,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
