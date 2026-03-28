@@ -1120,7 +1120,7 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
+    ttt_named_params: list[tuple[str, torch.nn.Parameter]] = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1131,12 +1131,32 @@ def eval_val_sliding_ttt(
             p.requires_grad_(False)
         else:
             p.requires_grad_(True)
-            ttt_params.append(p)
+            ttt_named_params.append((name, p))
 
+    ttt_params = [p for _, p in ttt_named_params]
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    # Per-layer LR: MLP banks get 2x, attention banks get 0.5x, other 1x
+    _mlp_p = [p for n, p in ttt_named_params if 'mlp_up_bank' in n or 'mlp_down_bank' in n]
+    _attn_p = [p for n, p in ttt_named_params if 'qo_bank' in n or 'kv_bank' in n or ('.attn.' in n)]
+    _mlp_ids = {id(p) for p in _mlp_p}
+    _attn_ids = {id(p) for p in _attn_p}
+    _other_p = [p for _, p in ttt_named_params if id(p) not in _mlp_ids and id(p) not in _attn_ids]
+    _group_mults = [2.0, 0.5, 1.0]
+    _param_groups = [
+        {'params': _mlp_p, 'lr': args.ttt_lr * 2.0},
+        {'params': _attn_p, 'lr': args.ttt_lr * 0.5},
+        {'params': _other_p, 'lr': args.ttt_lr},
+    ]
+    # Remove empty groups to avoid optimizer errors
+    _param_groups = [g for g in _param_groups if g['params']]
+    _group_mults = [m for g, m in zip(
+        [{'params': _mlp_p}, {'params': _attn_p}, {'params': _other_p}],
+        [2.0, 0.5, 1.0]
+    ) if g['params']]
+    optimizer = torch.optim.AdamW(_param_groups, lr=args.ttt_lr, weight_decay=0.0,
+                                  betas=(0.9, 0.95), eps=1e-8)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1209,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                cos_lr_base = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                for pg, mult in zip(optimizer.param_groups, _group_mults):
+                    pg['lr'] = cos_lr_base * mult
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1803,7 +1823,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
