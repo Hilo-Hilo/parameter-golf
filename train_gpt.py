@@ -1389,6 +1389,43 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
             out[name] = (q.float() * float(s.item())).to(orig_dtype)
     return out
 
+# --- OptRot pre-quantization V/O rotation (arXiv:2512.24124) ---
+
+def apply_optrot(unbanked_sd: dict[str, Tensor], num_layers: int, num_heads: int, num_kv_heads: int) -> dict[str, Tensor]:
+    """Apply random orthogonal rotation to V/O attention weights before int6 quantization.
+
+    For each layer and each KV head g, generates a random orthogonal matrix S_g
+    (head_dim x head_dim) and applies:
+        V_g' = S_g @ V_g   (rotates V weight rows)
+        O_h' = O_h @ S_g.T (compensates O weight columns for each Q head h using KV head g)
+
+    The V-O product is preserved exactly: (O_h @ S_g.T) @ (S_g @ V_g).T = O_h @ V_g.T
+    This redistributes weight outliers evenly across head dimensions, reducing per-row MSE
+    after int6 clipping. Runs on CPU after training completes; no GPU or distributed calls.
+    """
+    sd = {k: v for k, v in unbanked_sd.items()}
+    for i in range(num_layers):
+        v_key = f"blocks.{i}.attn.c_v.weight"
+        o_key = f"blocks.{i}.attn.proj.weight"
+        if v_key not in sd or o_key not in sd:
+            continue
+        v_w = sd[v_key].float()  # shape: (num_kv_heads * head_dim, model_dim)
+        o_w = sd[o_key].float()  # shape: (model_dim, num_heads * head_dim)
+        head_dim = v_w.size(0) // num_kv_heads
+        groups = num_heads // num_kv_heads  # Q heads per KV head
+        for g in range(num_kv_heads):
+            # Random orthogonal matrix via QR decomposition
+            S, _ = torch.linalg.qr(torch.randn(head_dim, head_dim))
+            # Rotate V rows: V_g' = S_g @ V_g
+            v_w[g * head_dim:(g + 1) * head_dim, :] = S @ v_w[g * head_dim:(g + 1) * head_dim, :]
+            # Compensate O columns for each Q head h that attends to KV head g
+            for h_idx in range(groups):
+                h = g * groups + h_idx
+                o_w[:, h * head_dim:(h + 1) * head_dim] = o_w[:, h * head_dim:(h + 1) * head_dim] @ S.T
+        sd[v_key] = v_w.to(unbanked_sd[v_key].dtype)
+        sd[o_key] = o_w.to(unbanked_sd[o_key].dtype)
+    return sd
+
 # --- Training ---
 
 def main() -> None:
@@ -1799,6 +1836,7 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
+    unbanked_sd = apply_optrot(unbanked_sd, args.num_layers, args.num_heads, args.num_kv_heads)
     quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
