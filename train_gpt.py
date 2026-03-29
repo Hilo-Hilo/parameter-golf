@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    qat_time_threshold = float(os.environ.get("QAT_TIME_THRESHOLD", "0.0"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    int5_attn = bool(int(os.environ.get("INT5_ATTN", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1141,28 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            ttt_pgroups = []
+            n_blocks = len(base_model.blocks)
+            for name, p in base_model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                lr = args.ttt_lr
+                for li in range(n_blocks):
+                    if f"blocks.{li}." in name:
+                        lr = args.ttt_lr * (0.5 + li / max(n_blocks - 1, 1))
+                        break
+                ttt_pgroups.append({"params": [p], "lr": lr, "base_lr": lr})
+            optimizer = torch.optim.AdamW(ttt_pgroups, betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+            for pg in optimizer.param_groups:
+                pg["base_lr"] = args.ttt_lr
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+        for pg in optimizer.param_groups:
+            pg["base_lr"] = args.ttt_lr
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1215,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('base_lr', args.ttt_lr) * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1338,7 +1364,7 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str], clip_ranges: dict[str, int] | None = None):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1358,7 +1384,8 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             meta[name] = "passthrough_ctrl"
             continue
         if cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            cr = clip_ranges.get(cat, 31) if clip_ranges else 31
+            q, s = quantize_int6_per_row(t, clip_range=cr)
             result[name + ".q"] = q
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
@@ -1464,7 +1491,7 @@ def main() -> None:
     log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
-    CastedLinear._qat_enabled = args.qat_enabled
+    CastedLinear._qat_enabled = args.qat_enabled if args.qat_time_threshold <= 0 else False
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1684,9 +1711,15 @@ def main() -> None:
             break
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
-        if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
-            CastedLinear._qat_enabled = True
-            log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
+        if not CastedLinear._qat_enabled:
+            if args.qat_time_threshold > 0 and max_wallclock_ms is not None:
+                frac_elapsed = elapsed_ms / max_wallclock_ms
+                if frac_elapsed >= args.qat_time_threshold:
+                    CastedLinear._qat_enabled = True
+                    log0(f"time_qat:enabled step:{step} frac_elapsed:{frac_elapsed:.3f}")
+            elif args.late_qat_threshold > 0 and scale < args.late_qat_threshold:
+                CastedLinear._qat_enabled = True
+                log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1799,11 +1832,14 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    clip_ranges: dict[str, int] = {}
+    if args.int5_attn:
+        clip_ranges["attn"] = 15
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"}, clip_ranges=clip_ranges or None)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
