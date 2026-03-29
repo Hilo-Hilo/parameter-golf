@@ -109,6 +109,13 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_adamw = bool(int(os.environ.get("TTT_USE_ADAMW", "0")))
+    ttt_adamw_beta1 = float(os.environ.get("TTT_ADAMW_BETA1", "0.9"))
+    ttt_adamw_beta2 = float(os.environ.get("TTT_ADAMW_BETA2", "0.999"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    ds_enabled = bool(int(os.environ.get("DS_ENABLED", "0")))
+    ds_weight = float(os.environ.get("DS_WEIGHT", "0.1"))
+    ds_layers = os.environ.get("DS_LAYERS", "3,7")
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -809,6 +816,9 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        ds_enabled: bool = False,
+        ds_weight: float = 0.1,
+        ds_layers: str = "",
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -818,6 +828,9 @@ class GPT(nn.Module):
         self.tied_embed_init_std = tied_embed_init_std
         self.logit_softcap = logit_softcap
         self.value_residual = value_residual
+        self.ds_enabled = ds_enabled
+        self.ds_weight = ds_weight
+        self.ds_layer_indices: set[int] = set(int(x) for x in ds_layers.split(",") if x.strip()) if ds_layers else set()
         self.mtp_num_heads = mtp_num_heads
         self.mtp_loss_weight = mtp_loss_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
@@ -926,6 +939,9 @@ class GPT(nn.Module):
         v0 = None
         skips: list[Tensor] = []
         ve_cache: dict = {}
+        targets_flat = target_ids.reshape(-1)
+        ds_loss = x.new_zeros(()).float()
+        ds_count = 0
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
             x, raw_v = self.blocks[i](x, x0,
@@ -935,6 +951,12 @@ class GPT(nn.Module):
             if v0 is None and raw_v is not None:
                 v0 = raw_v
             skips.append(x)
+            if self.training and self.ds_enabled and i in self.ds_layer_indices:
+                x_ds = F.rms_norm(x, (x.size(-1),))
+                ds_logits = self.logit_softcap * torch.tanh(
+                    F.linear(x_ds.reshape(-1, x_ds.size(-1)), self.tok_emb.weight) / self.logit_softcap)
+                ds_loss = ds_loss + F.cross_entropy(ds_logits.float(), targets_flat, reduction="mean")
+                ds_count += 1
         for i in range(self.num_decoder_layers):
             bi = self.num_encoder_layers + i
             if skips:
@@ -944,9 +966,15 @@ class GPT(nn.Module):
                 self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
                 self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
                 v_embed=ve, v0=v0)
+            if self.training and self.ds_enabled and bi in self.ds_layer_indices:
+                x_ds = F.rms_norm(x, (x.size(-1),))
+                ds_logits = self.logit_softcap * torch.tanh(
+                    F.linear(x_ds.reshape(-1, x_ds.size(-1)), self.tok_emb.weight) / self.logit_softcap)
+                ds_loss = ds_loss + F.cross_entropy(ds_logits.float(), targets_flat, reduction="mean")
+                ds_count += 1
         x = self.final_norm(x)
         x_flat = x.reshape(-1, x.size(-1))
-        targets = target_ids.reshape(-1)
+        targets = targets_flat
         if self.tie_embeddings:
             logits_proj = F.linear(x_flat, self.tok_emb.weight)
         else:
@@ -971,6 +999,8 @@ class GPT(nn.Module):
                 mtp_loss_count += 1
             if mtp_loss_count > 0:
                 main_loss = main_loss + self.mtp_loss_weight * (mtp_loss_sum / mtp_loss_count)
+        if self.training and self.ds_enabled and ds_count > 0:
+            main_loss = main_loss + self.ds_weight * (ds_loss / ds_count)
         return main_loss
     def forward_logits(self, input_ids: Tensor) -> Tensor:
         """Return logits (bsz, seq_len, vocab) without computing loss."""
@@ -1136,7 +1166,12 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_use_adamw:
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr,
+                                      betas=(args.ttt_adamw_beta1, args.ttt_adamw_beta2),
+                                      weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1490,6 +1525,9 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        ds_enabled=args.ds_enabled,
+        ds_weight=args.ds_weight,
+        ds_layers=args.ds_layers,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1803,7 +1841,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
