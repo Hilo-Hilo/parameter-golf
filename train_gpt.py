@@ -109,6 +109,12 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_scale = float(os.environ.get("TTT_MLP_LR_SCALE", "2.0"))
+    ttt_attn_lr_scale = float(os.environ.get("TTT_ATTN_LR_SCALE", "0.5"))
+    mlp_relu_alpha = float(os.environ.get("MLP_RELU_ALPHA", "0.5"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "9"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -733,11 +739,12 @@ class ValueEmbedding(nn.Module):
         return h * self.scale.to(dtype=h.dtype)
 
 class MLP(nn.Module):
-    def __init__(self, dim: int, mlp_mult: int):
+    def __init__(self, dim: int, mlp_mult: int, relu_alpha: float = 0.5):
         super().__init__()
+        self.relu_alpha = relu_alpha
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=self.relu_alpha)
         return F.linear(x.square(), down_w.to(x.dtype))
 
 class Block(nn.Module):
@@ -754,13 +761,14 @@ class Block(nn.Module):
         dtg: bool = False,
         gated_attention: bool = False,
         value_residual: bool = False,
+        relu_alpha: float = 0.5,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init,
                                         gated_attention=gated_attention, value_residual=value_residual)
-        self.mlp = MLP(dim, mlp_mult)
+        self.mlp = MLP(dim, mlp_mult, relu_alpha=relu_alpha)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
@@ -809,6 +817,7 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        mlp_relu_alpha: float = 0.5,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -850,6 +859,7 @@ class GPT(nn.Module):
                     dtg=dtg,
                     gated_attention=gated_attention,
                     value_residual=value_residual,
+                    relu_alpha=mlp_relu_alpha,
                 )
                 for i in range(num_layers)
             ]
@@ -1121,6 +1131,7 @@ def eval_val_sliding_ttt(
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
     ttt_params = []
+    ttt_named_params = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1132,11 +1143,31 @@ def eval_val_sliding_ttt(
         else:
             p.requires_grad_(True)
             ttt_params.append(p)
+            ttt_named_params.append((name, p))
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    def _is_mlp(n): return ".mlp." in n or "mlp_up_bank" in n or "mlp_down_bank" in n
+    def _is_attn(n): return ".attn." in n or "qo_bank" in n or "kv_bank" in n
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            mlp_ps = [p for n, p in ttt_named_params if _is_mlp(n)]
+            attn_ps = [p for n, p in ttt_named_params if not _is_mlp(n) and _is_attn(n)]
+            other_ps = [p for n, p in ttt_named_params if not _is_mlp(n) and not _is_attn(n)]
+            optimizer = torch.optim.AdamW([
+                {'params': mlp_ps, 'lr': args.ttt_lr * args.ttt_mlp_lr_scale, 'initial_lr': args.ttt_lr * args.ttt_mlp_lr_scale},
+                {'params': attn_ps, 'lr': args.ttt_lr * args.ttt_attn_lr_scale, 'initial_lr': args.ttt_lr * args.ttt_attn_lr_scale},
+                {'params': other_ps, 'lr': args.ttt_lr, 'initial_lr': args.ttt_lr},
+            ], weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+            for pg in optimizer.param_groups:
+                pg['initial_lr'] = pg['lr']
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+        for pg in optimizer.param_groups:
+            pg['initial_lr'] = pg['lr']
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1220,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('initial_lr', args.ttt_lr) * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1490,6 +1521,7 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        mlp_relu_alpha=args.mlp_relu_alpha,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1803,7 +1835,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1833,6 +1865,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        mlp_relu_alpha=args.mlp_relu_alpha,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
