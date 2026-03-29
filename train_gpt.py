@@ -36,6 +36,29 @@ except ImportError:
             k2 = k2.repeat_interleave(groups, dim=1)
             v2 = v2.repeat_interleave(groups, dim=1)
         return F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal).transpose(1, 2)
+
+def sigmoid_attn_func(q, k, v, causal=True):
+    """Sigmoid attention: each query independently gates each key (no attention sinks).
+    L1-normalizes so output scale matches softmax attention."""
+    q2, k2, v2 = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
+    if k2.size(1) != q2.size(1):
+        groups = q2.size(1) // k2.size(1)
+        k2 = k2.repeat_interleave(groups, dim=1)
+        v2 = v2.repeat_interleave(groups, dim=1)
+    T = q2.shape[-2]
+    scale = q2.shape[-1] ** -0.5
+    attn = torch.matmul(q2, k2.transpose(-2, -1)) * scale
+    if causal:
+        mask = torch.ones(T, T, device=attn.device, dtype=torch.bool).tril()
+        attn = attn.masked_fill(~mask, float('-inf'))
+    # sigmoid(-inf) = 0, so masked positions get 0 weight automatically
+    attn_w = torch.sigmoid(attn)
+    attn_w = attn_w / attn_w.sum(dim=-1, keepdim=True).clamp_min(1e-6)
+    return torch.matmul(attn_w, v2).transpose(1, 2)
+
+# Selected at startup based on SIGMOID_ATTN env var
+_attn_fn = flash_attn_3_func
+
 class Hyperparameters:
     data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
     train_files = os.path.join(data_path, "fineweb_train_*.bin")
@@ -109,6 +132,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    sigmoid_attn = bool(int(os.environ.get("SIGMOID_ATTN", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -673,7 +698,7 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin, self.rope_dims)
         k = apply_rotary_emb(k, cos, sin, self.rope_dims)
         q = q * self.q_gain.to(dtype=q.dtype)[None, None, :, None]
-        y = flash_attn_3_func(q, k, v, causal=True)
+        y = _attn_fn(q, k, v, causal=True)
         if self.use_xsa:
             y = self._xsa_efficient(y, v)
         if self.gated_attention:
@@ -1136,7 +1161,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1392,8 +1420,11 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
 # --- Training ---
 
 def main() -> None:
+    global _attn_fn
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
+    if args.sigmoid_attn:
+        _attn_fn = sigmoid_attn_func
     # zeropower_via_newtonschulz5 runs eagerly with bmm -- do NOT compile
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
