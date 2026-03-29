@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    coprime_stride = bool(int(os.environ.get("COPRIME_STRIDE", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -525,18 +528,47 @@ class TokenStream:
             self.pos += k
             remaining -= k
         return chunks[0] if len(chunks) == 1 else torch.cat(chunks)
+    @classmethod
+    def _from_files(cls, files: list) -> 'TokenStream':
+        obj = object.__new__(cls)
+        obj.files = [Path(p) if not isinstance(p, Path) else p for p in files]
+        if not obj.files:
+            raise FileNotFoundError("No files provided to TokenStream._from_files")
+        obj.file_idx = 0
+        obj.tokens = load_data_shard(obj.files[0])
+        obj.pos = 0
+        return obj
 class DistributedTokenLoader:
-    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device,
+                 coprime_stride: bool = False):
+        import math
         self.rank = rank
         self.world_size = world_size
         self.device = device
-        self.stream = TokenStream(pattern)
+        self.coprime = coprime_stride
+        if coprime_stride and world_size > 1:
+            all_files = sorted(glob.glob(pattern))
+            n = len(all_files)
+            if n > 1:
+                stride = max(n // world_size, 2)
+                while math.gcd(stride, n) != 1:
+                    stride += 1
+                start = (rank * (n // world_size)) % n
+                reordered = [all_files[(start + i * stride) % n] for i in range(n)]
+                self.stream = TokenStream._from_files(reordered)
+            else:
+                self.stream = TokenStream(pattern)
+        else:
+            self.stream = TokenStream(pattern)
     def next_batch(self, global_tokens: int, seq_len: int, grad_accum_steps: int) -> tuple[Tensor, Tensor]:
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
-        chunk = self.stream.take(per_rank_span * self.world_size)
-        start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
+        if self.coprime:
+            local = self.stream.take(per_rank_span).to(dtype=torch.int64)
+        else:
+            chunk = self.stream.take(per_rank_span * self.world_size)
+            start = self.rank * per_rank_span
+            local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
         x = local[:-1].reshape(-1, seq_len)
         y = local[1:].reshape(-1, seq_len)
         return x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
@@ -1136,7 +1168,12 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0
+        )
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1599,7 +1636,8 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
-    train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+    train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device,
+                                          coprime_stride=args.coprime_stride)
     def zero_grad_all() -> None:
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
@@ -1639,7 +1677,8 @@ def main() -> None:
         for opt, state in zip(optimizers, initial_optimizer_states, strict=True):
             opt.load_state_dict(state)
         zero_grad_all()
-        train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+        train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device,
+                                          coprime_stride=args.coprime_stride)
     swa_state: dict[str, Tensor] | None = None
     swa_count = 0
     from collections import deque
@@ -1803,7 +1842,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
