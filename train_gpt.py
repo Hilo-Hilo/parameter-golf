@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    ttt_adamw_wd = float(os.environ.get("TTT_ADAMW_WD", 0.0))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -530,13 +532,23 @@ class DistributedTokenLoader:
         self.rank = rank
         self.world_size = world_size
         self.device = device
+        self.coprime_stride = bool(int(os.environ.get("COPRIME_STRIDE", "0")))
         self.stream = TokenStream(pattern)
+        if self.coprime_stride and rank > 0:
+            # Advance each rank to a coprime offset so ranks see different training data.
+            # 131071 = 2^17 - 1 is a Mersenne prime, coprime to any power-of-2 shard size.
+            _offset = rank * 131071
+            _ = self.stream.take(_offset)
     def next_batch(self, global_tokens: int, seq_len: int, grad_accum_steps: int) -> tuple[Tensor, Tensor]:
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
-        chunk = self.stream.take(per_rank_span * self.world_size)
-        start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
+        if self.coprime_stride:
+            # Each rank reads independently from its own stream position.
+            local = self.stream.take(per_rank_span).to(dtype=torch.int64)
+        else:
+            chunk = self.stream.take(per_rank_span * self.world_size)
+            start = self.rank * per_rank_span
+            local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
         x = local[:-1].reshape(-1, seq_len)
         y = local[1:].reshape(-1, seq_len)
         return x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
@@ -1136,7 +1148,13 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999),
+            weight_decay=args.ttt_adamw_wd,
+        )
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1821,10 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    _lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    _lzma_extreme = bool(int(os.environ.get("LZMA_EXTREME", "0")))
+    _lzma_flags = _lzma_preset | (lzma.PRESET_EXTREME if _lzma_extreme else 0)
+    quant_blob = lzma.compress(quant_raw, preset=_lzma_flags)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
