@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_focal_gamma = float(os.environ.get("TTT_FOCAL_GAMMA", 0.0))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1208,7 +1209,18 @@ def eval_val_sliding_ttt(
                         y = local[1:].reshape(-1, seq_len)
                         optimizer.zero_grad(set_to_none=True)
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                            loss = base_model(x, y)
+                            if args.ttt_focal_gamma > 0.0:
+                                logits = base_model.forward_logits(x)
+                            else:
+                                loss = base_model(x, y)
+                        if args.ttt_focal_gamma > 0.0:
+                            V = logits.size(-1)
+                            ce = F.cross_entropy(
+                                logits.reshape(-1, V).float(), y.reshape(-1), reduction="none"
+                            )
+                            with torch.no_grad():
+                                focal_w = (1.0 - torch.exp(-ce)).pow(args.ttt_focal_gamma)
+                            loss = (focal_w * ce).mean()
                         loss.backward()
                         if world_size > 1:
                             for p in ttt_params:
@@ -1803,7 +1815,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=int(os.environ.get("LZMA_PRESET", 9)))
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
