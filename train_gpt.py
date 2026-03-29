@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1139,28 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            mlp_p, attn_p, other_p = [], [], []
+            for name, p in base_model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if "mlp_up_bank" in name or "mlp_down_bank" in name:
+                    mlp_p.append(p)
+                elif "qo_bank" in name or "kv_bank" in name:
+                    attn_p.append(p)
+                else:
+                    other_p.append(p)
+            optimizer = torch.optim.AdamW([
+                {"params": mlp_p, "lr": args.ttt_lr * 2.0},
+                {"params": attn_p, "lr": args.ttt_lr * 0.5},
+                {"params": other_p, "lr": args.ttt_lr},
+            ], weight_decay=0.0)
+            ttt_params = mlp_p + attn_p + other_p
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1827,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
