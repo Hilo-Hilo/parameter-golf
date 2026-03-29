@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_qonly = bool(int(os.environ.get("TTT_QONLY", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1120,6 +1123,7 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+    _qonly_bank_names = {"kv_bank", "mlp_up_bank", "mlp_down_bank"}
     ttt_params = []
     for name, p in base_model.named_parameters():
         freeze = False
@@ -1127,16 +1131,31 @@ def eval_val_sliding_ttt(
             if f"blocks.{bi}." in name:
                 freeze = True
                 break
+        if args.ttt_qonly and name in _qonly_bank_names:
+            freeze = True
         if freeze:
             p.requires_grad_(False)
         else:
             p.requires_grad_(True)
             ttt_params.append(p)
 
-    log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
+    # For query-only TTT: register hook to zero O projection gradients (second half of qo_bank)
+    _qo_hook_handle = None
+    if args.ttt_qonly and base_model.qo_bank.requires_grad:
+        _n_layers = base_model.num_layers
+        def _zero_o_grads(grad):
+            grad[_n_layers:] = 0
+            return grad
+        _qo_hook_handle = base_model.qo_bank.register_hook(_zero_o_grads)
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
+         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)} "
+         f"optimizer={args.ttt_optimizer} qonly={args.ttt_qonly}")
+
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.01)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1231,6 +1250,8 @@ def eval_val_sliding_ttt(
     val_loss = (loss_sum / token_count).item()
     val_bpb = val_loss / math.log(2.0) * (token_count.item() / byte_count.item())
 
+    if _qo_hook_handle is not None:
+        _qo_hook_handle.remove()
     for p in base_model.parameters():
         p.requires_grad_(True)
     base_model.eval()
@@ -1803,7 +1824,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
