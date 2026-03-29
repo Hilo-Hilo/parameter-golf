@@ -109,6 +109,12 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_scale = float(os.environ.get("TTT_MLP_LR_SCALE", "2.0"))
+    ttt_attn_lr_scale = float(os.environ.get("TTT_ATTN_LR_SCALE", "0.5"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    v_norm_enabled = bool(int(os.environ.get("V_NORM_ENABLED", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -643,6 +649,7 @@ class CausalSelfAttention(nn.Module):
             nn.init.zeros_(self.attn_gate.weight)
             nn.init.constant_(self.attn_gate.bias, 4.0)
         self.value_residual = value_residual
+        self.v_normalize = False  # set by GPT.__init__
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
@@ -663,6 +670,8 @@ class CausalSelfAttention(nn.Module):
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        if self.v_normalize:
+            v = F.rms_norm(v, (v.size(-1),))
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
@@ -809,6 +818,7 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        v_normalize: bool = False,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -882,6 +892,9 @@ class GPT(nn.Module):
         if xsa_last_n > 0:
             for i in range(max(0, num_layers - xsa_last_n), num_layers):
                 self.blocks[i].attn.use_xsa = True
+        if v_normalize:
+            for block in self.blocks:
+                block.attn.v_normalize = True
         self._init_weights()
     def _init_weights(self) -> None:
         if self.tie_embeddings:
@@ -1136,7 +1149,30 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if getattr(args, 'ttt_perlayer_lr', False):
+        def _bank_group(name):
+            if 'mlp_up_bank' in name or 'mlp_down_bank' in name:
+                return 'mlp'
+            if 'qo_bank' in name or 'kv_bank' in name:
+                return 'attn'
+            return 'other'
+        mlp_ps = [p for n, p in base_model.named_parameters() if p.requires_grad and _bank_group(n) == 'mlp']
+        attn_ps = [p for n, p in base_model.named_parameters() if p.requires_grad and _bank_group(n) == 'attn']
+        other_ps = [p for n, p in base_model.named_parameters() if p.requires_grad and _bank_group(n) == 'other']
+        mlp_scale = getattr(args, 'ttt_mlp_lr_scale', 2.0)
+        attn_scale = getattr(args, 'ttt_attn_lr_scale', 0.5)
+        ttt_param_groups = [
+            {'params': mlp_ps, 'lr': args.ttt_lr * mlp_scale, 'base_lr_scale': mlp_scale},
+            {'params': attn_ps, 'lr': args.ttt_lr * attn_scale, 'base_lr_scale': attn_scale},
+            {'params': other_ps, 'lr': args.ttt_lr, 'base_lr_scale': 1.0},
+        ]
+        ttt_param_groups = [g for g in ttt_param_groups if g['params']]
+    else:
+        ttt_param_groups = [{'params': ttt_params, 'lr': args.ttt_lr, 'base_lr_scale': 1.0}]
+    if getattr(args, 'ttt_optimizer', 'sgd') == 'adamw':
+        optimizer = torch.optim.AdamW(ttt_param_groups, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0, fused=True)
+    else:
+        optimizer = torch.optim.SGD(ttt_param_groups, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1191,7 +1227,7 @@ def eval_val_sliding_ttt(
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = cos_lr * pg.get('base_lr_scale', 1.0)
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1490,6 +1526,7 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        v_normalize=args.v_norm_enabled,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1803,7 +1840,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1833,6 +1870,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        v_normalize=args.v_norm_enabled,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
