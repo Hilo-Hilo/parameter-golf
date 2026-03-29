@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "adamw")
+    ttt_wd = float(os.environ.get("TTT_WD", 0.01))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1138,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=args.ttt_wd)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1271,6 +1276,37 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
     q = torch.clamp(torch.round(t32 / scale.float()), -clip_range, clip_range).to(torch.int8)
     return q, scale
 
+def _pack_int6_to_uint8(q: torch.Tensor) -> tuple[torch.Tensor, tuple]:
+    """Pack int8 tensor (values in [-31,31]) to 6-bit packed uint8 tensor.
+    Encoding: value+32 -> [1..63], packed 4 values per 3 bytes.
+    Returns (packed_uint8_tensor, original_shape).
+    """
+    shape = tuple(q.shape)
+    flat = (q.detach().cpu().flatten().numpy().astype(np.int16) + 32).astype(np.uint8)
+    n = len(flat)
+    pad = (-n) % 4
+    if pad:
+        flat = np.concatenate([flat, np.zeros(pad, dtype=np.uint8)])
+    v = flat.reshape(-1, 4)
+    packed = np.empty(len(v) * 3, dtype=np.uint8)
+    packed[0::3] = (v[:, 0] << 2) | (v[:, 1] >> 4)
+    packed[1::3] = ((v[:, 1] & 0xF) << 4) | (v[:, 2] >> 2)
+    packed[2::3] = ((v[:, 2] & 0x3) << 6) | (v[:, 3] & 0x3F)
+    return torch.from_numpy(packed.copy()), shape
+
+def _unpack_int6_from_uint8(packed: torch.Tensor, shape: tuple) -> torch.Tensor:
+    """Unpack 6-bit packed uint8 tensor to int8 tensor with given shape."""
+    p = packed.cpu().numpy().reshape(-1, 3)
+    flat = np.empty(len(p) * 4, dtype=np.uint8)
+    flat[0::4] = p[:, 0] >> 2
+    flat[1::4] = ((p[:, 0] & 0x3) << 4) | (p[:, 1] >> 4)
+    flat[2::4] = ((p[:, 1] & 0xF) << 2) | (p[:, 2] >> 6)
+    flat[3::4] = p[:, 2] & 0x3F
+    n = 1
+    for d in shape:
+        n *= d
+    return torch.from_numpy((flat[:n].astype(np.int16) - 32).astype(np.int8).reshape(shape))
+
 def _unbank_state_dict(sd: dict[str, Tensor], num_layers: int) -> dict[str, Tensor]:
     """Convert 3D bank tensors into individual 2D tensors with standard names."""
     out: dict[str, Tensor] = {}
@@ -1359,9 +1395,10 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             continue
         if cat in int6_cats and t.ndim >= 1:
             q, s = quantize_int6_per_row(t)
-            result[name + ".q"] = q
+            q_packed, q_shape = _pack_int6_to_uint8(q)
+            result[name + ".q"] = q_packed
             result[name + ".scale"] = s
-            meta[name] = {"type": "int6"}
+            meta[name] = {"type": "int6", "packed6": True, "q_shape": list(q_shape)}
         else:
             q, s = quantize_float_tensor(t)
             result[name + ".q"] = q
@@ -1383,6 +1420,8 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
             out[name] = t
             continue
         q, s = result[name + ".q"], result[name + ".scale"]
+        if isinstance(info, dict) and info.get("packed6"):
+            q = _unpack_int6_from_uint8(q, tuple(info["q_shape"]))
         if s.ndim > 0:
             out[name] = (q.float() * s.float().view(q.shape[0], *([1] * (q.ndim - 1)))).to(orig_dtype)
         else:
@@ -1803,7 +1842,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
