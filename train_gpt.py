@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_adamw = bool(int(os.environ.get("TTT_USE_ADAMW", "0")))
+    ttt_adamw_beta1 = float(os.environ.get("TTT_ADAMW_BETA1", 0.9))
+    ttt_adamw_beta2 = float(os.environ.get("TTT_ADAMW_BETA2", 0.999))
+    # Fraction of chunks to use as linear LR warmup before cosine decay (AdamW TTT only)
+    ttt_warmup_frac = float(os.environ.get("TTT_WARMUP_FRAC", 0.05))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1109,10 +1114,11 @@ def eval_val_sliding_ttt(
         ci = min(scored_start // ttt_chunk, num_chunks - 1)
         chunk_windows[ci].append(ws)
 
+    opt_type = f"adamw(b1={args.ttt_adamw_beta1},b2={args.ttt_adamw_beta2},warmup_frac={args.ttt_warmup_frac})" if args.ttt_use_adamw else "sgd"
     log0(f"ttt_sliding:start chunks={num_chunks} chunk_tokens={ttt_chunk} "
          f"total_windows={len(window_starts)} stride={stride} "
          f"ttt_lr={args.ttt_lr} ttt_epochs={args.ttt_epochs} "
-         f"freeze_blocks={args.ttt_freeze_blocks}")
+         f"freeze_blocks={args.ttt_freeze_blocks} optimizer={opt_type}")
 
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     token_count = torch.zeros((), device=device, dtype=torch.float64)
@@ -1136,7 +1142,15 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_use_adamw:
+        optimizer = torch.optim.AdamW(
+            ttt_params, lr=args.ttt_lr,
+            betas=(args.ttt_adamw_beta1, args.ttt_adamw_beta2),
+            weight_decay=0.0,
+        )
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    warmup_chunks = max(1, int(num_chunks * args.ttt_warmup_frac)) if args.ttt_use_adamw else 0
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1203,16 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                if args.ttt_use_adamw and warmup_chunks > 0 and ci < warmup_chunks:
+                    # Linear warmup phase for AdamW TTT
+                    step_lr = args.ttt_lr * (ci + 1) / warmup_chunks
+                else:
+                    # Cosine decay (standard for SGD, or post-warmup for AdamW)
+                    cos_ci = ci - warmup_chunks if args.ttt_use_adamw else ci
+                    cos_denom = max(num_chunks - 1 - warmup_chunks, 1) if args.ttt_use_adamw else max(num_chunks - 1, 1)
+                    step_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * cos_ci / cos_denom))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = step_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1803,7 +1824,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
