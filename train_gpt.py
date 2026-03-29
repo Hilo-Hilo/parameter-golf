@@ -109,6 +109,10 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    online_gptq_interval = int(os.environ.get("ONLINE_GPTQ_INTERVAL", 0))
+    online_gptq_start_frac = float(os.environ.get("ONLINE_GPTQ_START_FRAC", 0.5))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", 9))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -558,7 +562,7 @@ class CastedLinear(nn.Linear):
                 w32 = self.weight.float()
                 row_max = w32.abs().amax(dim=1)
                 scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
-                w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -32, 31) * scale[:, None]).to(x.dtype)
+                w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -31, 31) * scale[:, None]).to(x.dtype)
             w = w + (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w, bias)
@@ -1136,7 +1140,11 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95),
+                                      weight_decay=0.0, eps=1e-8)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1270,6 +1278,34 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
     scale = torch.tensor(amax / clip_range if amax > 0 else 1.0, dtype=torch.float16)
     q = torch.clamp(torch.round(t32 / scale.float()), -clip_range, clip_range).to(torch.int8)
     return q, scale
+
+@torch.no_grad()
+def online_gptq_banks(banks: list) -> None:
+    """Apply GPTQ-lite per-row clip search to bank weight tensors in-place.
+
+    For each bank (3D [L, D_out, D_in]), flattens to [L*D_out, D_in] then tries
+    5 clip percentiles per row and picks the one with minimum MSE, mirroring the
+    post-training quantize_int6_per_row logic. Applied periodically during training
+    so weights learn to stay in a quantization-friendly distribution.
+    """
+    for bank in banks:
+        shape = bank.shape
+        w = bank.float().view(-1, shape[-1])  # [rows, dim_in]
+        sorted_abs, _ = w.abs().sort(dim=1, descending=True)
+        n_cols = sorted_abs.shape[1]
+        best_err = torch.full((w.shape[0],), float('inf'), device=bank.device)
+        best_q = w.clone()
+        for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
+            idx = min(int((1.0 - pct) * n_cols), n_cols - 1)
+            cv = sorted_abs[:, idx:idx + 1]  # [rows, 1] per-row clip value
+            scale = (cv / 31.0).clamp_min(1.0 / 31.0)
+            q_int = torch.clamp(torch.round(w.clamp(-cv, cv) / scale), -31, 31)
+            q = q_int * scale
+            err = (w - q).pow(2).mean(dim=1)  # [rows]
+            mask = err < best_err
+            best_err = torch.where(mask, err, best_err)
+            best_q = torch.where(mask.unsqueeze(1), q, best_q)
+        bank.data.copy_(best_q.view(shape).to(bank.dtype))
 
 def _unbank_state_dict(sd: dict[str, Tensor], num_layers: int) -> dict[str, Tensor]:
     """Convert 3D bank tensors into individual 2D tensors with standard names."""
@@ -1720,6 +1756,14 @@ def main() -> None:
         # Phase 3: Wait for RS, local NS5, all-gather (banks processed last)
         optimizer_muon.step()
         zero_grad_all()
+        # Online GPTQ: periodically snap bank weights to quantization-friendly values
+        if (args.online_gptq_interval > 0 and step > 0
+                and step % args.online_gptq_interval == 0
+                and max_wallclock_ms is not None):
+            elapsed_now = training_time_ms + 1000.0 * (time.perf_counter() - t0)
+            if elapsed_now >= args.online_gptq_start_frac * max_wallclock_ms:
+                online_gptq_banks([base_model.qo_bank, base_model.kv_bank,
+                                   base_model.mlp_up_bank, base_model.mlp_down_bank])
         # EMA update
         with torch.no_grad():
             for name, t in base_model.state_dict().items():
@@ -1803,7 +1847,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
