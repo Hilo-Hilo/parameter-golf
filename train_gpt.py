@@ -737,7 +737,7 @@ class MLP(nn.Module):
         super().__init__()
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.75)
         return F.linear(x.square(), down_w.to(x.dtype))
 
 class Block(nn.Module):
@@ -1120,7 +1120,7 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
+    mlp_down_params, attn_params, other_params = [], [], []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1131,12 +1131,22 @@ def eval_val_sliding_ttt(
             p.requires_grad_(False)
         else:
             p.requires_grad_(True)
-            ttt_params.append(p)
+            if name == "mlp_down_bank":
+                mlp_down_params.append(p)
+            elif name in ("qo_bank", "kv_bank"):
+                attn_params.append(p)
+            else:
+                other_params.append(p)
+    ttt_params = mlp_down_params + attn_params + other_params
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    pg = [{"params": mlp_down_params, "lr": args.ttt_lr * 3.0},
+          {"params": attn_params, "lr": args.ttt_lr * 0.5},
+          {"params": other_params, "lr": args.ttt_lr}]
+    pg = [g for g in pg if g["params"]]
+    optimizer = torch.optim.AdamW(pg, betas=(0.9, 0.95), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1813,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9 | lzma.PRESET_EXTREME)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
