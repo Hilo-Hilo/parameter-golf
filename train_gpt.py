@@ -109,6 +109,12 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_scale = float(os.environ.get("TTT_MLP_LR_SCALE", "2.0"))
+    ttt_attn_lr_scale = float(os.environ.get("TTT_ATTN_LR_SCALE", "0.5"))
+    engramlite_enabled = bool(int(os.environ.get("ENGRAMLITE_ENABLED", "0")))
+    engramlite_dim = int(os.environ.get("ENGRAMLITE_DIM", "64"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -715,6 +721,60 @@ class BigramHashEmbedding(nn.Module):
             h = self.proj(h)
         return h * self.scale.to(dtype=h.dtype)
 
+class EngramLiteEmbedding(nn.Module):
+    """Multi-head N-gram hash embeddings with per-index sigmoid gating.
+
+    Uses 2 bigram heads and 1 trigram head. Each head has a learned gate
+    (sigmoid over per-index logits) to suppress noisy hash collisions.
+    All heads share a single large embedding table with per-head offset.
+    """
+    def __init__(self, ngram_vocab: int, ngram_dim: int, model_dim: int):
+        super().__init__()
+        self.ngram_vocab = ngram_vocab
+        self.n_tables = 3  # 2 bigram heads + 1 trigram head
+        self.tables = nn.Embedding(self.n_tables * ngram_vocab, ngram_dim)
+        nn.init.zeros_(self.tables.weight)
+        self.gate_logits = nn.Parameter(torch.zeros(self.n_tables * ngram_vocab))
+        out_dim = ngram_dim * self.n_tables
+        self.proj = CastedLinear(out_dim, model_dim, bias=False) if out_dim != model_dim else None
+        if self.proj is not None:
+            nn.init.zeros_(self.proj.weight)
+        self.scale = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
+
+    def _bigram_hash(self, t: Tensor, head: int) -> Tensor:
+        mod = self.ngram_vocab - 1
+        salts = [(36313, 27191), (54193, 38471)]
+        a, b = salts[head]
+        out = torch.empty_like(t)
+        out[..., 0] = mod
+        out[..., 1:] = torch.bitwise_xor(a * t[..., 1:].int(), b * t[..., :-1].int()).long() % mod
+        return out.long() + head * self.ngram_vocab
+
+    def _trigram_hash(self, t: Tensor) -> Tensor:
+        mod = self.ngram_vocab - 1
+        out = torch.empty_like(t)
+        out[..., 0] = mod
+        out[..., 1] = mod
+        ti = t.int()
+        out[..., 2:] = (71317 * ti[..., 2:] ^ 53173 * ti[..., 1:-1] ^ 44201 * ti[..., :-2]).long() % mod
+        return out.long() + 2 * self.ngram_vocab
+
+    def forward(self, token_ids: Tensor) -> Tensor:
+        indices = [
+            self._bigram_hash(token_ids, 0),
+            self._bigram_hash(token_ids, 1),
+            self._trigram_hash(token_ids),
+        ]
+        parts = []
+        for idx in indices:
+            emb = self.tables(idx)
+            gate = torch.sigmoid(self.gate_logits[idx]).unsqueeze(-1)
+            parts.append(emb * gate)
+        h = torch.cat(parts, dim=-1)
+        if self.proj is not None:
+            h = self.proj(h)
+        return h * self.scale.to(dtype=h.dtype)
+
 class ValueEmbedding(nn.Module):
     """Reinject token identity into attention values at specific layers.
     Each table maps vocab tokens to a low-dim embedding, projected to model_dim."""
@@ -733,11 +793,12 @@ class ValueEmbedding(nn.Module):
         return h * self.scale.to(dtype=h.dtype)
 
 class MLP(nn.Module):
+    _leaky_alpha: float = float(os.environ.get("LEAKY_RELU_ALPHA", "0.5"))
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=self._leaky_alpha)
         return F.linear(x.square(), down_w.to(x.dtype))
 
 class Block(nn.Module):
@@ -809,6 +870,8 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        engramlite_enabled: bool = False,
+        engramlite_dim: int = 64,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -821,7 +884,12 @@ class GPT(nn.Module):
         self.mtp_num_heads = mtp_num_heads
         self.mtp_loss_weight = mtp_loss_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
-        self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
+        if engramlite_enabled and bigram_vocab_size > 0:
+            self.bigram = EngramLiteEmbedding(bigram_vocab_size, engramlite_dim, model_dim)
+        elif bigram_vocab_size > 0:
+            self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim)
+        else:
+            self.bigram = None
         self.smear = SmearGate(model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -1136,7 +1204,27 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if getattr(args, "ttt_optimizer", "sgd") == "adamw":
+        if getattr(args, "ttt_perlayer_lr", False):
+            mlp_params = [p for n, p in base_model.named_parameters()
+                          if ".mlp." in n and p.requires_grad]
+            attn_params = [p for n, p in base_model.named_parameters()
+                           if ".attn." in n and p.requires_grad]
+            other_params = [p for n, p in base_model.named_parameters()
+                            if ".mlp." not in n and ".attn." not in n and p.requires_grad]
+            mlp_s = getattr(args, "ttt_mlp_lr_scale", 2.0)
+            attn_s = getattr(args, "ttt_attn_lr_scale", 0.5)
+            param_groups = [
+                {"params": mlp_params, "lr": args.ttt_lr * mlp_s},
+                {"params": attn_params, "lr": args.ttt_lr * attn_s},
+                {"params": other_params, "lr": args.ttt_lr},
+            ]
+            optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr,
+                                          betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1490,6 +1578,8 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        engramlite_enabled=args.engramlite_enabled,
+        engramlite_dim=args.engramlite_dim,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1803,7 +1893,8 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    _lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    quant_blob = lzma.compress(quant_raw, preset=_lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1833,6 +1924,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        engramlite_enabled=args.engramlite_enabled, engramlite_dim=args.engramlite_dim,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
