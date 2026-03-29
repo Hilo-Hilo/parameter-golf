@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_adamw = bool(int(os.environ.get("TTT_USE_ADAMW", "0")))
+    turbo_muon_beta2 = float(os.environ.get("TURBO_MUON_BETA2", "0.95"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -145,11 +147,13 @@ class Muon(torch.optim.Optimizer):
     4. Each all-gather overlaps with next bank's NS5
     """
     def __init__(self, params, lr: float, momentum: float, backend_steps: int,
-                 nesterov: bool = True, weight_decay: float = 0.0):
+                 nesterov: bool = True, weight_decay: float = 0.0,
+                 turbo_beta2: float = 0.0):
         super().__init__(
             params,
             dict(lr=lr, momentum=momentum, backend_steps=backend_steps,
-                 nesterov=nesterov, weight_decay=weight_decay),
+                 nesterov=nesterov, weight_decay=weight_decay,
+                 turbo_beta2=turbo_beta2),
         )
         self._built = False
 
@@ -173,6 +177,7 @@ class Muon(torch.optim.Optimizer):
                     'padded_grad': torch.zeros(padded_B, *tail, device=dev, dtype=torch.bfloat16),
                     'shard': torch.zeros(shard_B, *tail, device=dev, dtype=torch.bfloat16),
                     'shard_mom': torch.zeros(shard_B, *tail, device=dev, dtype=torch.bfloat16),
+                    'shard_v2': torch.zeros(shard_B, *tail, device=dev, dtype=torch.float32),
                     'full_update': torch.zeros(padded_B, *tail, device=dev, dtype=torch.bfloat16),
                     'scale': max(1, p.shape[-2] / p.shape[-1]) ** 0.5,
                 })
@@ -216,6 +221,7 @@ class Muon(torch.optim.Optimizer):
             backend_steps = group["backend_steps"]
             nesterov = group["nesterov"]
             wd = group.get("weight_decay", 0.0)
+            turbo_beta2 = group.get("turbo_beta2", 0.0)
 
             prev_ag_handle = None
             prev_m = None
@@ -239,6 +245,11 @@ class Muon(torch.optim.Optimizer):
                     self._rs_futures[i].wait()
                     g = m['shard']
                     buf = m['shard_mom']
+                    # Turbo-Muon: element-wise RMS preconditioning on the gradient shard
+                    if turbo_beta2 > 0.0 and 'shard_v2' in m:
+                        v2 = m['shard_v2']
+                        v2.mul_(turbo_beta2).addcmul_(g.float(), g.float(), value=1.0 - turbo_beta2)
+                        g = (g.float() / (v2.sqrt() + 1e-7)).to(g.dtype)
                 else:
                     g = p.grad.bfloat16()
                     state = self.state[p]
@@ -1136,7 +1147,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if getattr(args, 'ttt_use_adamw', False):
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1551,6 +1565,7 @@ def main() -> None:
         momentum=args.muon_momentum,
         backend_steps=args.muon_backend_steps,
         weight_decay=args.muon_wd,
+        turbo_beta2=args.turbo_muon_beta2,
     )
     for group in optimizer_muon.param_groups:
         group["base_lr"] = args.matrix_lr
@@ -1803,7 +1818,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
