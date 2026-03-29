@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    mlp_bank_qat = bool(int(os.environ.get("MLP_BANK_QAT", "0")))
+    int5_mlp = bool(int(os.environ.get("INT5_MLP", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -783,6 +788,19 @@ class Block(nn.Module):
         return x_out, raw_v
 
 class GPT(nn.Module):
+    _mlp_bank_qat_enabled: bool = False
+
+    @staticmethod
+    def _fq_int5(w: Tensor) -> Tensor:
+        """Fake-quantize to int5 range [-15, 15] with straight-through estimator."""
+        with torch.no_grad():
+            w32 = w.float()
+            row_max = w32.abs().amax(dim=-1)
+            scale = (row_max / 15.0).clamp_min(1.0 / 15.0)
+            w_q = torch.clamp(torch.round(w32 / scale.unsqueeze(-1)), -15, 15) * scale.unsqueeze(-1)
+            w_fq = w_q.to(w.dtype)
+        return w + (w_fq - w).detach()
+
     def __init__(
         self,
         vocab_size: int,
@@ -926,11 +944,14 @@ class GPT(nn.Module):
         v0 = None
         skips: list[Tensor] = []
         ve_cache: dict = {}
+        fq = GPT._fq_int5 if (GPT._mlp_bank_qat_enabled and self.training) else None
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
+            up_w = fq(self.mlp_up_bank[i]) if fq else self.mlp_up_bank[i]
+            down_w = fq(self.mlp_down_bank[i]) if fq else self.mlp_down_bank[i]
             x, raw_v = self.blocks[i](x, x0,
                 self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
+                self.qo_bank[n + i], up_w, down_w,
                 v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
@@ -940,9 +961,11 @@ class GPT(nn.Module):
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             ve = self._get_ve(bi, input_ids, ve_cache)
+            up_w = fq(self.mlp_up_bank[bi]) if fq else self.mlp_up_bank[bi]
+            down_w = fq(self.mlp_down_bank[bi]) if fq else self.mlp_down_bank[bi]
             x, _ = self.blocks[bi](x, x0,
                 self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
+                self.qo_bank[n + bi], up_w, down_w,
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
         x_flat = x.reshape(-1, x.size(-1))
@@ -1136,7 +1159,25 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            pg_mlp = [p for n, p in base_model.named_parameters()
+                      if p.requires_grad and ("mlp_up_bank" in n or "mlp_down_bank" in n)]
+            pg_attn = [p for n, p in base_model.named_parameters()
+                       if p.requires_grad and ("qo_bank" in n or "kv_bank" in n)]
+            pg_other = [p for n, p in base_model.named_parameters()
+                        if p.requires_grad and "mlp_up_bank" not in n
+                        and "mlp_down_bank" not in n and "qo_bank" not in n and "kv_bank" not in n]
+            param_groups = [
+                {"params": pg_mlp, "lr": args.ttt_lr * 2.0, "base_lr": args.ttt_lr * 2.0},
+                {"params": pg_attn, "lr": args.ttt_lr * 0.5, "base_lr": args.ttt_lr * 0.5},
+                {"params": pg_other, "lr": args.ttt_lr, "base_lr": args.ttt_lr},
+            ]
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1230,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('base_lr', args.ttt_lr) * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1338,7 +1379,7 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str], int5_cats: set[str] | None = None):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1358,7 +1399,8 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             meta[name] = "passthrough_ctrl"
             continue
         if cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            clip = 15 if (int5_cats and cat in int5_cats) else 31
+            q, s = quantize_int6_per_row(t, clip_range=clip)
             result[name + ".q"] = q
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
@@ -1465,6 +1507,7 @@ def main() -> None:
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
     CastedLinear._qat_enabled = args.qat_enabled
+    GPT._mlp_bank_qat_enabled = args.mlp_bank_qat
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1686,6 +1729,8 @@ def main() -> None:
         scale = lr_mul(step, elapsed_ms)
         if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
             CastedLinear._qat_enabled = True
+            if args.mlp_bank_qat:
+                GPT._mlp_bank_qat_enabled = True
             log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
@@ -1799,11 +1844,12 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    int5_cats = {"mlp"} if args.int5_mlp else None
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"}, int5_cats=int5_cats)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
