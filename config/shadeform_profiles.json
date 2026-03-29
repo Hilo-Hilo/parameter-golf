@@ -14,8 +14,8 @@
   "pg-rec": {
     "gpu_count": 8,
     "shade_instance_type": "H100x8",
-    "cloud": "hyperstack",
-    "region": "montreal-canada-2",
+    "cloud": "horizon",
+    "region": "blonduos-iceland-2",
     "docker_image": "matotezitanka/proteus-pytorch:2.11.0-cuda12.8",
     "ssh_key_id": "91516272-31ca-4c03-81ac-f4cab9f13ba4",
     "idle_action": "none",
