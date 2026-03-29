@@ -109,6 +109,13 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_scale = float(os.environ.get("TTT_MLP_LR_SCALE", "2.0"))
+    ttt_attn_lr_scale = float(os.environ.get("TTT_ATTN_LR_SCALE", "0.5"))
+    ttt_cosepoch = bool(int(os.environ.get("TTT_COSEPOCH", "0")))
+    leaky_relu_alpha = float(os.environ.get("LEAKY_RELU_ALPHA", "0.5"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "9"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -736,8 +743,10 @@ class MLP(nn.Module):
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         # No CastedLinear -- weights come from banks
+    leaky_alpha: float = 0.5
+
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=self.leaky_alpha)
         return F.linear(x.square(), down_w.to(x.dtype))
 
 class Block(nn.Module):
@@ -1136,7 +1145,31 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw" and args.ttt_perlayer_lr:
+        # Per-layer LR groups: MLP params get mlp_lr_scale x, attention params get attn_lr_scale x, others 1x
+        mlp_group, attn_group, other_group = [], [], []
+        for p in ttt_params:
+            name_match = ""
+            for name, pp in base_model.named_parameters():
+                if pp is p:
+                    name_match = name
+                    break
+            if "mlp" in name_match or "up_bank" in name_match or "down_bank" in name_match:
+                mlp_group.append(p)
+            elif "attn" in name_match or "qo_bank" in name_match or "kv_bank" in name_match:
+                attn_group.append(p)
+            else:
+                other_group.append(p)
+        param_groups = [
+            {"params": mlp_group, "lr": args.ttt_lr * args.ttt_mlp_lr_scale, "base_lr": args.ttt_lr * args.ttt_mlp_lr_scale},
+            {"params": attn_group, "lr": args.ttt_lr * args.ttt_attn_lr_scale, "base_lr": args.ttt_lr * args.ttt_attn_lr_scale},
+            {"params": other_group, "lr": args.ttt_lr, "base_lr": args.ttt_lr},
+        ]
+        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0)
+    elif args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,13 +1222,19 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                chunk_cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    base = pg.get('base_lr', args.ttt_lr)
+                    pg['lr'] = base * chunk_cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
                 for _ep in range(args.ttt_epochs):
+                    if args.ttt_cosepoch and args.ttt_epochs > 1:
+                        ep_scale = 0.5 * (1.0 + math.cos(math.pi * _ep / (args.ttt_epochs - 1)))
+                        for pg in optimizer.param_groups:
+                            base = pg.get('base_lr', args.ttt_lr)
+                            pg['lr'] = base * chunk_cos_scale * ep_scale
                     for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
                         actual_bs = my_seq_s + bs
@@ -1465,6 +1504,7 @@ def main() -> None:
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
     CastedLinear._qat_enabled = args.qat_enabled
+    MLP.leaky_alpha = args.leaky_relu_alpha
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1803,7 +1843,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
