@@ -1136,7 +1136,7 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1250,7 +1250,7 @@ def _classify_param(name: str) -> str:
     if ".attn." in name or (".proj." in name and ".mlp." not in name):
         return "attn"
     return "other"
-def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tensor]:
+def quantize_int6_per_row(t: Tensor, clip_range: int = 31, hess_diag: Tensor | None = None) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
         best_q, best_s, best_err = None, None, float('inf')
@@ -1262,7 +1262,13 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
             s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
             q = torch.clamp(torch.round(t32 / s.float()[:, None]), -clip_range, clip_range).to(torch.int8)
             recon = q.float() * s.float()[:, None]
-            err = (t32 - recon).pow(2).mean().item()
+            err_mat = (t32 - recon).pow(2)
+            if hess_diag is not None and hess_diag.numel() == t32.size(1):
+                h = hess_diag.float().to(err_mat.device)
+                h = h / (h.sum() + 1e-8)
+                err = (err_mat * h[None, :]).sum().item()
+            else:
+                err = err_mat.mean().item()
             if err < best_err:
                 best_q, best_s, best_err = q, s, err
         return best_q, best_s
@@ -1338,7 +1344,7 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str], hess_dict: dict[int, Tensor] | None = None):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1358,7 +1364,17 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             meta[name] = "passthrough_ctrl"
             continue
         if cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            hess = None
+            if hess_dict is not None and ".mlp.fc.weight" in name and name.startswith("blocks."):
+                parts = name.split(".")
+                try:
+                    layer_idx = int(parts[1])
+                    h = hess_dict.get(layer_idx)
+                    if h is not None and h.numel() == t.size(1 if t.ndim == 2 else 0):
+                        hess = h.cpu()
+                except (ValueError, IndexError):
+                    pass
+            q, s = quantize_int6_per_row(t, hess_diag=hess)
             result[name + ".q"] = q
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
@@ -1388,6 +1404,45 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
         else:
             out[name] = (q.float() * float(s.item())).to(orig_dtype)
     return out
+
+# --- Diagonal Hessian calibration for GPTQ ---
+
+def collect_mlp_hessians(
+    model: nn.Module, train_files: str, device: torch.device,
+    seq_len: int = 2048, num_batches: int = 64,
+) -> dict[int, Tensor]:
+    """Collect diagonal Hessian estimates for MLP up-projections using training data."""
+    n = model.num_layers
+    hess_sum: dict[int, Tensor] = {i: torch.zeros(model.mlp_up_bank.shape[2], device=device, dtype=torch.float32)
+                                   for i in range(n)}
+    hess_cnt: dict[int, int] = {i: 0 for i in range(n)}
+    handles = []
+
+    def make_hook(idx: int):
+        def hook(module: nn.Module, inputs: tuple, output: Tensor) -> None:
+            x = inputs[0].detach().reshape(-1, inputs[0].size(-1)).float()
+            hess_sum[idx].add_(x.square().sum(0))
+            hess_cnt[idx] += x.size(0)
+        return hook
+
+    for i, block in enumerate(model.blocks):
+        handles.append(block.mlp.register_forward_hook(make_hook(i)))
+
+    cal_loader = DistributedTokenLoader(train_files, 0, 1, device)
+    model.eval()
+    with torch.no_grad():
+        for _ in range(num_batches):
+            toks = cal_loader.take(seq_len * 4 + 1)
+            xb = toks[:-1].reshape(4, seq_len)
+            yb = toks[1:].reshape(4, seq_len)
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                model(xb, yb)
+
+    for h in handles:
+        h.remove()
+
+    return {i: hess_sum[i] / max(hess_cnt[i], 1) for i in range(n)}
+
 
 # --- Training ---
 
@@ -1796,14 +1851,23 @@ def main() -> None:
         code_bytes = len(code.encode("utf-8"))
         log0(f"Serialized model: {model_bytes} bytes")
         log0(f"Code size: {code_bytes} bytes")
+    # Collect diagonal Hessians from training data for improved GPTQ clip selection
+    hess_dict: dict[int, Tensor] | None = None
+    if master_process:
+        log0("hess_gptq:collecting diagonal hessians for mlp up-projections")
+        hess_dict = collect_mlp_hessians(
+            base_model, args.train_files, device,
+            seq_len=args.train_seq_len, num_batches=64,
+        )
+        log0(f"hess_gptq:collected hessians for {len(hess_dict)} layers")
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"}, hess_dict=hess_dict)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
