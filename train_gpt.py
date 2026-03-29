@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", 6))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1139,32 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_perlayer_lr and args.ttt_optimizer == "adamw":
+        # Per-layer LR: deeper layers get proportionally higher LR to adapt faster
+        num_layers = len(base_model.blocks)
+        param_to_layer: dict[int, int] = {}
+        for bi, block in enumerate(base_model.blocks):
+            for p in block.parameters():
+                param_to_layer[id(p)] = bi
+        grouped: dict[int, list] = {}
+        other_params: list = []
+        for p in ttt_params:
+            bi = param_to_layer.get(id(p), -1)
+            if bi >= 0:
+                grouped.setdefault(bi, []).append(p)
+            else:
+                other_params.append(p)
+        param_groups = []
+        for bi, ps in grouped.items():
+            layer_scale = (bi + 1) / num_layers
+            param_groups.append({"params": ps, "lr": args.ttt_lr * layer_scale})
+        if other_params:
+            param_groups.append({"params": other_params, "lr": args.ttt_lr})
+        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.0)
+    elif args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1831,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
