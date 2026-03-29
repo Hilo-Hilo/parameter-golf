@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_gate_only = bool(int(os.environ.get("TTT_GATE_ONLY", "0")))
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1118,25 +1121,44 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
+    # Select TTT parameters
+    # gate_only mode: only train tiny scalar routing params (q_gain, attn_scale, mlp_scale, resid_mix)
+    # This allows many more TTT epochs since total params ~17K vs ~71M for full model
+    _GATE_SCALE_KEYS = ('q_gain', 'attn_scale', 'mlp_scale', 'resid_mix', 'skip_weights', 'vr_lambda')
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
+    ttt_param_groups: list[dict] = []
+    ttt_params: list[torch.nn.Parameter] = []
     for name, p in base_model.named_parameters():
-        freeze = False
-        for bi in frozen_block_ids:
-            if f"blocks.{bi}." in name:
-                freeze = True
-                break
-        if freeze:
-            p.requires_grad_(False)
+        if args.ttt_gate_only:
+            train_p = any(k in name for k in _GATE_SCALE_KEYS)
         else:
+            freeze = any(f"blocks.{bi}." in name for bi in frozen_block_ids)
+            train_p = not freeze
+        if train_p:
             p.requires_grad_(True)
             ttt_params.append(p)
+            if args.ttt_perlayer_lr and not args.ttt_gate_only:
+                if ".mlp." in name or "mlp_up" in name or "mlp_down" in name:
+                    lr_scale = 3.0
+                elif ".attn." in name or "qo_bank" in name or "kv_bank" in name:
+                    lr_scale = 0.5
+                else:
+                    lr_scale = 1.0
+                ttt_param_groups.append({"params": [p], "lr": args.ttt_lr * lr_scale})
+        else:
+            p.requires_grad_(False)
+
+    if not ttt_param_groups:
+        ttt_param_groups = [{"params": ttt_params, "lr": args.ttt_lr}]
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
+         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)} "
+         f"optimizer={args.ttt_optimizer} gate_only={args.ttt_gate_only} perlayer_lr={args.ttt_perlayer_lr}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_param_groups, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.01)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1211,12 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_lr = args.ttt_lr * cos_scale
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    base = pg.get("lr_base", pg["lr"])
+                    pg["lr_base"] = base
+                    pg["lr"] = base * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
