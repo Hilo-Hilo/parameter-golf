@@ -109,6 +109,12 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_scale = float(os.environ.get("TTT_MLP_LR_SCALE", "2.0"))
+    ttt_attn_lr_scale = float(os.environ.get("TTT_ATTN_LR_SCALE", "0.5"))
+    ttt_m1epoch = bool(int(os.environ.get("TTT_M1EPOCH", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1142,26 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            mlp_ps = [p for n, p in base_model.named_parameters()
+                      if ('mlp_up_bank' in n or 'mlp_down_bank' in n) and p.requires_grad]
+            attn_ps = [p for n, p in base_model.named_parameters()
+                       if ('qo_bank' in n or 'kv_bank' in n) and p.requires_grad]
+            mlp_ids = {id(p) for p in mlp_ps}
+            attn_ids = {id(p) for p in attn_ps}
+            other_ps = [p for p in ttt_params if id(p) not in mlp_ids and id(p) not in attn_ids]
+            param_groups = [
+                {'params': mlp_ps, 'lr': args.ttt_lr * args.ttt_mlp_lr_scale},
+                {'params': attn_ps, 'lr': args.ttt_lr * args.ttt_attn_lr_scale},
+                {'params': other_ps, 'lr': args.ttt_lr},
+            ]
+        else:
+            param_groups = [{'params': ttt_params, 'lr': args.ttt_lr}]
+        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), eps=1e-8, weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    ttt_base_lrs = [pg['lr'] for pg in optimizer.param_groups]
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,13 +1214,17 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                cos_factor = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                for pg, base_lr in zip(optimizer.param_groups, ttt_base_lrs):
+                    pg['lr'] = base_lr * cos_factor
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
                 for _ep in range(args.ttt_epochs):
+                    if args.ttt_m1epoch and _ep > 0 and args.ttt_optimizer == "adamw":
+                        for state in optimizer.state.values():
+                            if 'exp_avg' in state:
+                                state['exp_avg'].zero_()
                     for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
                         actual_bs = my_seq_s + bs
@@ -1803,7 +1832,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
