@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    bank_qat_enabled = bool(int(os.environ.get("BANK_QAT_ENABLED", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -915,6 +918,18 @@ class GPT(nn.Module):
         ve_base = ve_cache['ve'] if ve_cache is not None else self.ve_shared(input_ids)
         ve_idx = self.ve_layer_indices.index(layer_idx)
         return ve_base * self.ve_layer_scales[ve_idx].to(dtype=ve_base.dtype)
+
+    def _maybe_qfake(self, t: Tensor) -> Tensor:
+        """Apply per-row int6 fake quantization (STE) to a 2D bank weight slice."""
+        if not getattr(self, '_bank_qat', False) or not self.training:
+            return t
+        w32 = t.float()
+        row_max = w32.abs().amax(dim=1, keepdim=True)
+        scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
+        w_q = (torch.clamp(torch.round(w32 / scale), -31.0, 31.0) * scale).to(t.dtype)
+        # STE: forward sees quantized values, backward passes gradient through unchanged
+        return t + (w_q.detach() - t.detach())
+
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         n = self.num_layers
         x = self.tok_emb(input_ids)
@@ -929,8 +944,9 @@ class GPT(nn.Module):
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
             x, raw_v = self.blocks[i](x, x0,
-                self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
+                self._maybe_qfake(self.qo_bank[i]), self._maybe_qfake(self.kv_bank[i]),
+                self._maybe_qfake(self.kv_bank[n + i]), self._maybe_qfake(self.qo_bank[n + i]),
+                self._maybe_qfake(self.mlp_up_bank[i]), self._maybe_qfake(self.mlp_down_bank[i]),
                 v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
@@ -941,8 +957,9 @@ class GPT(nn.Module):
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             ve = self._get_ve(bi, input_ids, ve_cache)
             x, _ = self.blocks[bi](x, x0,
-                self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
+                self._maybe_qfake(self.qo_bank[bi]), self._maybe_qfake(self.kv_bank[bi]),
+                self._maybe_qfake(self.kv_bank[n + bi]), self._maybe_qfake(self.qo_bank[n + bi]),
+                self._maybe_qfake(self.mlp_up_bank[bi]), self._maybe_qfake(self.mlp_down_bank[bi]),
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
         x_flat = x.reshape(-1, x.size(-1))
@@ -987,8 +1004,9 @@ class GPT(nn.Module):
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
             x, raw_v = self.blocks[i](x, x0,
-                self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
+                self._maybe_qfake(self.qo_bank[i]), self._maybe_qfake(self.kv_bank[i]),
+                self._maybe_qfake(self.kv_bank[n + i]), self._maybe_qfake(self.qo_bank[n + i]),
+                self._maybe_qfake(self.mlp_up_bank[i]), self._maybe_qfake(self.mlp_down_bank[i]),
                 v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
@@ -999,8 +1017,9 @@ class GPT(nn.Module):
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             ve = self._get_ve(bi, input_ids, ve_cache)
             x, _ = self.blocks[bi](x, x0,
-                self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
+                self._maybe_qfake(self.qo_bank[bi]), self._maybe_qfake(self.kv_bank[bi]),
+                self._maybe_qfake(self.kv_bank[n + bi]), self._maybe_qfake(self.qo_bank[n + bi]),
+                self._maybe_qfake(self.mlp_up_bank[bi]), self._maybe_qfake(self.mlp_down_bank[bi]),
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
         if self.tie_embeddings:
@@ -1136,7 +1155,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1496,6 +1518,7 @@ def main() -> None:
     base_model.kv_bank.data = base_model.kv_bank.data.float()
     base_model.mlp_up_bank.data = base_model.mlp_up_bank.data.float()
     base_model.mlp_down_bank.data = base_model.mlp_down_bank.data.float()
+    base_model._bank_qat = False  # enabled via late_qat_threshold when bank_qat_enabled
     for module in base_model.modules():
         if isinstance(module, CastedLinear):
             module.float()
@@ -1686,7 +1709,9 @@ def main() -> None:
         scale = lr_mul(step, elapsed_ms)
         if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
             CastedLinear._qat_enabled = True
-            log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
+            if args.bank_qat_enabled:
+                base_model._bank_qat = True
+            log0(f"late_qat:enabled step:{step} scale:{scale:.4f} bank_qat:{args.bank_qat_enabled}")
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1803,7 +1828,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
