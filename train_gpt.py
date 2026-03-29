@@ -96,6 +96,7 @@ class Hyperparameters:
     ln_scale = bool(int(os.environ.get("LN_SCALE", "1")))
     dtg_enabled = bool(int(os.environ.get("DTG_ENABLED", "0")))
     late_qat_threshold = float(os.environ.get("LATE_QAT_THRESHOLD", 0.15))
+    cage_qat = bool(int(os.environ.get("CAGE_QAT", "0")))
     ve_enabled = bool(int(os.environ.get("VE_ENABLED", "1")))
     ve_dim = int(os.environ.get("VE_DIM", 128))
     ve_layers = os.environ.get("VE_LAYERS", "9,10")
@@ -551,6 +552,7 @@ class RMSNorm(nn.Module):
         return F.rms_norm(x, (x.size(-1),), eps=self.eps)
 class CastedLinear(nn.Linear):
     _qat_enabled: bool = False
+    _qat_cage: bool = False  # CAGE: curvature-aware QAT gradient (arXiv:2510.18784)
     def forward(self, x: Tensor) -> Tensor:
         w = self.weight.to(x.dtype)
         if CastedLinear._qat_enabled and self.training and w.ndim == 2:
@@ -558,8 +560,20 @@ class CastedLinear(nn.Linear):
                 w32 = self.weight.float()
                 row_max = w32.abs().amax(dim=1)
                 scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
-                w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -32, 31) * scale[:, None]).to(x.dtype)
-            w = w + (w_q - w).detach()
+                w_norm = w32 / scale[:, None]
+                w_q = (torch.clamp(torch.round(w_norm), -32, 31) * scale[:, None]).to(x.dtype)
+                if CastedLinear._qat_cage:
+                    # Attenuate STE gradient for weights near rounding boundaries.
+                    # cage_scale = 1 when residual=0 (easy to quantize),
+                    #              0.1 when |residual|=0.5 (at boundary, hard to quantize).
+                    residual = (w_norm - torch.round(w_norm)).abs()
+                    cage_scale = (1.0 - residual * 2.0).clamp(0.1, 1.0).to(x.dtype)
+            if CastedLinear._qat_cage:
+                # CAGE STE: forward uses w_q values; backward scales gradient by cage_scale.
+                # d(w_eff)/dw = cage_scale (verified: w*cage_scale + (w_q-w*cage_scale).detach() = w_q)
+                w = w * cage_scale + (w_q - w * cage_scale).detach()
+            else:
+                w = w + (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w, bias)
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
@@ -1465,6 +1479,7 @@ def main() -> None:
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
     CastedLinear._qat_enabled = args.qat_enabled
+    CastedLinear._qat_cage = args.cage_qat
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1803,7 +1818,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
