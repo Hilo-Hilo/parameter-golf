@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_adamw = bool(int(os.environ.get("TTT_ADAMW", "0")))
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_mult = float(os.environ.get("TTT_MLP_LR_MULT", "2.0"))
+    progressive_qat = bool(int(os.environ.get("PROGRESSIVE_QAT", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -551,15 +556,17 @@ class RMSNorm(nn.Module):
         return F.rms_norm(x, (x.size(-1),), eps=self.eps)
 class CastedLinear(nn.Linear):
     _qat_enabled: bool = False
+    _qat_alpha: float = 0.0
     def forward(self, x: Tensor) -> Tensor:
         w = self.weight.to(x.dtype)
-        if CastedLinear._qat_enabled and self.training and w.ndim == 2:
+        eff_alpha = CastedLinear._qat_alpha if CastedLinear._qat_alpha > 0.0 else (1.0 if CastedLinear._qat_enabled else 0.0)
+        if eff_alpha > 0.0 and self.training and w.ndim == 2:
             with torch.no_grad():
                 w32 = self.weight.float()
                 row_max = w32.abs().amax(dim=1)
                 scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
                 w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -32, 31) * scale[:, None]).to(x.dtype)
-            w = w + (w_q - w).detach()
+            w = w + eff_alpha * (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w, bias)
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
@@ -1136,7 +1143,32 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_adamw:
+        if args.ttt_perlayer_lr:
+            mlp_params, attn_params, other_params = [], [], []
+            for name, p in base_model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                if '.mlp.' in name:
+                    mlp_params.append(p)
+                elif '.attn.' in name:
+                    attn_params.append(p)
+                else:
+                    other_params.append(p)
+            mlp_lr = args.ttt_lr * args.ttt_mlp_lr_mult
+            param_groups = [
+                {'params': mlp_params, 'lr': mlp_lr, 'initial_lr': mlp_lr},
+                {'params': attn_params, 'lr': args.ttt_lr, 'initial_lr': args.ttt_lr},
+                {'params': other_params, 'lr': args.ttt_lr, 'initial_lr': args.ttt_lr},
+            ]
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0, eps=1e-8)
+        else:
+            optimizer = torch.optim.AdamW(
+                [{'params': ttt_params, 'lr': args.ttt_lr, 'initial_lr': args.ttt_lr}],
+                weight_decay=0.0, eps=1e-8,
+            )
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1221,10 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    base = pg.get('initial_lr', args.ttt_lr)
+                    pg['lr'] = base * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1684,7 +1717,9 @@ def main() -> None:
             break
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
-        if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
+        if args.progressive_qat:
+            CastedLinear._qat_alpha = max(0.0, 1.0 - scale)
+        elif args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
             CastedLinear._qat_enabled = True
             log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
         zero_grad_all()
@@ -1803,7 +1838,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
