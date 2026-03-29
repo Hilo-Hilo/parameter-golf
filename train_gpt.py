@@ -91,6 +91,7 @@ class Hyperparameters:
     qat_enabled = bool(int(os.environ.get("QAT_ENABLED", "0")))
     bigram_vocab_size = int(os.environ.get("BIGRAM_VOCAB_SIZE", 2048))
     bigram_dim = int(os.environ.get("BIGRAM_DIM", 128))
+    bigram_num_heads = int(os.environ.get("BIGRAM_NUM_HEADS", 1))
     xsa_last_n = int(os.environ.get("XSA_LAST_N", 4))
     rope_dims = int(os.environ.get("ROPE_DIMS", 16))
     ln_scale = bool(int(os.environ.get("LN_SCALE", "1")))
@@ -692,25 +693,34 @@ class SmearGate(nn.Module):
         x_prev = torch.cat([torch.zeros_like(x[:, :1]), x[:, :-1]], dim=1)
         return (1 - g) * x + g * x_prev
 
+_BIGRAM_PRIMES = [(36313, 27191), (57131, 18119), (43759, 31337), (52237, 23629)]
+
 class BigramHashEmbedding(nn.Module):
-    def __init__(self, bigram_vocab_size: int, bigram_dim: int, model_dim: int):
+    def __init__(self, bigram_vocab_size: int, bigram_dim: int, model_dim: int, num_heads: int = 1):
         super().__init__()
         self.bigram_vocab_size = bigram_vocab_size
-        self.embed = nn.Embedding(bigram_vocab_size, bigram_dim)
-        nn.init.zeros_(self.embed.weight)
-        self.proj = CastedLinear(bigram_dim, model_dim, bias=False) if bigram_dim != model_dim else None
+        self.num_heads = num_heads
+        self.embeds = nn.ModuleList([nn.Embedding(bigram_vocab_size, bigram_dim) for _ in range(num_heads)])
+        for emb in self.embeds:
+            nn.init.zeros_(emb.weight)
+        total_dim = bigram_dim * num_heads
+        self.proj = CastedLinear(total_dim, model_dim, bias=False) if total_dim != model_dim else None
         if self.proj is not None:
             nn.init.zeros_(self.proj.weight)
         self.scale = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
-    def bigram_hash(self, tokens: Tensor) -> Tensor:
+    def bigram_hash(self, tokens: Tensor, p1: int, p2: int) -> Tensor:
         t = tokens.to(torch.int32)
         mod = self.bigram_vocab_size - 1
         out = torch.empty_like(t)
         out[..., 0] = mod
-        out[..., 1:] = torch.bitwise_xor(36313 * t[..., 1:], 27191 * t[..., :-1]) % mod
+        out[..., 1:] = torch.bitwise_xor(p1 * t[..., 1:], p2 * t[..., :-1]) % mod
         return out.long()
     def forward(self, token_ids: Tensor) -> Tensor:
-        h = self.embed(self.bigram_hash(token_ids))
+        heads = []
+        for i, emb in enumerate(self.embeds):
+            p1, p2 = _BIGRAM_PRIMES[i % len(_BIGRAM_PRIMES)]
+            heads.append(emb(self.bigram_hash(token_ids, p1, p2)))
+        h = torch.cat(heads, dim=-1)
         if self.proj is not None:
             h = self.proj(h)
         return h * self.scale.to(dtype=h.dtype)
@@ -800,6 +810,7 @@ class GPT(nn.Module):
         mtp_loss_weight: float = 0.1,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        bigram_num_heads: int = 1,
         xsa_last_n: int = 0,
         rope_dims: int = 0,
         ln_scale: bool = False,
@@ -821,7 +832,7 @@ class GPT(nn.Module):
         self.mtp_num_heads = mtp_num_heads
         self.mtp_loss_weight = mtp_loss_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
-        self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
+        self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim, num_heads=bigram_num_heads) if bigram_vocab_size > 0 else None
         self.smear = SmearGate(model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -1136,7 +1147,7 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1481,6 +1492,7 @@ def main() -> None:
         mtp_loss_weight=args.mtp_loss_weight,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        bigram_num_heads=args.bigram_num_heads,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims,
         ln_scale=args.ln_scale,
@@ -1528,7 +1540,8 @@ def main() -> None:
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     tok_params = [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}]
     if base_model.bigram is not None:
-        tok_params.append({"params": [base_model.bigram.embed.weight], "lr": token_lr, "base_lr": token_lr})
+        for emb in base_model.bigram.embeds:
+            tok_params.append({"params": [emb.weight], "lr": token_lr, "base_lr": token_lr})
         if base_model.bigram.proj is not None:
             scalar_params.append(base_model.bigram.proj.weight)
     if base_model.ve_shared is not None:
@@ -1803,7 +1816,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1829,6 +1842,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap, rope_base=args.rope_base, qk_gain_init=args.qk_gain_init,
         mtp_num_heads=0, mtp_loss_weight=0.0,
         bigram_vocab_size=args.bigram_vocab_size, bigram_dim=args.bigram_dim,
+        bigram_num_heads=args.bigram_num_heads,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
