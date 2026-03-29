@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    hadamard_rotation = bool(int(os.environ.get("HADAMARD_ROTATION", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1139,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer.lower() == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1239,6 +1245,57 @@ def eval_val_sliding_ttt(
          f"elapsed={time.perf_counter() - t0:.1f}s")
     return val_loss, val_bpb
 
+
+# --- Hadamard V-O rotation for quantization quality ---
+
+def _hadamard_matrix(n: int) -> Tensor:
+    """Generate n×n normalized Hadamard matrix (n must be power of 2).
+    H is symmetric and self-inverse: H^T = H, H @ H^T = I."""
+    assert n > 0 and (n & (n - 1)) == 0, f"Hadamard requires power-of-2 dim, got {n}"
+    H = torch.ones(1, 1, dtype=torch.float32)
+    while H.size(0) < n:
+        H_top = torch.cat([H, H], dim=1)
+        H_bot = torch.cat([H, -H], dim=1)
+        H = torch.cat([H_top, H_bot], dim=0) / math.sqrt(2)
+    return H
+
+def apply_hadamard_vo_rotation(unbanked_sd: dict[str, Tensor], num_layers: int,
+                                num_kv_heads: int, num_heads: int, head_dim: int) -> dict[str, Tensor]:
+    """Apply per-head Hadamard rotation to V and O weight matrices before quantization.
+
+    For each layer, new_V_h = H @ V_h (per KV head), new_O_h = O_h @ H (per attn head).
+    Model output is preserved: (H @ v_h) attended then (o_h @ H) applied equals original
+    because H @ H^T = I. Rotation distributes outliers evenly across head dimensions,
+    reducing per-row maximum values and improving int6 GPTQ-lite quantization quality.
+
+    Verified math: y_new = (attn @ (V @ H^T)) @ (H @ O^T)^T = attn @ V @ H^T @ H @ O^T
+                         = attn @ V @ O^T = y_original. (H^T = H for normalized Hadamard.)
+    """
+    if head_dim == 0 or (head_dim & (head_dim - 1)) != 0:
+        return unbanked_sd  # head_dim must be a power of 2
+    H = _hadamard_matrix(head_dim)
+    sd = dict(unbanked_sd)
+    for i in range(num_layers):
+        v_key = f"blocks.{i}.attn.c_v.weight"   # (kv_dim, model_dim)
+        o_key = f"blocks.{i}.attn.proj.weight"   # (model_dim, model_dim)
+        if v_key not in sd or o_key not in sd:
+            continue
+        v_w = sd[v_key].float()  # (kv_dim, model_dim)
+        o_w = sd[o_key].float()  # (model_dim, model_dim)
+        kv_dim, model_dim_v = v_w.shape
+        model_dim_o = o_w.shape[0]
+        # V: apply H on left per KV head (H @ V_h for each of num_kv_heads heads)
+        v_3d = v_w.view(num_kv_heads, head_dim, model_dim_v)
+        H_v = H.unsqueeze(0).expand(num_kv_heads, -1, -1)  # (num_kv_heads, head_dim, head_dim)
+        v_3d_rot = torch.bmm(H_v, v_3d)  # (num_kv_heads, head_dim, model_dim_v)
+        # O: apply H on right per attention head (O_h @ H for each of num_heads heads)
+        # F.linear(attn_y, o_w) = attn_y @ o_w^T; o_w columns indexed by [h*hd:(h+1)*hd]
+        # new_o_h = o_h @ H means: o_w_new[:, h*hd:(h+1)*hd] = o_w[:, h*hd:(h+1)*hd] @ H
+        o_3d = o_w.view(model_dim_o, num_heads, head_dim)  # (model_dim, num_heads, head_dim)
+        o_3d_rot = torch.einsum('mhd,de->mhe', o_3d, H)    # (model_dim, num_heads, head_dim)
+        sd[v_key] = v_3d_rot.view(kv_dim, model_dim_v).to(unbanked_sd[v_key].dtype)
+        sd[o_key] = o_3d_rot.view(model_dim_o, model_dim_o).to(unbanked_sd[o_key].dtype)
+    return sd
 
 # --- GPTQ-lite int6 quantization ---
 
@@ -1799,11 +1856,17 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
+    if args.hadamard_rotation:
+        head_dim = args.model_dim // args.num_heads
+        unbanked_sd = apply_hadamard_vo_rotation(
+            unbanked_sd, args.num_layers, args.num_kv_heads, args.num_heads, head_dim
+        )
+        log0(f"hadamard_rotation: applied per-head H_{head_dim} to V and O weights ({args.num_layers} layers)")
     quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
