@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ds_enabled = bool(int(os.environ.get("DS_ENABLED", "0")))
+    ds_weight = float(os.environ.get("DS_WEIGHT", "0.1"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -809,9 +811,13 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        ds_enabled: bool = False,
+        ds_weight: float = 0.1,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
+        self.ds_enabled = ds_enabled
+        self.ds_weight = ds_weight
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
         self.tie_embeddings = tie_embeddings
@@ -935,6 +941,7 @@ class GPT(nn.Module):
             if v0 is None and raw_v is not None:
                 v0 = raw_v
             skips.append(x)
+        x_bottleneck = x  # U-Net bottleneck for deep supervision
         for i in range(self.num_decoder_layers):
             bi = self.num_encoder_layers + i
             if skips:
@@ -955,6 +962,14 @@ class GPT(nn.Module):
             logits_proj = self.lm_head(x_flat)
         logits = self.logit_softcap * torch.tanh(logits_proj / self.logit_softcap)
         main_loss = F.cross_entropy(logits.float(), targets, reduction="mean")
+        if self.ds_enabled and self.training:
+            x_bn_flat = self.final_norm(x_bottleneck).reshape(-1, x_bottleneck.size(-1))
+            if self.tie_embeddings:
+                ds_lp = F.linear(x_bn_flat, self.tok_emb.weight)
+            else:
+                ds_lp = self.lm_head(x_bn_flat)
+            ds_lp = self.logit_softcap * torch.tanh(ds_lp / self.logit_softcap)
+            main_loss = main_loss + self.ds_weight * F.cross_entropy(ds_lp.float(), targets, reduction="mean")
         if self.training and self.mtp_num_heads > 0 and self.mtp_loss_weight > 0.0:
             _, seqlen, dim = x.shape
             mtp_loss_sum = x.new_zeros(())
@@ -1490,6 +1505,8 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        ds_enabled=args.ds_enabled,
+        ds_weight=args.ds_weight,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1803,7 +1820,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
