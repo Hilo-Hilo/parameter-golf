@@ -109,6 +109,10 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", 6))
+    compressor = os.environ.get("COMPRESSOR", "lzma")
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1120,7 +1124,7 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
+    ttt_named_params = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1131,12 +1135,27 @@ def eval_val_sliding_ttt(
             p.requires_grad_(False)
         else:
             p.requires_grad_(True)
-            ttt_params.append(p)
+            ttt_named_params.append((name, p))
+    ttt_params = [p for _, p in ttt_named_params]
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            _pgroups = []
+            for _name, _p in ttt_named_params:
+                _lr = args.ttt_lr
+                for _li in range(base_model.num_layers):
+                    if f"blocks.{_li}." in _name:
+                        _lr = args.ttt_lr * (0.5 + _li / max(base_model.num_layers - 1, 1))
+                        break
+                _pgroups.append({'params': [_p], 'lr': _lr, '_base_lr': _lr})
+            optimizer = torch.optim.AdamW(_pgroups, betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1208,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_factor = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('_base_lr', args.ttt_lr) * cos_factor
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1803,7 +1822,14 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    if args.compressor == "zstd":
+        try:
+            import zstandard as _zstd_mod
+            quant_blob = _zstd_mod.ZstdCompressor(level=22).compress(quant_raw)
+        except ImportError:
+            quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
+    else:
+        quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1815,8 +1841,13 @@ def main() -> None:
         dist.barrier()
     with open("final_model.int6.ptz", "rb") as f:
         quant_blob_disk = f.read()
+    try:
+        _decompressed = lzma.decompress(quant_blob_disk)
+    except lzma.LZMAError:
+        import zstandard as _zstd_mod
+        _decompressed = _zstd_mod.ZstdDecompressor().decompress(quant_blob_disk)
     quant_state = torch.load(
-        io.BytesIO(lzma.decompress(quant_blob_disk)),
+        io.BytesIO(_decompressed),
         map_location="cpu",
     )
     deq_unbanked = dequantize_mixed_int6(quant_state["w"], quant_state["m"], unbanked_sd)
