@@ -16,7 +16,7 @@ try:
     import zstandard
     _COMPRESSOR = "zstd"
 except ImportError:
-    _COMPRESSOR = "zlib"
+    raise ImportError("zstandard is required for zstd-22 compression: pip install zstandard")
 import numpy as np
 import sentencepiece as spm
 import torch
@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_adamw = bool(int(os.environ.get("TTT_USE_ADAMW", "0")))
+    ttt_adamw_wd = float(os.environ.get("TTT_ADAMW_WD", "0.0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1138,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_use_adamw:
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=args.ttt_adamw_wd)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,20 +1808,22 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    _cctx = zstandard.ZstdCompressor(level=22)
+    quant_blob = _cctx.compress(quant_raw)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
         quant_file_bytes = len(quant_blob)
         code_bytes = len(code.encode("utf-8"))
-        log0(f"Serialized model int6+lzma: {quant_file_bytes} bytes")
-        log0(f"Total submission size int6+lzma: {quant_file_bytes + code_bytes} bytes")
+        log0(f"Serialized model int6+zstd22: {quant_file_bytes} bytes")
+        log0(f"Total submission size int6+zstd22: {quant_file_bytes + code_bytes} bytes")
     if distributed:
         dist.barrier()
     with open("final_model.int6.ptz", "rb") as f:
         quant_blob_disk = f.read()
+    _dctx = zstandard.ZstdDecompressor()
     quant_state = torch.load(
-        io.BytesIO(lzma.decompress(quant_blob_disk)),
+        io.BytesIO(_dctx.decompress(quant_blob_disk)),
         map_location="cpu",
     )
     deq_unbanked = dequantize_mixed_int6(quant_state["w"], quant_state["m"], unbanked_sd)
