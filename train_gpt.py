@@ -501,12 +501,12 @@ def load_data_shard(file: Path) -> Tensor:
         raise ValueError(f"Short read for {file}")
     return torch.from_numpy(tokens_np.astype(np.uint16, copy=False))
 class TokenStream:
-    def __init__(self, pattern: str):
+    def __init__(self, pattern: str, skip_files: int = 0):
         self.files = [Path(p) for p in sorted(glob.glob(pattern))]
         if not self.files:
             raise FileNotFoundError(f"No files found for pattern: {pattern}")
-        self.file_idx = 0
-        self.tokens = load_data_shard(self.files[0])
+        self.file_idx = skip_files % len(self.files)
+        self.tokens = load_data_shard(self.files[self.file_idx])
         self.pos = 0
     def _advance_file(self) -> None:
         self.file_idx = (self.file_idx + 1) % len(self.files)
@@ -530,13 +530,26 @@ class DistributedTokenLoader:
         self.rank = rank
         self.world_size = world_size
         self.device = device
-        self.stream = TokenStream(pattern)
+        coprime_stride = int(os.environ.get("COPRIME_STRIDE", 0))
+        if coprime_stride > 0:
+            # Coprime-stride loader: each rank starts at a different data shard so that
+            # gradients across GPUs come from diverse, non-adjacent parts of the dataset.
+            # Each rank reads its own independent token stream rather than slicing a
+            # shared block, maximizing data diversity within each global training step.
+            self.stream = TokenStream(pattern, skip_files=rank * coprime_stride)
+            self._coprime = True
+        else:
+            self.stream = TokenStream(pattern)
+            self._coprime = False
     def next_batch(self, global_tokens: int, seq_len: int, grad_accum_steps: int) -> tuple[Tensor, Tensor]:
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
-        chunk = self.stream.take(per_rank_span * self.world_size)
-        start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
+        if self._coprime:
+            local = self.stream.take(per_rank_span).to(dtype=torch.int64)
+        else:
+            chunk = self.stream.take(per_rank_span * self.world_size)
+            start = self.rank * per_rank_span
+            local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
         x = local[:-1].reshape(-1, seq_len)
         y = local[1:].reshape(-1, seq_len)
         return x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
