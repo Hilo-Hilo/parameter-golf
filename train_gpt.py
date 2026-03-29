@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_adamw = bool(int(os.environ.get("TTT_USE_ADAMW", "0")))
+    ttt_adamw_wd = float(os.environ.get("TTT_ADAMW_WD", 0.0))
+    int5_quant_frac = float(os.environ.get("INT5_QUANT_FRAC", 0.0))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1139,11 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_use_adamw:
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999),
+                                      weight_decay=args.ttt_adamw_wd, eps=1e-8)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1271,6 +1278,35 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
     q = torch.clamp(torch.round(t32 / scale.float()), -clip_range, clip_range).to(torch.int8)
     return q, scale
 
+def quantize_int6_per_row_adaptive(t: Tensor, int5_frac: float = 0.0) -> tuple[Tensor, Tensor]:
+    """Adaptive INT5/INT6 quantization: use INT5 for bottom int5_frac fraction of rows
+    by relative error increase (INT5 vs INT6). Rows where INT5 is nearly as good as INT6
+    get INT5 (smaller range = better lzma compression). Rows where INT5 hurts get INT6."""
+    if int5_frac <= 0.0 or t.ndim != 2:
+        return quantize_int6_per_row(t)
+    t32 = t.float()
+    n_rows = t32.shape[0]
+    # Compute INT6 and INT5 quantization for all rows
+    q6, s6 = quantize_int6_per_row(t32, clip_range=31)
+    q5, s5 = quantize_int6_per_row(t32, clip_range=15)
+    # Compute relative reconstruction error increase: (err5 - err6) / (err6 + eps)
+    recon6 = q6.float() * s6.float()[:, None]
+    recon5 = q5.float() * s5.float()[:, None]
+    row_var = t32.pow(2).mean(dim=1).clamp(min=1e-8)
+    err6 = (t32 - recon6).pow(2).mean(dim=1) / row_var
+    err5 = (t32 - recon5).pow(2).mean(dim=1) / row_var
+    err_increase = (err5 - err6) / (err6 + 1e-8)
+    # INT5 for rows with smallest relative error increase
+    n_int5 = int(n_rows * int5_frac)
+    if n_int5 > 0:
+        _, int5_idx = torch.topk(err_increase, n_int5, largest=False)
+        q_out = q6.clone()
+        s_out = s6.clone()
+        q_out[int5_idx] = q5[int5_idx]
+        s_out[int5_idx] = s5[int5_idx]
+        return q_out, s_out
+    return q6, s6
+
 def _unbank_state_dict(sd: dict[str, Tensor], num_layers: int) -> dict[str, Tensor]:
     """Convert 3D bank tensors into individual 2D tensors with standard names."""
     out: dict[str, Tensor] = {}
@@ -1338,7 +1374,7 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str], int5_frac: float = 0.0):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1358,7 +1394,7 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             meta[name] = "passthrough_ctrl"
             continue
         if cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            q, s = quantize_int6_per_row_adaptive(t, int5_frac=int5_frac)
             result[name + ".q"] = q
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
@@ -1799,11 +1835,11 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"}, int5_frac=args.int5_quant_frac)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
