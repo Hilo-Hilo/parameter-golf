@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "9"))
+    sam_rho = float(os.environ.get("SAM_RHO", "0.0"))
+    sam_last_frac = float(os.environ.get("SAM_LAST_FRAC", "0.02"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1141,22 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == 'adamw':
+        if args.ttt_perlayer_lr:
+            _tnamed = [(n, p) for n, p in base_model.named_parameters() if p.requires_grad]
+            mlp_p = [p for n, p in _tnamed if 'mlp_up_bank' in n or 'mlp_down_bank' in n]
+            attn_p = [p for n, p in _tnamed if 'qo_bank' in n or 'kv_bank' in n]
+            _tids = set(id(p) for p in mlp_p + attn_p)
+            other_p = [p for n, p in _tnamed if id(p) not in _tids]
+            _tgroups = []
+            if mlp_p: _tgroups.append({'params': mlp_p, 'lr': args.ttt_lr * 3.0})
+            if attn_p: _tgroups.append({'params': attn_p, 'lr': args.ttt_lr * 0.5})
+            if other_p: _tgroups.append({'params': other_p, 'lr': args.ttt_lr})
+            optimizer = torch.optim.AdamW(_tgroups, betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1696,6 +1716,26 @@ def main() -> None:
             train_loss += loss.detach()
             (loss * grad_scale).backward()
         train_loss /= grad_accum_steps
+        if args.sam_rho > 0 and scale < args.sam_last_frac and grad_accum_steps == 1:
+            # SAM: perturb weights by rho*g/||g||, recompute gradient at perturbed point
+            with torch.no_grad():
+                gnorm_sq = sum(p.grad.norm() ** 2 for p in base_model.parameters() if p.grad is not None)
+                gnorm = gnorm_sq.sqrt().clamp_min(1e-12)
+                _sam_saved = {}
+                for p in base_model.parameters():
+                    if p.grad is not None:
+                        eps = (args.sam_rho / gnorm) * p.grad
+                        _sam_saved[id(p)] = p.data.clone()
+                        p.data.add_(eps)
+            zero_grad_all()
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
+                _sam_loss = model(x, y)
+            (_sam_loss * grad_scale).backward()
+            with torch.no_grad():
+                for p in base_model.parameters():
+                    if id(p) in _sam_saved:
+                        p.data.copy_(_sam_saved[id(p)])
+            del _sam_saved
         frac = min(step / args.muon_momentum_warmup_steps, 1.0) if args.muon_momentum_warmup_steps > 0 else 1.0
         muon_momentum = (1 - frac) * args.muon_momentum_warmup_start + frac * args.muon_momentum
         for group in optimizer_muon.param_groups:
@@ -1803,7 +1843,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
