@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "9"))
+    online_gptq_enabled = bool(int(os.environ.get("ONLINE_GPTQ_ENABLED", "0")))
+    online_gptq_freq = int(os.environ.get("ONLINE_GPTQ_FREQ", "1"))  # apply every N steps
+    online_gptq_scale_thresh = float(os.environ.get("ONLINE_GPTQ_SCALE_THRESH", "0.2"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -558,7 +563,7 @@ class CastedLinear(nn.Linear):
                 w32 = self.weight.float()
                 row_max = w32.abs().amax(dim=1)
                 scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
-                w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -32, 31) * scale[:, None]).to(x.dtype)
+                w_q = (torch.clamp(torch.round(w32 / scale[:, None]), -31, 31) * scale[:, None]).to(x.dtype)
             w = w + (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w, bias)
@@ -1136,7 +1141,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1270,6 +1278,32 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
     scale = torch.tensor(amax / clip_range if amax > 0 else 1.0, dtype=torch.float16)
     q = torch.clamp(torch.round(t32 / scale.float()), -clip_range, clip_range).to(torch.int8)
     return q, scale
+
+def online_gptq_banks(model, clip_range: int = 31) -> None:
+    """Apply vectorized GPTQ-lite (5 clip-percentile candidates) to all 4 bank tensors in-place.
+    Snap bank weights toward their best int6 quantized representation after each optimizer step.
+    This gives bank weights QAT-like training even though they are not CastedLinear layers.
+    """
+    pct_fracs = torch.tensor([0.999, 0.9995, 0.9999, 0.99999, 1.0])
+    with torch.no_grad():
+        for bank in [model.qo_bank, model.kv_bank, model.mlp_up_bank, model.mlp_down_bank]:
+            orig_shape = bank.data.shape
+            flat = bank.data.contiguous().view(-1, orig_shape[-1]).float()
+            device = flat.device
+            pcts = pct_fracs.to(device)
+            abs_flat = flat.abs()
+            clips = torch.quantile(abs_flat, pcts, dim=1)  # (5, R)
+            scales = (clips / clip_range).clamp_min(1.0 / clip_range)  # (5, R)
+            flat_exp = flat.unsqueeze(0)  # (1, R, C)
+            scales_exp = scales.unsqueeze(-1)  # (5, R, 1)
+            q_all = torch.clamp(
+                torch.round(flat_exp / scales_exp), -clip_range, clip_range
+            ) * scales_exp  # (5, R, C)
+            mse = ((flat_exp - q_all) ** 2).mean(dim=-1)  # (5, R)
+            best_idx = mse.argmin(dim=0)  # (R,)
+            row_idx = torch.arange(flat.shape[0], device=device)
+            best_q = q_all[best_idx, row_idx]  # (R, C)
+            bank.data.copy_(best_q.to(bank.data.dtype).view(orig_shape))
 
 def _unbank_state_dict(sd: dict[str, Tensor], num_layers: int) -> dict[str, Tensor]:
     """Convert 3D bank tensors into individual 2D tensors with standard names."""
@@ -1735,6 +1769,8 @@ def main() -> None:
                 for name, t in base_model.state_dict().items():
                     swa_state[name] += t.detach().cpu()
                 swa_count += 1
+        if args.online_gptq_enabled and scale < args.online_gptq_scale_thresh and step % args.online_gptq_freq == 0:
+            online_gptq_banks(base_model)
         if args.lawa_enabled and step % args.lawa_freq == 0:
             lawa_queue.append({name: t.detach().cpu().clone() for name, t in base_model.state_dict().items()})
         should_log_train = (
@@ -1803,7 +1839,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
