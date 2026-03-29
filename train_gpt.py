@@ -109,6 +109,12 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    qat_time_threshold = float(os.environ.get("QAT_TIME_THRESHOLD", 0.0))
+    int5_attn = bool(int(os.environ.get("INT5_ATTN", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", 6))
+    coprime_data_loading = bool(int(os.environ.get("COPRIME_DATA_LOADING", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -525,18 +531,42 @@ class TokenStream:
             self.pos += k
             remaining -= k
         return chunks[0] if len(chunks) == 1 else torch.cat(chunks)
+    @classmethod
+    def _from_list(cls, files: list):
+        obj = object.__new__(cls)
+        obj.files = [Path(f) if not isinstance(f, Path) else f for f in files]
+        if not obj.files:
+            raise FileNotFoundError("TokenStream._from_list: empty file list")
+        obj.file_idx = 0
+        obj.tokens = load_data_shard(obj.files[0])
+        obj.pos = 0
+        return obj
 class DistributedTokenLoader:
-    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device):
+    def __init__(self, pattern: str, rank: int, world_size: int, device: torch.device,
+                 coprime_mode: bool = False):
         self.rank = rank
         self.world_size = world_size
         self.device = device
-        self.stream = TokenStream(pattern)
+        self._coprime_mode = coprime_mode
+        if coprime_mode:
+            all_files = sorted(glob.glob(pattern))
+            n = len(all_files)
+            if n == 0:
+                raise FileNotFoundError(f"No files found for pattern: {pattern}")
+            offset = (rank * n) // world_size
+            rank_files = all_files[offset:] + all_files[:offset]
+            self.stream = TokenStream._from_list(rank_files)
+        else:
+            self.stream = TokenStream(pattern)
     def next_batch(self, global_tokens: int, seq_len: int, grad_accum_steps: int) -> tuple[Tensor, Tensor]:
         local_tokens = global_tokens // (self.world_size * grad_accum_steps)
         per_rank_span = local_tokens + 1
-        chunk = self.stream.take(per_rank_span * self.world_size)
-        start = self.rank * per_rank_span
-        local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
+        if self._coprime_mode:
+            local = self.stream.take(per_rank_span).to(dtype=torch.int64)
+        else:
+            chunk = self.stream.take(per_rank_span * self.world_size)
+            start = self.rank * per_rank_span
+            local = chunk[start : start + per_rank_span].to(dtype=torch.int64)
         x = local[:-1].reshape(-1, seq_len)
         y = local[1:].reshape(-1, seq_len)
         return x.to(self.device, non_blocking=True), y.to(self.device, non_blocking=True)
@@ -1121,6 +1151,7 @@ def eval_val_sliding_ttt(
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
     ttt_params = []
+    ttt_param_names = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1132,11 +1163,39 @@ def eval_val_sliding_ttt(
         else:
             p.requires_grad_(True)
             ttt_params.append(p)
+            ttt_param_names.append(name)
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            n_layers = len(base_model.blocks)
+            layer_to_params: dict = {}
+            for name, p in zip(ttt_param_names, ttt_params):
+                layer_idx = None
+                for li in range(n_layers):
+                    if f"blocks.{li}." in name:
+                        layer_idx = li
+                        break
+                key = layer_idx if layer_idx is not None else "other"
+                if key not in layer_to_params:
+                    layer_to_params[key] = []
+                layer_to_params[key].append(p)
+            param_groups = []
+            for key, params in layer_to_params.items():
+                lr_scale = (0.5 + key / max(n_layers - 1, 1)) if isinstance(key, int) else 1.0
+                blr = args.ttt_lr * lr_scale
+                param_groups.append({"params": params, "lr": blr, "base_lr": blr})
+            optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+            for pg in optimizer.param_groups:
+                pg["base_lr"] = pg["lr"]
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+        for pg in optimizer.param_groups:
+            pg["base_lr"] = pg["lr"]
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1248,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_frac = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get("base_lr", args.ttt_lr) * cos_frac
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1338,7 +1397,7 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str], int5_attn: bool = False):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1358,7 +1417,8 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             meta[name] = "passthrough_ctrl"
             continue
         if cat in int6_cats and t.ndim >= 1:
-            q, s = quantize_int6_per_row(t)
+            clip_range = 15 if (int5_attn and cat == "attn") else 31
+            q, s = quantize_int6_per_row(t, clip_range=clip_range)
             result[name + ".q"] = q
             result[name + ".scale"] = s
             meta[name] = {"type": "int6"}
@@ -1599,7 +1659,8 @@ def main() -> None:
         f"max_wallclock_seconds:{args.max_wallclock_seconds:.3f}"
     )
     log0(f"seed:{args.seed}")
-    train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+    train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device,
+                                          coprime_mode=args.coprime_data_loading)
     def zero_grad_all() -> None:
         for opt in optimizers:
             opt.zero_grad(set_to_none=True)
@@ -1639,7 +1700,8 @@ def main() -> None:
         for opt, state in zip(optimizers, initial_optimizer_states, strict=True):
             opt.load_state_dict(state)
         zero_grad_all()
-        train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device)
+        train_loader = DistributedTokenLoader(args.train_files, rank, world_size, device,
+                                          coprime_mode=args.coprime_data_loading)
     swa_state: dict[str, Tensor] | None = None
     swa_count = 0
     from collections import deque
@@ -1687,6 +1749,11 @@ def main() -> None:
         if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
             CastedLinear._qat_enabled = True
             log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
+        if args.qat_time_threshold > 0 and not CastedLinear._qat_enabled:
+            time_frac = elapsed_ms / (args.max_wallclock_seconds * 1000.0)
+            if time_frac >= args.qat_time_threshold:
+                CastedLinear._qat_enabled = True
+                log0(f"time_qat:enabled step:{step} time_frac:{time_frac:.4f}")
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1799,11 +1866,11 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"}, int5_attn=args.int5_attn)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
