@@ -96,6 +96,7 @@ class Hyperparameters:
     ln_scale = bool(int(os.environ.get("LN_SCALE", "1")))
     dtg_enabled = bool(int(os.environ.get("DTG_ENABLED", "0")))
     late_qat_threshold = float(os.environ.get("LATE_QAT_THRESHOLD", 0.15))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", 6))
     ve_enabled = bool(int(os.environ.get("VE_ENABLED", "1")))
     ve_dim = int(os.environ.get("VE_DIM", 128))
     ve_layers = os.environ.get("VE_LAYERS", "9,10")
@@ -1136,7 +1137,25 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    mlp_p, attn_p, other_p = [], [], []
+    for name, p in base_model.named_parameters():
+        if not p.requires_grad:
+            continue
+        if '.mlp.' in name:
+            mlp_p.append(p)
+        elif '.attn.' in name:
+            attn_p.append(p)
+        else:
+            other_p.append(p)
+    ttt_base_lrs = [args.ttt_lr * 2.0, args.ttt_lr * 0.5, args.ttt_lr]
+    param_groups = [
+        {'params': g, 'lr': lr}
+        for g, lr in zip([mlp_p, attn_p, other_p], ttt_base_lrs) if g
+    ]
+    if not param_groups:
+        param_groups = [{'params': ttt_params, 'lr': args.ttt_lr}]
+        ttt_base_lrs = [args.ttt_lr]
+    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1208,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                cos_factor = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                for pg, base_lr in zip(optimizer.param_groups, ttt_base_lrs):
+                    pg['lr'] = base_lr * cos_factor
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1803,7 +1822,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
