@@ -29,12 +29,14 @@ try:
 except ImportError:
     # Fallback: PyTorch's fused SDPA (uses FlashAttention kernels on Hopper when available).
     # flash_attn signature: (q, k, v, causal) -> y  all (batch, seqlen, nheads, headdim)
-    def flash_attn_3_func(q, k, v, causal=True):
+    def flash_attn_3_func(q, k, v, causal=True, attn_bias=None):
         q2, k2, v2 = q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2)
         if k2.size(1) != q2.size(1):
             groups = q2.size(1) // k2.size(1)
             k2 = k2.repeat_interleave(groups, dim=1)
             v2 = v2.repeat_interleave(groups, dim=1)
+        if attn_bias is not None:
+            return F.scaled_dot_product_attention(q2, k2, v2, attn_mask=attn_bias, is_causal=False).transpose(1, 2)
         return F.scaled_dot_product_attention(q2, k2, v2, is_causal=causal).transpose(1, 2)
 class Hyperparameters:
     data_path = os.environ.get("DATA_PATH", "./data/datasets/fineweb10B_sp1024")
@@ -109,6 +111,10 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_adamw_wd = float(os.environ.get("TTT_ADAMW_WD", 0.0))
+    fox_enabled = bool(int(os.environ.get("FOX_ENABLED", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -562,6 +568,10 @@ class CastedLinear(nn.Linear):
             w = w + (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w, bias)
+
+class _FoxAttn:
+    enabled: bool = False
+
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
     with torch.no_grad():
         for name, param in module.named_parameters():
@@ -645,6 +655,11 @@ class CausalSelfAttention(nn.Module):
         self.value_residual = value_residual
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
+        # FoX: learnable per-head forget slopes (ALiBi-style learned decay)
+        if _FoxAttn.enabled:
+            self.log_slopes = nn.Parameter(torch.full((num_heads,), -4.0, dtype=torch.float32))
+        else:
+            self.log_slopes = None
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
         """Efficient XSA: subtract self-value projection via GQA-aware reshape (no repeat_interleave).
         y: [B, T, H, D], v: [B, T, Hkv, D]. H must be divisible by Hkv."""
@@ -673,7 +688,22 @@ class CausalSelfAttention(nn.Module):
         q = apply_rotary_emb(q, cos, sin, self.rope_dims)
         k = apply_rotary_emb(k, cos, sin, self.rope_dims)
         q = q * self.q_gain.to(dtype=q.dtype)[None, None, :, None]
-        y = flash_attn_3_func(q, k, v, causal=True)
+        if self.log_slopes is not None:
+            T = seqlen
+            pos = torch.arange(T, device=x.device, dtype=q.dtype)
+            dist = (pos.unsqueeze(1) - pos.unsqueeze(0)).clamp(min=0)  # (T, T): dist[i,j]=max(0,i-j)
+            slopes = F.softplus(self.log_slopes.to(q.dtype))  # (H,), positive
+            forget_bias = -slopes.view(-1, 1, 1) * dist.unsqueeze(0)  # (H, T, T)
+            # Build causal mask combined with forget decay
+            causal_mask = torch.zeros(1, T, T, device=x.device, dtype=q.dtype)
+            causal_mask = causal_mask.masked_fill(
+                torch.triu(torch.ones(T, T, device=x.device, dtype=torch.bool), diagonal=1).unsqueeze(0),
+                float('-inf'),
+            )
+            attn_bias = (causal_mask + forget_bias).unsqueeze(0)  # (1, H, T, T)
+            y = flash_attn_3_func(q, k, v, causal=False, attn_bias=attn_bias)
+        else:
+            y = flash_attn_3_func(q, k, v, causal=True)
         if self.use_xsa:
             y = self._xsa_efficient(y, v)
         if self.gated_attention:
@@ -1136,7 +1166,11 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if getattr(args, 'ttt_optimizer', 'sgd') == 'adamw':
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr,
+                                      betas=(0.9, 0.95), weight_decay=getattr(args, 'ttt_adamw_wd', 0.0))
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1465,6 +1499,7 @@ def main() -> None:
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
     CastedLinear._qat_enabled = args.qat_enabled
+    _FoxAttn.enabled = args.fox_enabled
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1803,7 +1838,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1822,6 +1857,7 @@ def main() -> None:
     deq_unbanked = dequantize_mixed_int6(quant_state["w"], quant_state["m"], unbanked_sd)
     # Re-bank the dequantized tensors
     deq_state = _rebank_state_dict(deq_unbanked, args.num_layers, sd_cpu)
+    _FoxAttn.enabled = args.fox_enabled
     eval_model = GPT(
         vocab_size=args.vocab_size, num_layers=args.num_layers, model_dim=args.model_dim,
         num_heads=args.num_heads, num_kv_heads=args.num_kv_heads, mlp_mult=args.mlp_mult,
