@@ -109,6 +109,13 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    # QAT can be triggered by elapsed time fraction instead of LR scale.
+    # Set QAT_TIME_THRESHOLD=0.15 to enable QAT after 15% of wallclock (90s).
+    # Default -1 means use the existing late_qat_threshold (LR-scale based).
+    qat_time_threshold = float(os.environ.get("QAT_TIME_THRESHOLD", "-1.0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1143,29 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            num_blocks = len(base_model.blocks)
+            ttt_param_groups: list[dict] = []
+            for name, p in base_model.named_parameters():
+                if not p.requires_grad:
+                    continue
+                block_idx = None
+                for bi in range(num_blocks):
+                    if f"blocks.{bi}." in name:
+                        block_idx = bi
+                        break
+                depth = (block_idx / max(num_blocks - 1, 1)) if block_idx is not None else 0.5
+                per_lr = args.ttt_lr * (0.5 + depth)
+                ttt_param_groups.append({"params": [p], "lr": per_lr, "base_lr": per_lr})
+            optimizer = torch.optim.AdamW(ttt_param_groups, betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(
+                [{"params": ttt_params, "lr": args.ttt_lr, "base_lr": args.ttt_lr}],
+                betas=(0.9, 0.95), weight_decay=0.0,
+            )
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1218,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('base_lr', args.ttt_lr) * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1464,7 +1493,8 @@ def main() -> None:
     log0(f"val_bpb:enabled tokenizer_kind=sentencepiece tokenizer_path={args.tokenizer_path}")
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
-    CastedLinear._qat_enabled = args.qat_enabled
+    # When using time-based QAT trigger, start disabled; training loop enables it at the right time.
+    CastedLinear._qat_enabled = args.qat_enabled and args.qat_time_threshold <= 0
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
@@ -1684,9 +1714,14 @@ def main() -> None:
             break
         elapsed_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
         scale = lr_mul(step, elapsed_ms)
-        if args.late_qat_threshold > 0 and scale < args.late_qat_threshold and not CastedLinear._qat_enabled:
-            CastedLinear._qat_enabled = True
-            log0(f"late_qat:enabled step:{step} scale:{scale:.4f}")
+        if not CastedLinear._qat_enabled:
+            if args.qat_time_threshold > 0 and args.qat_enabled:
+                if (elapsed_ms / 1000.0) >= args.qat_time_threshold * args.max_wallclock_seconds:
+                    CastedLinear._qat_enabled = True
+                    log0(f"qat:enabled step:{step} elapsed:{elapsed_ms/1000.0:.1f}s (time trigger)")
+            elif args.qat_enabled and args.late_qat_threshold > 0 and scale < args.late_qat_threshold:
+                CastedLinear._qat_enabled = True
+                log0(f"qat:enabled step:{step} scale:{scale:.4f} (lr trigger)")
         zero_grad_all()
         train_loss = torch.zeros((), device=device)
         for micro_step in range(grad_accum_steps):
@@ -1803,13 +1838,13 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
         quant_file_bytes = len(quant_blob)
         code_bytes = len(code.encode("utf-8"))
-        log0(f"Serialized model int6+lzma: {quant_file_bytes} bytes")
+        log0(f"Serialized model int6+lzma preset={args.lzma_preset}: {quant_file_bytes} bytes")
         log0(f"Total submission size int6+lzma: {quant_file_bytes + code_bytes} bytes")
     if distributed:
         dist.barrier()
