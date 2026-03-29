@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    ttt_scale_only = bool(int(os.environ.get("TTT_SCALE_ONLY", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "9"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1118,25 +1121,37 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
-    frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+    # Freeze all params, then selectively unfreeze based on strategy
+    for p in base_model.parameters():
+        p.requires_grad_(False)
     ttt_params = []
-    for name, p in base_model.named_parameters():
-        freeze = False
-        for bi in frozen_block_ids:
-            if f"blocks.{bi}." in name:
-                freeze = True
-                break
-        if freeze:
-            p.requires_grad_(False)
-        else:
-            p.requires_grad_(True)
-            ttt_params.append(p)
+    if args.ttt_scale_only:
+        # Lightweight: adapt only residual scale/mix params (float16 passthrough, not int6 quantized)
+        _scale_keys = ('attn_scale', 'mlp_scale', 'resid_mix')
+        for name, p in base_model.named_parameters():
+            if any(k in name for k in _scale_keys):
+                p.requires_grad_(True)
+                ttt_params.append(p)
+    else:
+        frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+        for name, p in base_model.named_parameters():
+            if not any(f"blocks.{bi}." in name for bi in frozen_block_ids):
+                p.requires_grad_(True)
+                ttt_params.append(p)
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    def _make_ttt_optimizer():
+        if args.ttt_optimizer == 'adamw':
+            return torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
+        return torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+
+    # Scale-only uses a fresh optimizer per chunk; full-model carries state across chunks
+    if args.ttt_scale_only:
+        optimizer = None  # created per-chunk below
+    else:
+        optimizer = _make_ttt_optimizer()
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1204,14 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if args.ttt_scale_only:
+                    # Fresh optimizer per chunk: constant LR, no cosine decay
+                    chunk_optimizer = _make_ttt_optimizer()
+                else:
+                    cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = cos_lr
+                    chunk_optimizer = optimizer
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1206,7 +1226,7 @@ def eval_val_sliding_ttt(
                         local = val_tokens[start_tok:end_tok].to(device=device, dtype=torch.int64)
                         x = local[:-1].reshape(-1, seq_len)
                         y = local[1:].reshape(-1, seq_len)
-                        optimizer.zero_grad(set_to_none=True)
+                        chunk_optimizer.zero_grad(set_to_none=True)
                         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                             loss = base_model(x, y)
                         loss.backward()
@@ -1215,7 +1235,7 @@ def eval_val_sliding_ttt(
                                 if p.grad is not None:
                                     dist.all_reduce(p.grad, op=dist.ReduceOp.AVG)
                         torch.nn.utils.clip_grad_norm_(ttt_params, args.ttt_grad_clip)
-                        optimizer.step()
+                        chunk_optimizer.step()
 
         if rank == 0 and (ci % 10 == 0 or ci == num_chunks - 1):
             elapsed = time.perf_counter() - t0
@@ -1803,7 +1823,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
