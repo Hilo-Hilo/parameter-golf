@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd").lower()
+    wsm_enabled = bool(int(os.environ.get("WSM_ENABLED", "0")))
+    wsm_k = int(os.environ.get("WSM_K", "10"))
+    wsm_frac = float(os.environ.get("WSM_FRAC", "0.15"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1141,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), weight_decay=0.01)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1646,6 +1654,8 @@ def main() -> None:
     lawa_queue: deque[dict[str, Tensor]] = deque(maxlen=args.lawa_k)
     ema_state = {name: t.detach().float().clone() for name, t in base_model.state_dict().items()}
     ema_decay = 0.997
+    wsm_snapshots: list[dict[str, Tensor]] = []
+    wsm_step_every: int | None = None
     training_time_ms = 0.0
     stop_after_step: int | None = None
     torch.cuda.synchronize()
@@ -1726,6 +1736,18 @@ def main() -> None:
                 ema_state[name].mul_(ema_decay).add_(t.detach().float(), alpha=1.0 - ema_decay)
         step += 1
         approx_training_time_ms = training_time_ms + 1000.0 * (time.perf_counter() - t0)
+        # WSM snapshot collection: collect uniformly-spaced checkpoints in the final wsm_frac of training
+        if args.wsm_enabled and max_wallclock_ms is not None:
+            elapsed_frac = approx_training_time_ms / max_wallclock_ms
+            if elapsed_frac >= (1.0 - args.wsm_frac):
+                if wsm_step_every is None:
+                    remaining_ms = max(max_wallclock_ms - approx_training_time_ms, 1.0)
+                    step_ms_est = approx_training_time_ms / max(step, 1)
+                    est_remaining_steps = remaining_ms / max(step_ms_est, 1.0)
+                    wsm_step_every = max(1, int(est_remaining_steps / args.wsm_k))
+                    log0(f"wsm:start elapsed_frac:{elapsed_frac:.3f} step:{step} step_every:{wsm_step_every}")
+                if step % wsm_step_every == 0:
+                    wsm_snapshots.append({name: t.detach().cpu().clone() for name, t in base_model.state_dict().items()})
         if args.swa_enabled and scale < 0.2 and step % args.swa_every == 0:
             if swa_state is None:
                 swa_state = {name: t.detach().cpu().clone() for name, t in base_model.state_dict().items()}
@@ -1758,7 +1780,18 @@ def main() -> None:
         f"reserved: {torch.cuda.max_memory_reserved() // 1024 // 1024} MiB"
     )
     # Apply weight averaging
-    if args.lawa_enabled and len(lawa_queue) > 1:
+    if args.wsm_enabled and len(wsm_snapshots) > 1:
+        log0(f"wsm:applying WSM averaging k={len(wsm_snapshots)}")
+        current_state = base_model.state_dict()
+        avg_state = {name: torch.zeros(t.shape, dtype=torch.float32, device='cpu') for name, t in wsm_snapshots[0].items()}
+        for snap in wsm_snapshots:
+            for name in avg_state:
+                avg_state[name] += snap[name].float()
+        for name in avg_state:
+            avg_state[name] /= len(wsm_snapshots)
+            avg_state[name] = avg_state[name].to(dtype=current_state[name].dtype)
+        base_model.load_state_dict(avg_state, strict=True)
+    elif args.lawa_enabled and len(lawa_queue) > 1:
         log0(f"lawa:applying LAWA averaging k={len(lawa_queue)}")
         current_state = base_model.state_dict()
         avg_state = {name: torch.zeros(t.shape, dtype=torch.float32, device='cpu') for name, t in current_state.items()}
@@ -1803,7 +1836,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
