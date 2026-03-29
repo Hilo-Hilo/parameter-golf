@@ -109,6 +109,10 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_adam_wd = float(os.environ.get("TTT_ADAM_WD", 0.0))
+    engramlite_enabled = bool(int(os.environ.get("ENGRAMLITE_ENABLED", "0")))
+    engramlite_vocab = int(os.environ.get("ENGRAMLITE_VOCAB", 4096))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -715,6 +719,57 @@ class BigramHashEmbedding(nn.Module):
             h = self.proj(h)
         return h * self.scale.to(dtype=h.dtype)
 
+class EngramLiteEmbedding(nn.Module):
+    """EngramLite: 2-head bigram + 2-head trigram hash embeddings with per-head gating.
+    Replaces BigramHashEmbedding. Each order uses 2 independent hash functions to reduce
+    hash collisions. Per-head learnable log-scale gating suppresses noisy lookups."""
+    def __init__(self, vocab_per_head: int, head_dim: int, model_dim: int):
+        super().__init__()
+        self.vocab_per_head = vocab_per_head
+        self.head_dim = head_dim
+        # 4 embedding tables: bigram-h0, bigram-h1, trigram-h0, trigram-h1
+        self.embeds = nn.ModuleList([nn.Embedding(vocab_per_head, head_dim) for _ in range(4)])
+        for e in self.embeds:
+            nn.init.zeros_(e.weight)
+        # Per-head log-scale gates (initialized so exp(log_gate) ≈ 0.05)
+        self.log_gates = nn.Parameter(torch.full((4,), math.log(0.05), dtype=torch.float32))
+        proj_in = 4 * head_dim
+        self.proj = CastedLinear(proj_in, model_dim, bias=False) if proj_in != model_dim else None
+        if self.proj is not None:
+            nn.init.zeros_(self.proj.weight)
+
+    def forward(self, token_ids: Tensor) -> Tensor:
+        t = token_ids.to(torch.int32)
+        V = self.vocab_per_head
+        heads = []
+        # Bigram head 0: XOR hash (same as BigramHashEmbedding)
+        idx0 = torch.empty_like(t)
+        idx0[..., 0] = V - 1
+        idx0[..., 1:] = torch.bitwise_xor(36313 * t[..., 1:], 27191 * t[..., :-1]) % (V - 1)
+        heads.append(self.embeds[0](idx0))
+        # Bigram head 1: multiplicative hash with different primes
+        idx1 = torch.empty_like(t)
+        idx1[..., 0] = V - 1
+        idx1[..., 1:] = ((t[..., :-1] * 22695477 + t[..., 1:]) & 0x7FFFFFFF) % (V - 1)
+        heads.append(self.embeds[1](idx1))
+        # Trigram head 0
+        idx2 = torch.empty_like(t)
+        idx2[..., 0] = V - 1
+        idx2[..., 1] = V - 1
+        idx2[..., 2:] = (((t[..., :-2] * 1664525 + t[..., 1:-1]) * 1013904223 + t[..., 2:]) & 0x7FFFFFFF) % (V - 1)
+        heads.append(self.embeds[2](idx2))
+        # Trigram head 1: different primes
+        idx3 = torch.empty_like(t)
+        idx3[..., 0] = V - 1
+        idx3[..., 1] = V - 1
+        idx3[..., 2:] = (((t[..., :-2] * 22695477 + t[..., 1:-1]) * 2531011 + t[..., 2:]) & 0x7FFFFFFF) % (V - 1)
+        heads.append(self.embeds[3](idx3))
+        gates = self.log_gates.exp().to(dtype=heads[0].dtype)
+        h = torch.cat([heads[i] * gates[i] for i in range(4)], dim=-1)
+        if self.proj is not None:
+            h = self.proj(h)
+        return h
+
 class ValueEmbedding(nn.Module):
     """Reinject token identity into attention values at specific layers.
     Each table maps vocab tokens to a low-dim embedding, projected to model_dim."""
@@ -800,6 +855,8 @@ class GPT(nn.Module):
         mtp_loss_weight: float = 0.1,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        engramlite: bool = False,
+        engramlite_vocab: int = 4096,
         xsa_last_n: int = 0,
         rope_dims: int = 0,
         ln_scale: bool = False,
@@ -821,7 +878,12 @@ class GPT(nn.Module):
         self.mtp_num_heads = mtp_num_heads
         self.mtp_loss_weight = mtp_loss_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
-        self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
+        if engramlite:
+            self.bigram = EngramLiteEmbedding(engramlite_vocab, bigram_dim // 4, model_dim)
+        elif bigram_vocab_size > 0:
+            self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim)
+        else:
+            self.bigram = None
         self.smear = SmearGate(model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -1136,7 +1198,11 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999),
+                                      eps=1e-8, weight_decay=args.ttt_adam_wd)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1481,6 +1547,8 @@ def main() -> None:
         mtp_loss_weight=args.mtp_loss_weight,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        engramlite=args.engramlite_enabled,
+        engramlite_vocab=args.engramlite_vocab,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims,
         ln_scale=args.ln_scale,
@@ -1524,11 +1592,18 @@ def main() -> None:
         scalar_params.append(base_model.skip_weights)
     scalar_params.append(base_model.smear.gate)
     if base_model.bigram is not None:
-        scalar_params.append(base_model.bigram.scale)
+        if isinstance(base_model.bigram, EngramLiteEmbedding):
+            scalar_params.append(base_model.bigram.log_gates)
+        else:
+            scalar_params.append(base_model.bigram.scale)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     tok_params = [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}]
     if base_model.bigram is not None:
-        tok_params.append({"params": [base_model.bigram.embed.weight], "lr": token_lr, "base_lr": token_lr})
+        if isinstance(base_model.bigram, EngramLiteEmbedding):
+            for emb in base_model.bigram.embeds:
+                tok_params.append({"params": [emb.weight], "lr": token_lr, "base_lr": token_lr})
+        else:
+            tok_params.append({"params": [base_model.bigram.embed.weight], "lr": token_lr, "base_lr": token_lr})
         if base_model.bigram.proj is not None:
             scalar_params.append(base_model.bigram.proj.weight)
     if base_model.ve_shared is not None:
@@ -1803,7 +1878,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1829,6 +1904,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap, rope_base=args.rope_base, qk_gain_init=args.qk_gain_init,
         mtp_num_heads=0, mtp_loss_weight=0.0,
         bigram_vocab_size=args.bigram_vocab_size, bigram_dim=args.bigram_dim,
+        engramlite=args.engramlite_enabled, engramlite_vocab=args.engramlite_vocab,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
