@@ -109,6 +109,7 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    qat_align_alpha = float(os.environ.get("QAT_ALIGN_ALPHA", "0.0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -562,6 +563,37 @@ class CastedLinear(nn.Linear):
             w = w + (w_q - w).detach()
         bias = self.bias.to(x.dtype) if self.bias is not None else None
         return F.linear(x, w, bias)
+def compute_bank_qat_align_loss(model: nn.Module, alpha: float) -> Tensor:
+    """L2 penalty on int6 quantization residual for all bank weight matrices.
+
+    Adds a gradient that pushes bank weights toward the nearest int6 value
+    (integer multiple of their per-row scale). Activated only when QAT is
+    enabled, to complement the standard STE in CastedLinear.
+    """
+    total: Tensor | None = None
+    device = None
+    for attr in ('qo_bank', 'kv_bank', 'mlp_up_bank', 'mlp_down_bank'):
+        bank = getattr(model, attr, None)
+        if bank is None:
+            continue
+        if device is None:
+            device = bank.device
+        # bank: [N, rows, cols] - fold rows dimension for per-row scale
+        w3d = bank  # float32 nn.Parameter
+        w_flat = w3d.reshape(-1, w3d.size(-1))  # [N*rows, cols]
+        with torch.no_grad():
+            row_max = w_flat.abs().amax(dim=1)
+            scale = (row_max / 31.0).clamp_min(1.0 / 31.0)
+        q_float = w_flat / scale[:, None]
+        q_err = q_float - q_float.detach().clamp(-31, 31).round()
+        err = q_err.pow(2).mean()
+        total = err if total is None else total + err
+    if total is None:
+        return torch.zeros((), device=device or 'cpu')
+    num_banks = sum(1 for a in ('qo_bank', 'kv_bank', 'mlp_up_bank', 'mlp_down_bank')
+                    if getattr(model, a, None) is not None)
+    return alpha * (total / max(num_banks, 1))
+
 def restore_low_dim_params_to_fp32(module: nn.Module) -> None:
     with torch.no_grad():
         for name, param in module.named_parameters():
@@ -1693,6 +1725,8 @@ def main() -> None:
             x, y = train_loader.next_batch(args.train_batch_tokens, args.train_seq_len, grad_accum_steps)
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=True):
                 loss = model(x, y)
+            if CastedLinear._qat_enabled and args.qat_align_alpha > 0.0:
+                loss = loss + compute_bank_qat_align_loss(base_model, args.qat_align_alpha)
             train_loss += loss.detach()
             (loss * grad_scale).backward()
         train_loss /= grad_accum_steps
@@ -1803,7 +1837,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
