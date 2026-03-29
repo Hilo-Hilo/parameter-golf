@@ -109,6 +109,10 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_use_adamw = bool(int(os.environ.get("TTT_USE_ADAMW", "0")))
+    ttt_adamw_wd = float(os.environ.get("TTT_ADAMW_WD", "0.0"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    prune_fraction = float(os.environ.get("PRUNE_FRACTION", "0.0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1136,7 +1140,10 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_use_adamw:
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=args.ttt_adamw_wd, betas=(0.9, 0.95))
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1799,11 +1806,32 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
+    # Pre-quantization magnitude pruning: zero out smallest weights by magnitude
+    # (Progressive Intensity Hypothesis: weaker perturbation first, then quantize)
+    if args.prune_fraction > 0.0:
+        total_pruned = 0
+        total_eligible = 0
+        for name, t in unbanked_sd.items():
+            if not t.is_floating_point() or t.numel() <= 65536:
+                continue
+            if any(p in name for p in CONTROL_TENSOR_NAME_PATTERNS):
+                continue
+            cat = _classify_param(name)
+            if cat not in {"mlp", "attn"}:
+                continue
+            t32 = t.float()
+            threshold = float(torch.quantile(t32.abs().flatten(), args.prune_fraction).item())
+            mask = t32.abs() > threshold
+            total_eligible += t32.numel()
+            total_pruned += int((~mask).sum().item())
+            unbanked_sd[name] = (t32 * mask.float()).to(t.dtype)
+        log0(f"prune_fraction:{args.prune_fraction:.4f} pruned:{total_pruned} eligible:{total_eligible} "
+             f"frac_actual:{total_pruned/max(total_eligible,1):.4f}")
     quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
