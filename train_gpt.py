@@ -109,6 +109,12 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer = bool(int(os.environ.get("TTT_PERLAYER", "0")))
+    leaky_slope = float(os.environ.get("LEAKY_SLOPE", "0.5"))
+
+# Module-level constant for leaky slope (read once at import, used in MLP.forward)
+_LEAKY_SLOPE = float(os.environ.get("LEAKY_SLOPE", "0.5"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -737,7 +743,7 @@ class MLP(nn.Module):
         super().__init__()
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=_LEAKY_SLOPE)
         return F.linear(x.square(), down_w.to(x.dtype))
 
 class Block(nn.Module):
@@ -1136,7 +1142,28 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer:
+            def _lr_factor(name: str) -> float:
+                if "mlp_down_bank" in name:
+                    return 3.0
+                if "qo_bank" in name or "kv_bank" in name:
+                    return 0.5
+                return 1.0
+            groups: dict[float, list] = {}
+            for name, p in base_model.named_parameters():
+                if p.requires_grad:
+                    f = _lr_factor(name)
+                    if f not in groups:
+                        groups[f] = []
+                    groups[f].append(p)
+            param_groups = [{"params": ps, "lr": args.ttt_lr * f, "_lr_factor": f}
+                            for f, ps in groups.items()]
+            optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1191,7 +1218,7 @@ def eval_val_sliding_ttt(
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = cos_lr * pg.get("_lr_factor", 1.0)
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
