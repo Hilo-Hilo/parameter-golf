@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_style = os.environ.get("TTT_STYLE", "sgd")  # "sgd" or "lora"
+    ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", 8))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -645,6 +647,27 @@ class CausalSelfAttention(nn.Module):
         self.value_residual = value_residual
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
+        # LoRA adapters (None when not doing LoRA TTT)
+        self._lora_rank = 0
+
+    def setup_lora(self, rank: int = 8):
+        """Initialize LoRA Q+V adapters for TTT. Called before TTT eval."""
+        dim = self.num_heads * self.head_dim
+        device = self.q_gain.device
+        self._lora_rank = rank
+        self.lora_q_a = nn.Parameter(torch.randn(rank, dim, device=device) * 0.01)
+        self.lora_q_b = nn.Parameter(torch.zeros(dim, rank, device=device))
+        self.lora_v_a = nn.Parameter(torch.randn(rank, dim, device=device) * 0.01)
+        self.lora_v_b = nn.Parameter(torch.zeros(dim, rank, device=device))
+
+    def reset_lora(self):
+        """Remove LoRA adapters after TTT eval."""
+        self._lora_rank = 0
+        if hasattr(self, 'lora_q_a'):
+            del self.lora_q_a
+            del self.lora_q_b
+            del self.lora_v_a
+            del self.lora_v_b
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
         """Efficient XSA: subtract self-value projection via GQA-aware reshape (no repeat_interleave).
         y: [B, T, H, D], v: [B, T, Hkv, D]. H must be divisible by Hkv."""
@@ -658,8 +681,15 @@ class CausalSelfAttention(nn.Module):
     def forward(self, x: Tensor, q_w: Tensor, k_w: Tensor, v_w: Tensor, out_w: Tensor, v_embed: Tensor | None = None, v0: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
         bsz, seqlen, dim = x.shape
         q = F.linear(x, q_w.to(x.dtype)).reshape(bsz, seqlen, self.num_heads, self.head_dim)
+        if self._lora_rank > 0:
+            lora_scale = 1.0 / self._lora_rank
+            lora_q = F.linear(F.linear(x, self.lora_q_a.to(x.dtype)), self.lora_q_b.to(x.dtype)) * lora_scale
+            q = q + lora_q.reshape(bsz, seqlen, self.num_heads, self.head_dim)
         k = F.linear(x, k_w.to(x.dtype)).reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
         v = F.linear(x, v_w.to(x.dtype))
+        if self._lora_rank > 0:
+            lora_v = F.linear(F.linear(x, self.lora_v_a.to(x.dtype)), self.lora_v_b.to(x.dtype)) * lora_scale
+            v = v + lora_v
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
@@ -1120,23 +1150,35 @@ def eval_val_sliding_ttt(
 
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
-    for name, p in base_model.named_parameters():
-        freeze = False
-        for bi in frozen_block_ids:
-            if f"blocks.{bi}." in name:
-                freeze = True
-                break
-        if freeze:
+
+    use_lora = (args.ttt_style == "lora")
+    if use_lora:
+        # Setup LoRA adapters; freeze all base weights; only train LoRA params
+        for p in base_model.parameters():
             p.requires_grad_(False)
-        else:
-            p.requires_grad_(True)
-            ttt_params.append(p)
+        for bi, block in enumerate(base_model.blocks):
+            if bi not in frozen_block_ids:
+                block.attn.setup_lora(rank=args.ttt_lora_rank)
+        ttt_params = [p for n, p in base_model.named_parameters() if 'lora_' in n]
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+    else:
+        ttt_params = []
+        for name, p in base_model.named_parameters():
+            freeze = False
+            for bi in frozen_block_ids:
+                if f"blocks.{bi}." in name:
+                    freeze = True
+                    break
+            if freeze:
+                p.requires_grad_(False)
+            else:
+                p.requires_grad_(True)
+                ttt_params.append(p)
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
-
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)} "
+         f"style={args.ttt_style}")
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1231,6 +1273,9 @@ def eval_val_sliding_ttt(
     val_loss = (loss_sum / token_count).item()
     val_bpb = val_loss / math.log(2.0) * (token_count.item() / byte_count.item())
 
+    if use_lora:
+        for block in base_model.blocks:
+            block.attn.reset_lora()
     for p in base_model.parameters():
         p.requires_grad_(True)
     base_model.eval()
