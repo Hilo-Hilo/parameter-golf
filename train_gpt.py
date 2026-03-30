@@ -109,6 +109,12 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_mult = float(os.environ.get("TTT_MLP_LR_MULT", "2.0"))
+    ttt_attn_lr_mult = float(os.environ.get("TTT_ATTN_LR_MULT", "0.5"))
+    v_norm = bool(int(os.environ.get("V_NORM", "0")))
+    mlp_act_gelu = bool(int(os.environ.get("MLP_ACT_GELU", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -611,6 +617,7 @@ def apply_rotary_emb(x: Tensor, cos: Tensor, sin: Tensor, rope_dims: int = 0) ->
     return torch.cat((x1 * cos + x2 * sin, x1 * (-sin) + x2 * cos), dim=-1)
 
 class CausalSelfAttention(nn.Module):
+    _v_norm: bool = False
     def __init__(
         self,
         dim: int,
@@ -667,6 +674,8 @@ class CausalSelfAttention(nn.Module):
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
             v = lam[0] * v0 + lam[1] * v
+        if CausalSelfAttention._v_norm:
+            v = F.rms_norm(v, (v.size(-1),))
         q = F.rms_norm(q, (q.size(-1),))
         k = F.rms_norm(k, (k.size(-1),))
         cos, sin = self.rotary(seqlen, x.device, q.dtype)
@@ -733,11 +742,15 @@ class ValueEmbedding(nn.Module):
         return h * self.scale.to(dtype=h.dtype)
 
 class MLP(nn.Module):
+    _mlp_act_gelu: bool = False
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+        if MLP._mlp_act_gelu:
+            x = F.gelu(F.linear(x, up_w.to(x.dtype)))
+        else:
+            x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
         return F.linear(x.square(), down_w.to(x.dtype))
 
 class Block(nn.Module):
@@ -1136,7 +1149,22 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            mlp_params = [p for n, p in base_model.named_parameters() if p.requires_grad and ('mlp_up_bank' in n or 'mlp_down_bank' in n)]
+            attn_params = [p for n, p in base_model.named_parameters() if p.requires_grad and ('qo_bank' in n or 'kv_bank' in n)]
+            mlp_ids = {id(p) for p in mlp_params}
+            attn_ids = {id(p) for p in attn_params}
+            other_params = [p for p in ttt_params if id(p) not in mlp_ids and id(p) not in attn_ids]
+            optimizer = torch.optim.AdamW([
+                {'params': mlp_params, 'lr': args.ttt_lr * args.ttt_mlp_lr_mult},
+                {'params': attn_params, 'lr': args.ttt_lr * args.ttt_attn_lr_mult},
+                {'params': other_params, 'lr': args.ttt_lr},
+            ], betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1465,6 +1493,8 @@ def main() -> None:
     log0(f"train_loader:dataset:{dataset_dir.name} train_shards:{actual_train_files}")
     log0(f"val_loader:shards pattern={args.val_files} tokens:{val_tokens.numel() - 1}")
     CastedLinear._qat_enabled = args.qat_enabled
+    MLP._mlp_act_gelu = args.mlp_act_gelu
+    CausalSelfAttention._v_norm = args.v_norm
     base_model = GPT(
         vocab_size=args.vocab_size,
         num_layers=args.num_layers,
