@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    vnorm_enabled = bool(int(os.environ.get("VNORM_ENABLED", "0")))
+    mlp_lr_scale = float(os.environ.get("MLP_LR_SCALE", "1.0"))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_per_layer_lr = bool(int(os.environ.get("TTT_PER_LAYER_LR", "0")))
+    ttt_mlp_lr_scale = float(os.environ.get("TTT_MLP_LR_SCALE", "3.0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -636,6 +641,7 @@ class CausalSelfAttention(nn.Module):
         self.rope_dims = 0  # set by GPT.__init__ for partial RoPE
         self.rotary = Rotary(self.head_dim, base=rope_base, train_seq_len=1024)
         self.use_xsa = False  # set by GPT.__init__ for deep layers only
+        self.vnorm_enabled = False  # set by GPT.__init__
         # Gated attention and value residual (non-banked small params)
         self.gated_attention = gated_attention
         if gated_attention:
@@ -663,6 +669,8 @@ class CausalSelfAttention(nn.Module):
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        if self.vnorm_enabled:
+            v = F.rms_norm(v, (self.head_dim,))
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
@@ -809,6 +817,7 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        vnorm_enabled: bool = False,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -882,6 +891,9 @@ class GPT(nn.Module):
         if xsa_last_n > 0:
             for i in range(max(0, num_layers - xsa_last_n), num_layers):
                 self.blocks[i].attn.use_xsa = True
+        if vnorm_enabled:
+            for b in self.blocks:
+                b.attn.vnorm_enabled = True
         self._init_weights()
     def _init_weights(self) -> None:
         if self.tie_embeddings:
@@ -1136,7 +1148,18 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_per_layer_lr:
+            mlp_p = [p for n, p in base_model.named_parameters() if p.requires_grad and "mlp" in n]
+            other_p = [p for n, p in base_model.named_parameters() if p.requires_grad and "mlp" not in n]
+            optimizer = torch.optim.AdamW([
+                {"params": mlp_p, "lr": args.ttt_lr * args.ttt_mlp_lr_scale, "initial_lr": args.ttt_lr * args.ttt_mlp_lr_scale},
+                {"params": other_p, "lr": args.ttt_lr, "initial_lr": args.ttt_lr},
+            ], weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1212,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_factor = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('initial_lr', args.ttt_lr) * cos_factor
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1490,6 +1513,7 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        vnorm_enabled=args.vnorm_enabled,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1545,15 +1569,29 @@ def main() -> None:
         weight_decay=args.adam_wd,
         fused=True,
     )
-    optimizer_muon = Muon(
-        matrix_params,
-        lr=args.matrix_lr,
-        momentum=args.muon_momentum,
-        backend_steps=args.muon_backend_steps,
-        weight_decay=args.muon_wd,
-    )
-    for group in optimizer_muon.param_groups:
-        group["base_lr"] = args.matrix_lr
+    if args.mlp_lr_scale != 1.0:
+        attn_bank_params = [base_model.qo_bank, base_model.kv_bank]
+        mlp_bank_params = [base_model.mlp_up_bank, base_model.mlp_down_bank]
+        optimizer_muon = Muon(attn_bank_params, lr=args.matrix_lr, momentum=args.muon_momentum,
+                              backend_steps=args.muon_backend_steps, weight_decay=args.muon_wd)
+        for group in optimizer_muon.param_groups:
+            group["base_lr"] = args.matrix_lr
+        _mlp_lr = args.matrix_lr * args.mlp_lr_scale
+        optimizer_muon_mlp = Muon(mlp_bank_params, lr=_mlp_lr, momentum=args.muon_momentum,
+                                   backend_steps=args.muon_backend_steps, weight_decay=args.muon_wd)
+        for group in optimizer_muon_mlp.param_groups:
+            group["base_lr"] = _mlp_lr
+    else:
+        optimizer_muon = Muon(
+            matrix_params,
+            lr=args.matrix_lr,
+            momentum=args.muon_momentum,
+            backend_steps=args.muon_backend_steps,
+            weight_decay=args.muon_wd,
+        )
+        for group in optimizer_muon.param_groups:
+            group["base_lr"] = args.matrix_lr
+        optimizer_muon_mlp = None
     optimizer_scalar = torch.optim.AdamW(
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
         betas=(args.beta1, args.beta2),
@@ -1577,6 +1615,8 @@ def main() -> None:
         )
         replicated_params.append(base_model.lm_head.weight)
     optimizers: list[torch.optim.Optimizer] = [optimizer_tok, optimizer_muon, optimizer_scalar]
+    if optimizer_muon_mlp is not None:
+        optimizers.append(optimizer_muon_mlp)
     if optimizer_head is not None:
         optimizers.append(optimizer_head)
     n_params = sum(p.numel() for p in base_model.parameters())
@@ -1700,6 +1740,9 @@ def main() -> None:
         muon_momentum = (1 - frac) * args.muon_momentum_warmup_start + frac * args.muon_momentum
         for group in optimizer_muon.param_groups:
             group["momentum"] = muon_momentum
+        if optimizer_muon_mlp is not None:
+            for group in optimizer_muon_mlp.param_groups:
+                group["momentum"] = muon_momentum
         for opt in optimizers:
             for group in opt.param_groups:
                 group["lr"] = group["base_lr"] * scale
@@ -1708,6 +1751,8 @@ def main() -> None:
         # === 3-phase overlapped optimizer step ===
         # Phase 1: Launch async reduce-scatter for banks (biggest first)
         optimizer_muon.launch_reduce_scatters()
+        if optimizer_muon_mlp is not None:
+            optimizer_muon_mlp.launch_reduce_scatters()
         # Phase 2: All-reduce non-bank grads + step Adam (while bank RS is in-flight)
         if distributed:
             for p in replicated_params:
@@ -1719,6 +1764,8 @@ def main() -> None:
             optimizer_head.step()
         # Phase 3: Wait for RS, local NS5, all-gather (banks processed last)
         optimizer_muon.step()
+        if optimizer_muon_mlp is not None:
+            optimizer_muon_mlp.step()
         zero_grad_all()
         # EMA update
         with torch.no_grad():
@@ -1833,6 +1880,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        vnorm_enabled=args.vnorm_enabled,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
