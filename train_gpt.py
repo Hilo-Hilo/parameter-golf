@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", "0"))  # 0=disabled; 16 for LoRA TTT
+    ttt_mlp_lr_mult = float(os.environ.get("TTT_MLP_LR_MULT", "1.0"))
+    ttt_attn_lr_mult = float(os.environ.get("TTT_ATTN_LR_MULT", "1.0"))
+    lzma_extreme = bool(int(os.environ.get("LZMA_EXTREME", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -883,6 +888,16 @@ class GPT(nn.Module):
             for i in range(max(0, num_layers - xsa_last_n), num_layers):
                 self.blocks[i].attn.use_xsa = True
         self._init_weights()
+        # LoRA TTT state (plain tensors, not Parameters; never in state_dict/artifact)
+        self.lora_rank: int = 0
+        self._lora_qo_B: Tensor | None = None
+        self._lora_qo_A: Tensor | None = None
+        self._lora_kv_B: Tensor | None = None
+        self._lora_kv_A: Tensor | None = None
+        self._lora_up_B: Tensor | None = None
+        self._lora_up_A: Tensor | None = None
+        self._lora_dn_B: Tensor | None = None
+        self._lora_dn_A: Tensor | None = None
     def _init_weights(self) -> None:
         if self.tie_embeddings:
             nn.init.normal_(self.tok_emb.weight, mean=0.0, std=self.tied_embed_init_std)
@@ -906,6 +921,33 @@ class GPT(nn.Module):
                     nn.init.zeros_(module.weight)
                 elif module.weight.ndim == 2 and module.weight.shape[0] >= 64 and module.weight.shape[1] >= 64:
                     nn.init.orthogonal_(module.weight, gain=1.0)
+    def enable_lora_ttt(self, rank: int, device: torch.device) -> list[Tensor]:
+        """Allocate LoRA adapter tensors for TTT. Returns list of trainable tensors."""
+        n = self.num_layers
+        d = self.qo_bank.size(-1)
+        kv = self.kv_bank.size(-2)
+        m = self.mlp_up_bank.size(-2)
+        self.lora_rank = rank
+        def alloc(out_dim: int, in_dim: int, count: int) -> tuple[Tensor, Tensor]:
+            B = torch.zeros(count, out_dim, rank, device=device, dtype=torch.float32, requires_grad=True)
+            A = torch.empty(count, rank, in_dim, device=device, dtype=torch.float32)
+            nn.init.kaiming_uniform_(A.reshape(count * rank, in_dim), a=math.sqrt(5))
+            A.requires_grad_(True)
+            return B, A
+        self._lora_qo_B, self._lora_qo_A = alloc(d, d, 2 * n)
+        self._lora_kv_B, self._lora_kv_A = alloc(kv, d, 2 * n)
+        self._lora_up_B, self._lora_up_A = alloc(m, d, n)
+        self._lora_dn_B, self._lora_dn_A = alloc(d, m, n)
+        return [self._lora_qo_B, self._lora_qo_A,
+                self._lora_kv_B, self._lora_kv_A,
+                self._lora_up_B, self._lora_up_A,
+                self._lora_dn_B, self._lora_dn_A]
+    def disable_lora_ttt(self) -> None:
+        self.lora_rank = 0
+        self._lora_qo_B = self._lora_qo_A = None
+        self._lora_kv_B = self._lora_kv_A = None
+        self._lora_up_B = self._lora_up_A = None
+        self._lora_dn_B = self._lora_dn_A = None
     def _get_ve(self, layer_idx: int, input_ids: Tensor, ve_cache: dict | None = None) -> Tensor | None:
         """Get value embedding for a specific layer using shared table + per-layer scale."""
         if self.ve_shared is None or layer_idx not in self.ve_layer_indices:
@@ -928,10 +970,18 @@ class GPT(nn.Module):
         ve_cache: dict = {}
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
-            x, raw_v = self.blocks[i](x, x0,
-                self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
-                v_embed=ve, v0=v0)
+            if self.lora_rank > 0:
+                dtype = self.qo_bank.dtype
+                q_w = self.qo_bank[i] + (self._lora_qo_B[i] @ self._lora_qo_A[i]).to(dtype)
+                k_w = self.kv_bank[i] + (self._lora_kv_B[i] @ self._lora_kv_A[i]).to(self.kv_bank.dtype)
+                v_w = self.kv_bank[n + i] + (self._lora_kv_B[n + i] @ self._lora_kv_A[n + i]).to(self.kv_bank.dtype)
+                out_w = self.qo_bank[n + i] + (self._lora_qo_B[n + i] @ self._lora_qo_A[n + i]).to(dtype)
+                up_w = self.mlp_up_bank[i] + (self._lora_up_B[i] @ self._lora_up_A[i]).to(self.mlp_up_bank.dtype)
+                dn_w = self.mlp_down_bank[i] + (self._lora_dn_B[i] @ self._lora_dn_A[i]).to(self.mlp_down_bank.dtype)
+            else:
+                q_w, k_w, v_w = self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i]
+                out_w, up_w, dn_w = self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i]
+            x, raw_v = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, dn_w, v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
             skips.append(x)
@@ -940,10 +990,18 @@ class GPT(nn.Module):
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             ve = self._get_ve(bi, input_ids, ve_cache)
-            x, _ = self.blocks[bi](x, x0,
-                self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
-                v_embed=ve, v0=v0)
+            if self.lora_rank > 0:
+                dtype = self.qo_bank.dtype
+                q_w = self.qo_bank[bi] + (self._lora_qo_B[bi] @ self._lora_qo_A[bi]).to(dtype)
+                k_w = self.kv_bank[bi] + (self._lora_kv_B[bi] @ self._lora_kv_A[bi]).to(self.kv_bank.dtype)
+                v_w = self.kv_bank[n + bi] + (self._lora_kv_B[n + bi] @ self._lora_kv_A[n + bi]).to(self.kv_bank.dtype)
+                out_w = self.qo_bank[n + bi] + (self._lora_qo_B[n + bi] @ self._lora_qo_A[n + bi]).to(dtype)
+                up_w = self.mlp_up_bank[bi] + (self._lora_up_B[bi] @ self._lora_up_A[bi]).to(self.mlp_up_bank.dtype)
+                dn_w = self.mlp_down_bank[bi] + (self._lora_dn_B[bi] @ self._lora_dn_A[bi]).to(self.mlp_down_bank.dtype)
+            else:
+                q_w, k_w, v_w = self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi]
+                out_w, up_w, dn_w = self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi]
+            x, _ = self.blocks[bi](x, x0, q_w, k_w, v_w, out_w, up_w, dn_w, v_embed=ve, v0=v0)
         x = self.final_norm(x)
         x_flat = x.reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
@@ -986,10 +1044,18 @@ class GPT(nn.Module):
         ve_cache: dict = {}
         for i in range(self.num_encoder_layers):
             ve = self._get_ve(i, input_ids, ve_cache)
-            x, raw_v = self.blocks[i](x, x0,
-                self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
-                v_embed=ve, v0=v0)
+            if self.lora_rank > 0:
+                dtype = self.qo_bank.dtype
+                q_w = self.qo_bank[i] + (self._lora_qo_B[i] @ self._lora_qo_A[i]).to(dtype)
+                k_w = self.kv_bank[i] + (self._lora_kv_B[i] @ self._lora_kv_A[i]).to(self.kv_bank.dtype)
+                v_w = self.kv_bank[n + i] + (self._lora_kv_B[n + i] @ self._lora_kv_A[n + i]).to(self.kv_bank.dtype)
+                out_w = self.qo_bank[n + i] + (self._lora_qo_B[n + i] @ self._lora_qo_A[n + i]).to(dtype)
+                up_w = self.mlp_up_bank[i] + (self._lora_up_B[i] @ self._lora_up_A[i]).to(self.mlp_up_bank.dtype)
+                dn_w = self.mlp_down_bank[i] + (self._lora_dn_B[i] @ self._lora_dn_A[i]).to(self.mlp_down_bank.dtype)
+            else:
+                q_w, k_w, v_w = self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i]
+                out_w, up_w, dn_w = self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i]
+            x, raw_v = self.blocks[i](x, x0, q_w, k_w, v_w, out_w, up_w, dn_w, v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
             skips.append(x)
@@ -998,10 +1064,18 @@ class GPT(nn.Module):
             if skips:
                 x = x + self.skip_weights[i].to(dtype=x.dtype)[None, None, :] * skips.pop()
             ve = self._get_ve(bi, input_ids, ve_cache)
-            x, _ = self.blocks[bi](x, x0,
-                self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
-                v_embed=ve, v0=v0)
+            if self.lora_rank > 0:
+                dtype = self.qo_bank.dtype
+                q_w = self.qo_bank[bi] + (self._lora_qo_B[bi] @ self._lora_qo_A[bi]).to(dtype)
+                k_w = self.kv_bank[bi] + (self._lora_kv_B[bi] @ self._lora_kv_A[bi]).to(self.kv_bank.dtype)
+                v_w = self.kv_bank[n + bi] + (self._lora_kv_B[n + bi] @ self._lora_kv_A[n + bi]).to(self.kv_bank.dtype)
+                out_w = self.qo_bank[n + bi] + (self._lora_qo_B[n + bi] @ self._lora_qo_A[n + bi]).to(dtype)
+                up_w = self.mlp_up_bank[bi] + (self._lora_up_B[bi] @ self._lora_up_A[bi]).to(self.mlp_up_bank.dtype)
+                dn_w = self.mlp_down_bank[bi] + (self._lora_dn_B[bi] @ self._lora_dn_A[bi]).to(self.mlp_down_bank.dtype)
+            else:
+                q_w, k_w, v_w = self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi]
+                out_w, up_w, dn_w = self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi]
+            x, _ = self.blocks[bi](x, x0, q_w, k_w, v_w, out_w, up_w, dn_w, v_embed=ve, v0=v0)
         x = self.final_norm(x)
         if self.tie_embeddings:
             logits_proj = F.linear(x, self.tok_emb.weight)
@@ -1118,25 +1192,35 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
-    frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
-    for name, p in base_model.named_parameters():
-        freeze = False
-        for bi in frozen_block_ids:
-            if f"blocks.{bi}." in name:
-                freeze = True
-                break
-        if freeze:
+    # Set up LoRA TTT or standard param-based TTT
+    if args.ttt_lora_rank > 0:
+        # LoRA TTT: freeze all base params, train only LoRA adapters
+        for p in base_model.parameters():
             p.requires_grad_(False)
-        else:
-            p.requires_grad_(True)
-            ttt_params.append(p)
+        lora_params = base_model.enable_lora_ttt(args.ttt_lora_rank, device)
+        ttt_params = lora_params
+        log0(f"ttt_sliding:lora_rank={args.ttt_lora_rank} lora_params={sum(p.numel() for p in ttt_params)}")
+    else:
+        frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+        ttt_params = []
+        for name, p in base_model.named_parameters():
+            freeze = False
+            for bi in frozen_block_ids:
+                if f"blocks.{bi}." in name:
+                    freeze = True
+                    break
+            if freeze:
+                p.requires_grad_(False)
+            else:
+                p.requires_grad_(True)
+                ttt_params.append(p)
+        log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
+             f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
-
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw" or args.ttt_lora_rank > 0:
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1231,6 +1315,8 @@ def eval_val_sliding_ttt(
     val_loss = (loss_sum / token_count).item()
     val_bpb = val_loss / math.log(2.0) * (token_count.item() / byte_count.item())
 
+    if args.ttt_lora_rank > 0:
+        base_model.disable_lora_ttt()
     for p in base_model.parameters():
         p.requires_grad_(True)
     base_model.eval()
@@ -1803,7 +1889,8 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    lzma_preset = (6 | lzma.PRESET_EXTREME) if args.lzma_extreme else 6
+    quant_blob = lzma.compress(quant_raw, preset=lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
