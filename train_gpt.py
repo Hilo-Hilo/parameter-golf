@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")  # "sgd" or "adamw"
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -1121,6 +1123,9 @@ def eval_val_sliding_ttt(
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
     ttt_params = []
+    ttt_params_mlp: list[Tensor] = []
+    ttt_params_attn: list[Tensor] = []
+    ttt_params_other: list[Tensor] = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1132,11 +1137,32 @@ def eval_val_sliding_ttt(
         else:
             p.requires_grad_(True)
             ttt_params.append(p)
+            cat = _classify_param(name)
+            if cat == "mlp":
+                ttt_params_mlp.append(p)
+            elif cat == "attn":
+                ttt_params_attn.append(p)
+            else:
+                ttt_params_other.append(p)
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_perlayer_lr:
+            param_groups = [
+                {"params": ttt_params_mlp, "lr": args.ttt_lr * 2.0, "base_lr": args.ttt_lr * 2.0},
+                {"params": ttt_params_attn, "lr": args.ttt_lr, "base_lr": args.ttt_lr},
+                {"params": ttt_params_other, "lr": args.ttt_lr * 0.5, "base_lr": args.ttt_lr * 0.5},
+            ]
+            optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(
+                [{"params": ttt_params, "lr": args.ttt_lr, "base_lr": args.ttt_lr}],
+                betas=(0.9, 0.95), weight_decay=0.0,
+            )
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1215,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_factor = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('base_lr', args.ttt_lr) * cos_factor
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1253,7 +1279,10 @@ def _classify_param(name: str) -> str:
 def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tensor]:
     t32 = t.float()
     if t32.ndim == 2:
-        best_q, best_s, best_err = None, None, float('inf')
+        n_rows = t32.shape[0]
+        best_q = torch.zeros_like(t32, dtype=torch.int8)
+        best_s = torch.zeros(n_rows, dtype=torch.float16, device=t32.device)
+        best_row_err = torch.full((n_rows,), float('inf'), device=t32.device)
         for pct in [0.9990, 0.9995, 0.9999, 0.99999, 1.0]:
             if pct < 1.0:
                 row_clip = torch.quantile(t32.abs(), pct, dim=1)
@@ -1262,9 +1291,12 @@ def quantize_int6_per_row(t: Tensor, clip_range: int = 31) -> tuple[Tensor, Tens
             s = (row_clip / clip_range).clamp_min(1.0 / clip_range).to(torch.float16)
             q = torch.clamp(torch.round(t32 / s.float()[:, None]), -clip_range, clip_range).to(torch.int8)
             recon = q.float() * s.float()[:, None]
-            err = (t32 - recon).pow(2).mean().item()
-            if err < best_err:
-                best_q, best_s, best_err = q, s, err
+            row_err = (t32 - recon).pow(2).mean(dim=1)
+            better = row_err < best_row_err
+            if better.any():
+                best_q[better] = q[better]
+                best_s[better] = s[better]
+                best_row_err[better] = row_err[better]
         return best_q, best_s
     amax = t32.abs().max().item()
     scale = torch.tensor(amax / clip_range if amax > 0 else 1.0, dtype=torch.float16)
