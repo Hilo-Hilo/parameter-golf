@@ -109,6 +109,10 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer = bool(int(os.environ.get("TTT_PERLAYER", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", 6))
+    leaky_slope = float(os.environ.get("LEAKY_SLOPE", 0.5))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -733,11 +737,12 @@ class ValueEmbedding(nn.Module):
         return h * self.scale.to(dtype=h.dtype)
 
 class MLP(nn.Module):
+    leaky_slope: float = 0.5  # set from Hyperparameters.leaky_slope in main()
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=MLP.leaky_slope)
         return F.linear(x.square(), down_w.to(x.dtype))
 
 class Block(nn.Module):
@@ -1136,7 +1141,28 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw" and args.ttt_perlayer:
+        mlp_p, attn_p, other_p = [], [], []
+        for name, p in base_model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if "mlp_down_bank" in name or "mlp_up_bank" in name:
+                mlp_p.append(p)
+            elif "qo_bank" in name or "kv_bank" in name or ".attn." in name:
+                attn_p.append(p)
+            else:
+                other_p.append(p)
+        optimizer = torch.optim.AdamW([
+            {"params": mlp_p, "lr": args.ttt_lr * 3.0, "initial_lr": args.ttt_lr * 3.0},
+            {"params": attn_p, "lr": args.ttt_lr * 0.5, "initial_lr": args.ttt_lr * 0.5},
+            {"params": other_p, "lr": args.ttt_lr, "initial_lr": args.ttt_lr},
+        ], weight_decay=0.01)
+    elif args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            [{"params": ttt_params, "lr": args.ttt_lr, "initial_lr": args.ttt_lr}],
+            weight_decay=0.01)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1215,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_lr_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('initial_lr', args.ttt_lr) * cos_lr_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1394,6 +1420,7 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
 def main() -> None:
     code = Path(__file__).read_text(encoding="utf-8")
     args = Hyperparameters()
+    MLP.leaky_slope = args.leaky_slope
     # zeropower_via_newtonschulz5 runs eagerly with bmm -- do NOT compile
     distributed = "RANK" in os.environ and "WORLD_SIZE" in os.environ
     rank = int(os.environ.get("RANK", "0"))
@@ -1803,7 +1830,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
