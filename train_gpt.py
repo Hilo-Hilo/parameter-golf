@@ -101,6 +101,7 @@ class Hyperparameters:
     ve_layers = os.environ.get("VE_LAYERS", "9,10")
     gated_attention = bool(int(os.environ.get("GATED_ATTENTION", "0")))
     value_residual = bool(int(os.environ.get("VALUE_RESIDUAL", "0")))
+    v_norm_attn = bool(int(os.environ.get("V_NORM_ATTN", "0")))
     ttt_enabled = bool(int(os.environ.get("TTT_ENABLED", "0")))
     ttt_lr = float(os.environ.get("TTT_LR", 0.002))
     ttt_epochs = int(os.environ.get("TTT_EPOCHS", 3))
@@ -109,6 +110,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_mult = float(os.environ.get("TTT_MLP_LR_MULT", "2.0"))
+    ttt_attn_lr_mult = float(os.environ.get("TTT_ATTN_LR_MULT", "0.5"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -643,6 +649,7 @@ class CausalSelfAttention(nn.Module):
             nn.init.zeros_(self.attn_gate.weight)
             nn.init.constant_(self.attn_gate.bias, 4.0)
         self.value_residual = value_residual
+        self.v_norm_attn = False  # set by GPT.__init__
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
@@ -663,6 +670,8 @@ class CausalSelfAttention(nn.Module):
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        if self.v_norm_attn:
+            v = F.rms_norm(v, (v.size(-1),))
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
@@ -1136,7 +1145,35 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw" and args.ttt_perlayer_lr:
+        mlp_lr = args.ttt_lr * args.ttt_mlp_lr_mult
+        attn_lr = args.ttt_lr * args.ttt_attn_lr_mult
+        mlp_params, attn_params, other_params = [], [], []
+        for name, p in base_model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if "mlp_up_bank" in name or "mlp_down_bank" in name:
+                mlp_params.append(p)
+            elif "qo_bank" in name or "kv_bank" in name:
+                attn_params.append(p)
+            else:
+                other_params.append(p)
+        optimizer = torch.optim.AdamW(
+            [
+                {"params": mlp_params, "lr": mlp_lr, "base_lr": mlp_lr},
+                {"params": attn_params, "lr": attn_lr, "base_lr": attn_lr},
+                {"params": other_params, "lr": args.ttt_lr, "base_lr": args.ttt_lr},
+            ],
+            betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0,
+        )
+    elif args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.0)
+        for pg in optimizer.param_groups:
+            pg["base_lr"] = args.ttt_lr
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+        for pg in optimizer.param_groups:
+            pg["base_lr"] = args.ttt_lr
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1226,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_frac = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('base_lr', args.ttt_lr) * cos_frac
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1491,6 +1528,9 @@ def main() -> None:
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
     ).to(device).bfloat16()
+    if args.v_norm_attn:
+        for block in base_model.blocks:
+            block.attn.v_norm_attn = True
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
     base_model.kv_bank.data = base_model.kv_bank.data.float()
@@ -1803,7 +1843,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1834,6 +1874,9 @@ def main() -> None:
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
     ).to(device).bfloat16()
+    if args.v_norm_attn:
+        for block in eval_model.blocks:
+            block.attn.v_norm_attn = True
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
     eval_model.mlp_up_bank.data = eval_model.mlp_up_bank.data.float()
