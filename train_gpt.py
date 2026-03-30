@@ -1118,9 +1118,10 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
+    # Freeze first N blocks; build per-layer LR groups for AdamW TTT
+    # LR multipliers: 3x for MLP output projections, 0.5x for embeddings, 1x otherwise
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
+    param_groups: list[dict] = []
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1129,14 +1130,21 @@ def eval_val_sliding_ttt(
                 break
         if freeze:
             p.requires_grad_(False)
+            continue
+        p.requires_grad_(True)
+        if 'mlp' in name and ('c_proj' in name or 'c_fc2' in name):
+            lr_mult = 3.0
+        elif 'embed' in name:
+            lr_mult = 0.5
         else:
-            p.requires_grad_(True)
-            ttt_params.append(p)
+            lr_mult = 1.0
+        param_groups.append({'params': [p], 'lr': args.ttt_lr * lr_mult})
+    ttt_params = [g['params'][0] for g in param_groups]
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.95), weight_decay=0.0)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1803,7 +1811,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=9)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
