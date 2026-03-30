@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    v_norm = bool(int(os.environ.get("V_NORM", "0")))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer_lr = bool(int(os.environ.get("TTT_PERLAYER_LR", "0")))
+    ttt_mlp_lr_mult = float(os.environ.get("TTT_MLP_LR_MULT", "2.0"))
+    ttt_attn_lr_mult = float(os.environ.get("TTT_ATTN_LR_MULT", "0.5"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -620,6 +625,7 @@ class CausalSelfAttention(nn.Module):
         qk_gain_init: float,
         gated_attention: bool = False,
         value_residual: bool = False,
+        v_norm: bool = False,
     ):
         super().__init__()
         if dim % num_heads != 0:
@@ -645,6 +651,7 @@ class CausalSelfAttention(nn.Module):
         self.value_residual = value_residual
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
+        self.v_norm = v_norm
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
         """Efficient XSA: subtract self-value projection via GQA-aware reshape (no repeat_interleave).
         y: [B, T, H, D], v: [B, T, Hkv, D]. H must be divisible by Hkv."""
@@ -663,6 +670,8 @@ class CausalSelfAttention(nn.Module):
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        if self.v_norm:
+            v = F.rms_norm(v, (v.size(-1),))
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
@@ -754,12 +763,14 @@ class Block(nn.Module):
         dtg: bool = False,
         gated_attention: bool = False,
         value_residual: bool = False,
+        v_norm: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init,
-                                        gated_attention=gated_attention, value_residual=value_residual)
+                                        gated_attention=gated_attention, value_residual=value_residual,
+                                        v_norm=v_norm)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -809,6 +820,7 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        v_norm: bool = False,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -850,6 +862,7 @@ class GPT(nn.Module):
                     dtg=dtg,
                     gated_attention=gated_attention,
                     value_residual=value_residual,
+                    v_norm=v_norm,
                 )
                 for i in range(num_layers)
             ]
@@ -1136,7 +1149,28 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        name_map = {id(p): name for name, p in base_model.named_parameters()}
+        if args.ttt_perlayer_lr:
+            param_groups = []
+            for p in ttt_params:
+                name = name_map.get(id(p), "")
+                if "mlp_up_bank" in name or "mlp_down_bank" in name:
+                    lr_mult = args.ttt_mlp_lr_mult
+                elif "qo_bank" in name or "kv_bank" in name or ".attn." in name:
+                    lr_mult = args.ttt_attn_lr_mult
+                else:
+                    lr_mult = 1.0
+                base_lr = args.ttt_lr * lr_mult
+                param_groups.append({"params": [p], "lr": base_lr, "base_lr": base_lr})
+            optimizer = torch.optim.AdamW(param_groups, weight_decay=0.0, betas=(0.9, 0.999), eps=1e-8)
+        else:
+            optimizer = torch.optim.AdamW(
+                [{"params": ttt_params, "lr": args.ttt_lr, "base_lr": args.ttt_lr}],
+                weight_decay=0.0, betas=(0.9, 0.999), eps=1e-8
+            )
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1223,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('base_lr', args.ttt_lr) * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1490,6 +1524,7 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        v_norm=args.v_norm,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1833,6 +1868,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        v_norm=args.v_norm,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
