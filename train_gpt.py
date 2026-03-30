@@ -68,6 +68,8 @@ class Hyperparameters:
     tied_embed_lr = float(os.environ.get("TIED_EMBED_LR", 0.035))
     tied_embed_init_std = float(os.environ.get("TIED_EMBED_INIT_STD", 0.005))
     matrix_lr = float(os.environ.get("MATRIX_LR", 0.025))
+    attn_lr_scale = float(os.environ.get("ATTN_LR_SCALE", 1.0))
+    mlp_lr_scale = float(os.environ.get("MLP_LR_SCALE", 1.0))
     scalar_lr = float(os.environ.get("SCALAR_LR", 0.025))
     muon_momentum = float(os.environ.get("MUON_MOMENTUM", 0.99))
     muon_backend_steps = int(os.environ.get("MUON_BACKEND_STEPS", 5))
@@ -160,7 +162,7 @@ class Muon(torch.optim.Optimizer):
         ws = self._world_size
 
         self._bank_meta = []
-        for group in self.param_groups:
+        for grp_idx, group in enumerate(self.param_groups):
             for p in group["params"]:
                 B = p.shape[0]
                 padded_B = ((B + ws - 1) // ws) * ws
@@ -169,6 +171,7 @@ class Muon(torch.optim.Optimizer):
                 dev = p.device
                 self._bank_meta.append({
                     'p': p,
+                    'grp_idx': grp_idx,
                     'B': B,
                     'padded_grad': torch.zeros(padded_B, *tail, device=dev, dtype=torch.bfloat16),
                     'shard': torch.zeros(shard_B, *tail, device=dev, dtype=torch.bfloat16),
@@ -210,69 +213,73 @@ class Muon(torch.optim.Optimizer):
         if not self._built:
             self._build()
 
-        for group in self.param_groups:
-            lr = group["lr"]
-            momentum = group["momentum"]
-            backend_steps = group["backend_steps"]
-            nesterov = group["nesterov"]
-            wd = group.get("weight_decay", 0.0)
+        # Get shared hyperparams from first group (momentum/backend_steps are uniform).
+        g0 = self.param_groups[0]
+        momentum = g0["momentum"]
+        backend_steps = g0["backend_steps"]
+        nesterov = g0["nesterov"]
+        wd = g0.get("weight_decay", 0.0)
 
-            prev_ag_handle = None
-            prev_m = None
+        prev_ag_handle = None
+        prev_m = None
+        prev_lr = 0.0
 
-            sharded = self._distributed and hasattr(self, '_rs_futures')
+        sharded = self._distributed and hasattr(self, '_rs_futures')
 
-            for i, m in enumerate(self._bank_meta):
-                p = m['p']
-                if p.grad is None:
-                    continue
-
-                if prev_ag_handle is not None:
-                    prev_ag_handle.wait()
-                    pp = prev_m['p']
-                    upd = prev_m['full_update'][:prev_m['B']]
-                    if wd > 0.0:
-                        pp.data.mul_(1.0 - lr * wd)
-                    pp.add_(upd.to(dtype=pp.dtype), alpha=-lr * prev_m['scale'])
-
-                if sharded and self._rs_futures[i] is not None:
-                    self._rs_futures[i].wait()
-                    g = m['shard']
-                    buf = m['shard_mom']
-                else:
-                    g = p.grad.bfloat16()
-                    state = self.state[p]
-                    if "momentum_buffer" not in state:
-                        state["momentum_buffer"] = torch.zeros_like(g)
-                    buf = state["momentum_buffer"]
-
-                buf.mul_(momentum).add_(g)
-                if nesterov:
-                    update = g.add(buf, alpha=momentum)
-                else:
-                    update = buf
-
-                update = zeropower_via_newtonschulz5(update, steps=backend_steps)
-
-                if sharded:
-                    prev_ag_handle = dist.all_gather_into_tensor(
-                        m['full_update'], update, async_op=True)
-                    prev_m = m
-                else:
-                    if wd > 0.0:
-                        p.data.mul_(1.0 - lr * wd)
-                    p.add_(update.to(dtype=p.dtype), alpha=-lr * m['scale'])
+        for i, m in enumerate(self._bank_meta):
+            # Per-bank LR: supports split-LR across param groups.
+            lr = self.param_groups[m['grp_idx']]["lr"]
+            p = m['p']
+            if p.grad is None:
+                continue
 
             if prev_ag_handle is not None:
                 prev_ag_handle.wait()
                 pp = prev_m['p']
                 upd = prev_m['full_update'][:prev_m['B']]
                 if wd > 0.0:
-                    pp.data.mul_(1.0 - lr * wd)
-                pp.add_(upd.to(dtype=pp.dtype), alpha=-lr * prev_m['scale'])
+                    pp.data.mul_(1.0 - prev_lr * wd)
+                pp.add_(upd.to(dtype=pp.dtype), alpha=-prev_lr * prev_m['scale'])
 
-            if hasattr(self, '_rs_futures'):
-                del self._rs_futures
+            if sharded and self._rs_futures[i] is not None:
+                self._rs_futures[i].wait()
+                g = m['shard']
+                buf = m['shard_mom']
+            else:
+                g = p.grad.bfloat16()
+                state = self.state[p]
+                if "momentum_buffer" not in state:
+                    state["momentum_buffer"] = torch.zeros_like(g)
+                buf = state["momentum_buffer"]
+
+            buf.mul_(momentum).add_(g)
+            if nesterov:
+                update = g.add(buf, alpha=momentum)
+            else:
+                update = buf
+
+            update = zeropower_via_newtonschulz5(update, steps=backend_steps)
+
+            if sharded:
+                prev_ag_handle = dist.all_gather_into_tensor(
+                    m['full_update'], update, async_op=True)
+                prev_m = m
+                prev_lr = lr
+            else:
+                if wd > 0.0:
+                    p.data.mul_(1.0 - lr * wd)
+                p.add_(update.to(dtype=p.dtype), alpha=-lr * m['scale'])
+
+        if prev_ag_handle is not None:
+            prev_ag_handle.wait()
+            pp = prev_m['p']
+            upd = prev_m['full_update'][:prev_m['B']]
+            if wd > 0.0:
+                pp.data.mul_(1.0 - prev_lr * wd)
+            pp.add_(upd.to(dtype=pp.dtype), alpha=-prev_lr * prev_m['scale'])
+
+        if hasattr(self, '_rs_futures'):
+            del self._rs_futures
 
         return loss
 
@@ -1510,9 +1517,17 @@ def main() -> None:
     # - token embedding -> Adam
     # - scalars/control tensors -> Adam
     # - bigram proj, mtp heads, VE proj -> Adam (small matrix params not worth banking)
+    attn_lr = args.matrix_lr * args.attn_lr_scale
+    mlp_lr = args.matrix_lr * args.mlp_lr_scale
     matrix_params = [
-        base_model.qo_bank, base_model.kv_bank,
-        base_model.mlp_up_bank, base_model.mlp_down_bank,
+        {"params": [base_model.qo_bank, base_model.kv_bank],
+         "lr": attn_lr, "momentum": args.muon_momentum,
+         "backend_steps": args.muon_backend_steps,
+         "weight_decay": args.muon_wd, "nesterov": True},
+        {"params": [base_model.mlp_up_bank, base_model.mlp_down_bank],
+         "lr": mlp_lr, "momentum": args.muon_momentum,
+         "backend_steps": args.muon_backend_steps,
+         "weight_decay": args.muon_wd, "nesterov": True},
     ]
     block_named_params = list(base_model.blocks.named_parameters())
     scalar_params = [
@@ -1553,7 +1568,7 @@ def main() -> None:
         weight_decay=args.muon_wd,
     )
     for group in optimizer_muon.param_groups:
-        group["base_lr"] = args.matrix_lr
+        group["base_lr"] = group["lr"]
     optimizer_scalar = torch.optim.AdamW(
         [{"params": scalar_params, "lr": args.scalar_lr, "base_lr": args.scalar_lr}],
         betas=(args.beta1, args.beta2),
