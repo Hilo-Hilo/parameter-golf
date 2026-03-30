@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer = bool(int(os.environ.get("TTT_PERLAYER", "0")))
+    ttt_lora_rank = int(os.environ.get("TTT_LORA_RANK", "0"))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    trigram_vocab_size = int(os.environ.get("TRIGRAM_VOCAB_SIZE", "0"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -715,6 +720,29 @@ class BigramHashEmbedding(nn.Module):
             h = self.proj(h)
         return h * self.scale.to(dtype=h.dtype)
 
+class TrigramHashEmbedding(nn.Module):
+    def __init__(self, trigram_vocab_size: int, bigram_dim: int, model_dim: int):
+        super().__init__()
+        self.trigram_vocab_size = trigram_vocab_size
+        self.embed = nn.Embedding(trigram_vocab_size, bigram_dim)
+        nn.init.zeros_(self.embed.weight)
+        self.proj = CastedLinear(bigram_dim, model_dim, bias=False) if bigram_dim != model_dim else None
+        if self.proj is not None:
+            nn.init.zeros_(self.proj.weight)
+        self.scale = nn.Parameter(torch.tensor(0.02, dtype=torch.float32))
+    def trigram_hash(self, tokens: Tensor) -> Tensor:
+        t = tokens.to(torch.int32)
+        mod = self.trigram_vocab_size - 1
+        out = torch.empty_like(t)
+        out[..., :2] = mod
+        out[..., 2:] = (36313 * t[..., 2:] ^ 27191 * t[..., 1:-1] ^ 13337 * t[..., :-2]) % mod
+        return out.long()
+    def forward(self, token_ids: Tensor) -> Tensor:
+        h = self.embed(self.trigram_hash(token_ids))
+        if self.proj is not None:
+            h = self.proj(h)
+        return h * self.scale.to(dtype=h.dtype)
+
 class ValueEmbedding(nn.Module):
     """Reinject token identity into attention values at specific layers.
     Each table maps vocab tokens to a low-dim embedding, projected to model_dim."""
@@ -800,6 +828,7 @@ class GPT(nn.Module):
         mtp_loss_weight: float = 0.1,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        trigram_vocab_size: int = 0,
         xsa_last_n: int = 0,
         rope_dims: int = 0,
         ln_scale: bool = False,
@@ -822,6 +851,7 @@ class GPT(nn.Module):
         self.mtp_loss_weight = mtp_loss_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
+        self.trigram = TrigramHashEmbedding(trigram_vocab_size, bigram_dim, model_dim) if trigram_vocab_size > 0 else None
         self.smear = SmearGate(model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -915,11 +945,21 @@ class GPT(nn.Module):
         ve_base = ve_cache['ve'] if ve_cache is not None else self.ve_shared(input_ids)
         ve_idx = self.ve_layer_indices.index(layer_idx)
         return ve_base * self.ve_layer_scales[ve_idx].to(dtype=ve_base.dtype)
+    def _lora_out_w(self, layer_idx: int, n: int) -> Tensor:
+        """Return output projection weight, optionally with LoRA delta."""
+        w = self.qo_bank[n + layer_idx]
+        lora_A = getattr(self, '_ttt_lora_A_out', None)
+        if lora_A is not None:
+            lora_B = self._ttt_lora_B_out
+            w = w + (lora_B[layer_idx] @ lora_A[layer_idx]).to(w.dtype)
+        return w
     def forward(self, input_ids: Tensor, target_ids: Tensor) -> Tensor:
         n = self.num_layers
         x = self.tok_emb(input_ids)
         if self.bigram is not None:
             x = x + self.bigram(input_ids)
+        if self.trigram is not None:
+            x = x + self.trigram(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x = self.smear(x)
         x0 = x
@@ -930,7 +970,7 @@ class GPT(nn.Module):
             ve = self._get_ve(i, input_ids, ve_cache)
             x, raw_v = self.blocks[i](x, x0,
                 self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
+                self._lora_out_w(i, n), self.mlp_up_bank[i], self.mlp_down_bank[i],
                 v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
@@ -942,7 +982,7 @@ class GPT(nn.Module):
             ve = self._get_ve(bi, input_ids, ve_cache)
             x, _ = self.blocks[bi](x, x0,
                 self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
+                self._lora_out_w(bi, n), self.mlp_up_bank[bi], self.mlp_down_bank[bi],
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
         x_flat = x.reshape(-1, x.size(-1))
@@ -978,6 +1018,8 @@ class GPT(nn.Module):
         x = self.tok_emb(input_ids)
         if self.bigram is not None:
             x = x + self.bigram(input_ids)
+        if self.trigram is not None:
+            x = x + self.trigram(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x = self.smear(x)
         x0 = x
@@ -988,7 +1030,7 @@ class GPT(nn.Module):
             ve = self._get_ve(i, input_ids, ve_cache)
             x, raw_v = self.blocks[i](x, x0,
                 self.qo_bank[i], self.kv_bank[i], self.kv_bank[n + i],
-                self.qo_bank[n + i], self.mlp_up_bank[i], self.mlp_down_bank[i],
+                self._lora_out_w(i, n), self.mlp_up_bank[i], self.mlp_down_bank[i],
                 v_embed=ve, v0=v0)
             if v0 is None and raw_v is not None:
                 v0 = raw_v
@@ -1000,7 +1042,7 @@ class GPT(nn.Module):
             ve = self._get_ve(bi, input_ids, ve_cache)
             x, _ = self.blocks[bi](x, x0,
                 self.qo_bank[bi], self.kv_bank[bi], self.kv_bank[n + bi],
-                self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
+                self._lora_out_w(bi, n), self.mlp_up_bank[bi], self.mlp_down_bank[bi],
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
         if self.tie_embeddings:
@@ -1118,25 +1160,77 @@ def eval_val_sliding_ttt(
     token_count = torch.zeros((), device=device, dtype=torch.float64)
     byte_count = torch.zeros((), device=device, dtype=torch.float64)
 
-    # Freeze first N blocks
-    frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
-    ttt_params = []
-    for name, p in base_model.named_parameters():
-        freeze = False
-        for bi in frozen_block_ids:
-            if f"blocks.{bi}." in name:
-                freeze = True
-                break
-        if freeze:
+    ttt_lora_rank = getattr(args, 'ttt_lora_rank', 0)
+    ttt_optimizer_type = getattr(args, 'ttt_optimizer', 'sgd')
+    ttt_perlayer = getattr(args, 'ttt_perlayer', False)
+
+    if ttt_lora_rank > 0:
+        # LoRA TTT: freeze all model params, train only low-rank output adapters
+        for p in base_model.parameters():
             p.requires_grad_(False)
+        n_layers = base_model.num_layers
+        model_dim = base_model.qo_bank.shape[-1]
+        dev = next(base_model.parameters()).device
+        lora_A_out = [torch.randn(ttt_lora_rank, model_dim, device=dev, dtype=torch.bfloat16) * (0.01 / ttt_lora_rank ** 0.5)
+                      for _ in range(n_layers)]
+        lora_B_out = [torch.zeros(model_dim, ttt_lora_rank, device=dev, dtype=torch.bfloat16)
+                      for _ in range(n_layers)]
+        for A in lora_A_out:
+            A.requires_grad_(True)
+        for B in lora_B_out:
+            B.requires_grad_(True)
+        base_model._ttt_lora_A_out = lora_A_out
+        base_model._ttt_lora_B_out = lora_B_out
+        ttt_params = lora_A_out + lora_B_out
+        log0(f"ttt_sliding:lora rank={ttt_lora_rank} params={sum(p.numel() for p in ttt_params)}")
+    else:
+        # Standard TTT: freeze first N blocks, train the rest
+        frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
+        ttt_params = []
+        for name, p in base_model.named_parameters():
+            freeze = any(f"blocks.{bi}." in name for bi in frozen_block_ids)
+            if freeze:
+                p.requires_grad_(False)
+            else:
+                p.requires_grad_(True)
+                ttt_params.append(p)
+        log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
+             f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
+
+    if ttt_perlayer and not ttt_lora_rank:
+        # Group params by type with different LRs: MLP 2x, attn 0.5x, others 1x
+        mlp_params, attn_params, other_params = [], [], []
+        for name, p in base_model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if 'mlp' in name or 'mlp_up_bank' in name or 'mlp_down_bank' in name:
+                mlp_params.append(p)
+            elif 'attn' in name or 'qo_bank' in name or 'kv_bank' in name:
+                attn_params.append(p)
+            else:
+                other_params.append(p)
+        param_groups = [
+            {'params': mlp_params, 'lr': args.ttt_lr * 2.0, 'base_lr': args.ttt_lr * 2.0},
+            {'params': attn_params, 'lr': args.ttt_lr * 0.5, 'base_lr': args.ttt_lr * 0.5},
+            {'params': other_params, 'lr': args.ttt_lr, 'base_lr': args.ttt_lr},
+        ]
+        param_groups = [pg for pg in param_groups if pg['params']]
+    elif ttt_perlayer and ttt_lora_rank:
+        # LoRA with per-layer: A at higher LR, B at standard LR
+        param_groups = [
+            {'params': lora_A_out, 'lr': args.ttt_lr * 2.0, 'base_lr': args.ttt_lr * 2.0},
+            {'params': lora_B_out, 'lr': args.ttt_lr, 'base_lr': args.ttt_lr},
+        ]
+    else:
+        param_groups = ttt_params
+
+    if ttt_optimizer_type == "adamw":
+        optimizer = torch.optim.AdamW(param_groups, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.0)
+    else:
+        if isinstance(param_groups, list) and isinstance(param_groups[0], dict):
+            optimizer = torch.optim.SGD(param_groups, lr=args.ttt_lr, momentum=args.ttt_momentum)
         else:
-            p.requires_grad_(True)
-            ttt_params.append(p)
-
-    log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
-         f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
-
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+            optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1283,10 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    base = pg.get('base_lr', args.ttt_lr)
+                    pg['lr'] = base * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1231,6 +1326,10 @@ def eval_val_sliding_ttt(
     val_loss = (loss_sum / token_count).item()
     val_bpb = val_loss / math.log(2.0) * (token_count.item() / byte_count.item())
 
+    # Clean up LoRA adapters if used
+    if ttt_lora_rank > 0:
+        base_model._ttt_lora_A_out = None
+        base_model._ttt_lora_B_out = None
     for p in base_model.parameters():
         p.requires_grad_(True)
     base_model.eval()
@@ -1481,6 +1580,7 @@ def main() -> None:
         mtp_loss_weight=args.mtp_loss_weight,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        trigram_vocab_size=args.trigram_vocab_size,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims,
         ln_scale=args.ln_scale,
@@ -1525,12 +1625,18 @@ def main() -> None:
     scalar_params.append(base_model.smear.gate)
     if base_model.bigram is not None:
         scalar_params.append(base_model.bigram.scale)
+    if base_model.trigram is not None:
+        scalar_params.append(base_model.trigram.scale)
     token_lr = args.tied_embed_lr if args.tie_embeddings else args.embed_lr
     tok_params = [{"params": [base_model.tok_emb.weight], "lr": token_lr, "base_lr": token_lr}]
     if base_model.bigram is not None:
         tok_params.append({"params": [base_model.bigram.embed.weight], "lr": token_lr, "base_lr": token_lr})
         if base_model.bigram.proj is not None:
             scalar_params.append(base_model.bigram.proj.weight)
+    if base_model.trigram is not None:
+        tok_params.append({"params": [base_model.trigram.embed.weight], "lr": token_lr, "base_lr": token_lr})
+        if base_model.trigram.proj is not None:
+            scalar_params.append(base_model.trigram.proj.weight)
     if base_model.ve_shared is not None:
         tok_params.append({"params": [base_model.ve_shared.embed.weight], "lr": token_lr, "base_lr": token_lr})
         if base_model.ve_shared.proj is not None:
@@ -1803,7 +1909,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
