@@ -109,6 +109,8 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_perlayer = bool(int(os.environ.get("TTT_PERLAYER", "1")))
+    slot_ttt = bool(int(os.environ.get("TTT_SLOT", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -663,6 +665,7 @@ class CausalSelfAttention(nn.Module):
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        v = F.rms_norm(v, (v.size(-1),))
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
@@ -871,6 +874,8 @@ class GPT(nn.Module):
             self.ve_layer_scales = nn.ParameterList()
         self.value_embeds = nn.ModuleList()  # keep empty for compat
         self.final_norm = RMSNorm()
+        # SLOT: learnable offset at final hidden state, only adapted during TTT (zero during training)
+        self.slot = nn.Parameter(torch.zeros(model_dim, dtype=torch.float32), requires_grad=False)
         self.lm_head = None if tie_embeddings else CastedLinear(model_dim, vocab_size, bias=False)
         if self.lm_head is not None:
             self.lm_head._zero_init = True
@@ -945,6 +950,7 @@ class GPT(nn.Module):
                 self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
+        x = x + self.slot.to(dtype=x.dtype)
         x_flat = x.reshape(-1, x.size(-1))
         targets = target_ids.reshape(-1)
         if self.tie_embeddings:
@@ -1003,6 +1009,7 @@ class GPT(nn.Module):
                 self.qo_bank[n + bi], self.mlp_up_bank[bi], self.mlp_down_bank[bi],
                 v_embed=ve, v0=v0)
         x = self.final_norm(x)
+        x = x + self.slot.to(dtype=x.dtype)
         if self.tie_embeddings:
             logits_proj = F.linear(x, self.tok_emb.weight)
         else:
@@ -1122,6 +1129,9 @@ def eval_val_sliding_ttt(
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
     ttt_params = []
     for name, p in base_model.named_parameters():
+        if name == "slot":
+            # slot is handled separately below
+            continue
         freeze = False
         for bi in frozen_block_ids:
             if f"blocks.{bi}." in name:
@@ -1133,10 +1143,40 @@ def eval_val_sliding_ttt(
             p.requires_grad_(True)
             ttt_params.append(p)
 
+    # SLOT parameter: enable for TTT if requested
+    if args.slot_ttt:
+        base_model.slot.data.zero_()
+        base_model.slot.requires_grad_(True)
+
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    # Build optimizer: AdamW with optional per-layer LR
+    if args.ttt_perlayer:
+        mlp_params, attn_params, other_params = [], [], []
+        for name, p in base_model.named_parameters():
+            if not p.requires_grad or name == "slot":
+                continue
+            if "mlp_up_bank" in name or "mlp_down_bank" in name:
+                mlp_params.append(p)
+            elif "qo_bank" in name or "kv_bank" in name:
+                attn_params.append(p)
+            else:
+                other_params.append(p)
+        param_groups: list[dict] = [
+            {"params": mlp_params, "lr": args.ttt_lr * 2.0, "init_lr": args.ttt_lr * 2.0},
+            {"params": attn_params, "lr": args.ttt_lr * 0.5, "init_lr": args.ttt_lr * 0.5},
+            {"params": other_params, "lr": args.ttt_lr, "init_lr": args.ttt_lr},
+        ]
+        if args.slot_ttt:
+            param_groups.append({"params": [base_model.slot], "lr": args.ttt_lr * 5.0, "init_lr": args.ttt_lr * 5.0})
+        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.99), weight_decay=0.0)
+    else:
+        opt_params = ttt_params + ([base_model.slot] if args.slot_ttt else [])
+        optimizer = torch.optim.AdamW(
+            [{"params": opt_params, "lr": args.ttt_lr, "init_lr": args.ttt_lr}],
+            betas=(0.9, 0.99), weight_decay=0.0
+        )
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1229,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('init_lr', args.ttt_lr) * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1803,7 +1843,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=int(os.environ.get("LZMA_PRESET", "9")))
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
