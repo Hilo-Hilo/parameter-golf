@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_perlayer = bool(int(os.environ.get("TTT_PERLAYER", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
+    trigram_vocab_size = int(os.environ.get("TRIGRAM_VOCAB_SIZE", "0"))
+    trigram_dim = int(os.environ.get("TRIGRAM_DIM", "128"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -693,7 +698,8 @@ class SmearGate(nn.Module):
         return (1 - g) * x + g * x_prev
 
 class BigramHashEmbedding(nn.Module):
-    def __init__(self, bigram_vocab_size: int, bigram_dim: int, model_dim: int):
+    def __init__(self, bigram_vocab_size: int, bigram_dim: int, model_dim: int,
+                 trigram_vocab_size: int = 0, trigram_dim: int = 128):
         super().__init__()
         self.bigram_vocab_size = bigram_vocab_size
         self.embed = nn.Embedding(bigram_vocab_size, bigram_dim)
@@ -702,6 +708,14 @@ class BigramHashEmbedding(nn.Module):
         if self.proj is not None:
             nn.init.zeros_(self.proj.weight)
         self.scale = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
+        self.trigram_vocab_size = trigram_vocab_size
+        if trigram_vocab_size > 0:
+            self.trigram_embed = nn.Embedding(trigram_vocab_size, trigram_dim)
+            nn.init.zeros_(self.trigram_embed.weight)
+            self.trigram_proj = CastedLinear(trigram_dim, model_dim, bias=False) if trigram_dim != model_dim else None
+            if self.trigram_proj is not None:
+                nn.init.zeros_(self.trigram_proj.weight)
+            self.trigram_scale = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
     def bigram_hash(self, tokens: Tensor) -> Tensor:
         t = tokens.to(torch.int32)
         mod = self.bigram_vocab_size - 1
@@ -709,11 +723,29 @@ class BigramHashEmbedding(nn.Module):
         out[..., 0] = mod
         out[..., 1:] = torch.bitwise_xor(36313 * t[..., 1:], 27191 * t[..., :-1]) % mod
         return out.long()
+    def trigram_hash(self, tokens: Tensor) -> Tensor:
+        t = tokens.to(torch.int32)
+        mod = self.trigram_vocab_size - 1
+        out = torch.empty_like(t)
+        out[..., 0] = mod
+        out[..., 1] = mod
+        h = torch.bitwise_xor(
+            torch.bitwise_xor(36313 * t[..., 2:], 27191 * t[..., 1:-1]),
+            17393 * t[..., :-2]
+        ) % mod
+        out[..., 2:] = h
+        return out.long()
     def forward(self, token_ids: Tensor) -> Tensor:
         h = self.embed(self.bigram_hash(token_ids))
         if self.proj is not None:
             h = self.proj(h)
-        return h * self.scale.to(dtype=h.dtype)
+        out = h * self.scale.to(dtype=h.dtype)
+        if self.trigram_vocab_size > 0:
+            ht = self.trigram_embed(self.trigram_hash(token_ids))
+            if self.trigram_proj is not None:
+                ht = self.trigram_proj(ht)
+            out = out + ht * self.trigram_scale.to(dtype=ht.dtype)
+        return out
 
 class ValueEmbedding(nn.Module):
     """Reinject token identity into attention values at specific layers.
@@ -800,6 +832,8 @@ class GPT(nn.Module):
         mtp_loss_weight: float = 0.1,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        trigram_vocab_size: int = 0,
+        trigram_dim: int = 128,
         xsa_last_n: int = 0,
         rope_dims: int = 0,
         ln_scale: bool = False,
@@ -821,7 +855,9 @@ class GPT(nn.Module):
         self.mtp_num_heads = mtp_num_heads
         self.mtp_loss_weight = mtp_loss_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
-        self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
+        self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim,
+                                           trigram_vocab_size=trigram_vocab_size,
+                                           trigram_dim=trigram_dim) if bigram_vocab_size > 0 else None
         self.smear = SmearGate(model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -1112,7 +1148,8 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:start chunks={num_chunks} chunk_tokens={ttt_chunk} "
          f"total_windows={len(window_starts)} stride={stride} "
          f"ttt_lr={args.ttt_lr} ttt_epochs={args.ttt_epochs} "
-         f"freeze_blocks={args.ttt_freeze_blocks}")
+         f"freeze_blocks={args.ttt_freeze_blocks} "
+         f"optimizer={args.ttt_optimizer} perlayer={args.ttt_perlayer}")
 
     loss_sum = torch.zeros((), device=device, dtype=torch.float64)
     token_count = torch.zeros((), device=device, dtype=torch.float64)
@@ -1136,7 +1173,32 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_perlayer:
+        mlp_params, attn_params, other_params = [], [], []
+        for name, p in base_model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if "mlp_up_bank" in name or "mlp_down_bank" in name:
+                mlp_params.append(p)
+            elif "qo_bank" in name or "kv_bank" in name:
+                attn_params.append(p)
+            else:
+                other_params.append(p)
+        param_groups = [
+            {"params": mlp_params, "lr": args.ttt_lr * 3.0},
+            {"params": attn_params, "lr": args.ttt_lr * 0.5},
+            {"params": other_params, "lr": args.ttt_lr},
+        ]
+    else:
+        param_groups = [{"params": ttt_params, "lr": args.ttt_lr}]
+
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(param_groups, lr=args.ttt_lr,
+                                      weight_decay=0.0, betas=(0.9, 0.95), eps=1e-8)
+    else:
+        optimizer = torch.optim.SGD(param_groups, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    for pg in optimizer.param_groups:
+        pg['initial_lr'] = pg['lr']
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1251,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_factor = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg['initial_lr'] * cos_factor
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1481,6 +1543,8 @@ def main() -> None:
         mtp_loss_weight=args.mtp_loss_weight,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        trigram_vocab_size=args.trigram_vocab_size,
+        trigram_dim=args.trigram_dim,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims,
         ln_scale=args.ln_scale,
@@ -1803,7 +1867,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1829,6 +1893,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap, rope_base=args.rope_base, qk_gain_init=args.qk_gain_init,
         mtp_num_heads=0, mtp_loss_weight=0.0,
         bigram_vocab_size=args.bigram_vocab_size, bigram_dim=args.bigram_dim,
+        trigram_vocab_size=args.trigram_vocab_size, trigram_dim=args.trigram_dim,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
