@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd").lower()
+    ttt_per_layer_lr = bool(int(os.environ.get("TTT_PER_LAYER_LR", "0")))
+    ttt_cosepoch = bool(int(os.environ.get("TTT_COSEPOCH", "0")))
+    vnorm_enabled = bool(int(os.environ.get("VNORM_ENABLED", "0")))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", "6"))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -620,8 +625,10 @@ class CausalSelfAttention(nn.Module):
         qk_gain_init: float,
         gated_attention: bool = False,
         value_residual: bool = False,
+        vnorm_enabled: bool = False,
     ):
         super().__init__()
+        self.vnorm_enabled = vnorm_enabled
         if dim % num_heads != 0:
             raise ValueError("model_dim must be divisible by num_heads")
         if num_heads % num_kv_heads != 0:
@@ -663,6 +670,8 @@ class CausalSelfAttention(nn.Module):
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        if self.vnorm_enabled:
+            v = F.rms_norm(v, (v.size(-1),))
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
@@ -754,12 +763,14 @@ class Block(nn.Module):
         dtg: bool = False,
         gated_attention: bool = False,
         value_residual: bool = False,
+        vnorm_enabled: bool = False,
     ):
         super().__init__()
         self.attn_norm = RMSNorm()
         self.mlp_norm = RMSNorm()
         self.attn = CausalSelfAttention(dim, num_heads, num_kv_heads, rope_base, qk_gain_init,
-                                        gated_attention=gated_attention, value_residual=value_residual)
+                                        gated_attention=gated_attention, value_residual=value_residual,
+                                        vnorm_enabled=vnorm_enabled)
         self.mlp = MLP(dim, mlp_mult)
         self.attn_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
@@ -809,6 +820,7 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        vnorm_enabled: bool = False,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -850,7 +862,8 @@ class GPT(nn.Module):
                     dtg=dtg,
                     gated_attention=gated_attention,
                     value_residual=value_residual,
-                )
+                    vnorm_enabled=vnorm_enabled,
+                )  # vnorm_enabled passed through Block → CausalSelfAttention
                 for i in range(num_layers)
             ]
         )
@@ -1121,6 +1134,8 @@ def eval_val_sliding_ttt(
     # Freeze first N blocks
     frozen_block_ids = set(range(min(args.ttt_freeze_blocks, len(base_model.blocks))))
     ttt_params = []
+    ttt_param_groups = []
+    num_blocks = len(base_model.blocks)
     for name, p in base_model.named_parameters():
         freeze = False
         for bi in frozen_block_ids:
@@ -1132,11 +1147,32 @@ def eval_val_sliding_ttt(
         else:
             p.requires_grad_(True)
             ttt_params.append(p)
+            if args.ttt_per_layer_lr:
+                # Scale LR by layer depth: deeper layers get higher LR (2x at last layer)
+                layer_lr_mult = 1.0
+                for bi in range(num_blocks):
+                    if f"blocks.{bi}." in name:
+                        layer_lr_mult = 1.0 + float(bi) / max(num_blocks - 1, 1)
+                        break
+                group_lr = args.ttt_lr * layer_lr_mult
+                ttt_param_groups.append({"params": [p], "lr": group_lr, "base_lr": group_lr})
 
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_per_layer_lr and ttt_param_groups:
+        param_groups_for_opt = ttt_param_groups
+    else:
+        param_groups_for_opt = ttt_params
+
+    if args.ttt_optimizer == "adamw":
+        optimizer = torch.optim.AdamW(
+            param_groups_for_opt, lr=args.ttt_lr, betas=(0.9, 0.95), weight_decay=0.01
+        )
+    else:
+        optimizer = torch.optim.SGD(
+            param_groups_for_opt, lr=args.ttt_lr, momentum=args.ttt_momentum
+        )
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1190,13 +1226,23 @@ def eval_val_sliding_ttt(
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
                 cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
-                for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                if not args.ttt_cosepoch:
+                    for pg in optimizer.param_groups:
+                        base_lr = pg.get('base_lr', args.ttt_lr)
+                        pg['lr'] = cos_lr * base_lr / args.ttt_lr
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
+                total_epoch_steps = max((my_chunk_seqs + args.ttt_batch_seqs - 1) // args.ttt_batch_seqs, 1)
                 for _ep in range(args.ttt_epochs):
-                    for bs in range(0, my_chunk_seqs, args.ttt_batch_seqs):
+                    for step_in_ep, bs in enumerate(range(0, my_chunk_seqs, args.ttt_batch_seqs)):
+                        if args.ttt_cosepoch:
+                            # Cosine decay within each epoch, multiplied by cross-chunk cosine
+                            ep_frac = step_in_ep / max(total_epoch_steps - 1, 1)
+                            ep_scale = 0.5 * (1.0 + math.cos(math.pi * ep_frac))
+                            for pg in optimizer.param_groups:
+                                base_lr = pg.get('base_lr', args.ttt_lr)
+                                pg['lr'] = cos_lr * base_lr / args.ttt_lr * ep_scale
                         be = min(bs + args.ttt_batch_seqs, my_chunk_seqs)
                         actual_bs = my_seq_s + bs
                         start_tok = chunk_start + actual_bs * seq_len
@@ -1490,6 +1536,7 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        vnorm_enabled=args.vnorm_enabled,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1803,7 +1850,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1833,6 +1880,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        vnorm_enabled=args.vnorm_enabled,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
