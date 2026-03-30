@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd").lower()
+    ttt_mlp_lr_mult = float(os.environ.get("TTT_MLP_LR_MULT", 1.0))
+    ttt_attn_lr_mult = float(os.environ.get("TTT_ATTN_LR_MULT", 1.0))
+    int5_mlp = bool(int(os.environ.get("INT5_MLP", "0")))
+    lzma_extreme = bool(int(os.environ.get("LZMA_EXTREME", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -733,10 +738,19 @@ class ValueEmbedding(nn.Module):
         return h * self.scale.to(dtype=h.dtype)
 
 class MLP(nn.Module):
+    _int5_qat_enabled: bool = False
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
+        if MLP._int5_qat_enabled and self.training:
+            with torch.no_grad():
+                for w in (up_w, down_w):
+                    if w.ndim == 2:
+                        row_max = w.float().abs().amax(dim=1)
+                        s = (row_max / 15.0).clamp_min(1.0 / 15.0)
+                        w_q = (torch.clamp(torch.round(w.float() / s[:, None]), -15, 15) * s[:, None]).to(w.dtype)
+                        w.data.copy_(w.data + (w_q - w.data).detach())
         x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
         return F.linear(x.square(), down_w.to(x.dtype))
 
@@ -1136,7 +1150,29 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        mlp_lr_mult = args.ttt_mlp_lr_mult
+        attn_lr_mult = args.ttt_attn_lr_mult
+        mlp_ps, attn_ps, other_ps = [], [], []
+        for name, p in base_model.named_parameters():
+            if not p.requires_grad:
+                continue
+            if ".mlp." in name or "mlp_up_bank" in name or "mlp_down_bank" in name:
+                mlp_ps.append(p)
+            elif ".attn." in name or "qo_bank" in name or "kv_bank" in name:
+                attn_ps.append(p)
+            else:
+                other_ps.append(p)
+        param_groups = []
+        if mlp_ps:
+            param_groups.append({"params": mlp_ps, "lr": args.ttt_lr * mlp_lr_mult, "base_lr": args.ttt_lr * mlp_lr_mult})
+        if attn_ps:
+            param_groups.append({"params": attn_ps, "lr": args.ttt_lr * attn_lr_mult, "base_lr": args.ttt_lr * attn_lr_mult})
+        if other_ps:
+            param_groups.append({"params": other_ps, "lr": args.ttt_lr, "base_lr": args.ttt_lr})
+        optimizer = torch.optim.AdamW(param_groups, betas=(0.9, 0.999), eps=1e-8, weight_decay=0.01)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1225,10 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    base = pg.get("base_lr", args.ttt_lr)
+                    pg["lr"] = base * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1338,7 +1375,7 @@ def _rebank_state_dict(sd: dict[str, Tensor], num_layers: int, template_sd: dict
             out[name] = tensor
     return out
 
-def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
+def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str], int5_cats: set[str] | None = None):
     num_layers_total = max(
         (int(k.split(".")[1]) for k in state_dict if k.startswith("blocks.")),
         default=0,
@@ -1357,7 +1394,12 @@ def mixed_quantize_int6(state_dict: dict[str, Tensor], int6_cats: set[str]):
             result[name] = t.float()
             meta[name] = "passthrough_ctrl"
             continue
-        if cat in int6_cats and t.ndim >= 1:
+        if int5_cats is not None and cat in int5_cats and t.ndim >= 1:
+            q, s = quantize_int6_per_row(t, clip_range=15)
+            result[name + ".q"] = q
+            result[name + ".scale"] = s
+            meta[name] = {"type": "int5"}
+        elif cat in int6_cats and t.ndim >= 1:
             q, s = quantize_int6_per_row(t)
             result[name + ".q"] = q
             result[name + ".scale"] = s
@@ -1388,6 +1430,7 @@ def dequantize_mixed_int6(result: dict[str, Tensor], meta: dict[str, object],
         else:
             out[name] = (q.float() * float(s.item())).to(orig_dtype)
     return out
+
 
 # --- Training ---
 
@@ -1799,11 +1842,13 @@ def main() -> None:
     # Unbank 3D tensors into individual 2D tensors for quantization
     sd_cpu = {k: v.detach().cpu() for k, v in export_sd.items()}
     unbanked_sd = _unbank_state_dict(sd_cpu, args.num_layers)
-    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"})
+    int5_cats = {"mlp"} if args.int5_mlp else None
+    quant_result, quant_meta = mixed_quantize_int6(unbanked_sd, {"mlp", "attn"}, int5_cats=int5_cats)
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    lzma_preset = 9 | lzma.PRESET_EXTREME if args.lzma_extreme else 6
+    quant_blob = lzma.compress(quant_raw, preset=lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
