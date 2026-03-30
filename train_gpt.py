@@ -109,6 +109,9 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    trigram_vocab_size = int(os.environ.get("TRIGRAM_VOCAB_SIZE", 0))
+    trigram_dim = int(os.environ.get("TRIGRAM_DIM", 64))
+    lzma_preset = int(os.environ.get("LZMA_PRESET", 6))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -732,12 +735,46 @@ class ValueEmbedding(nn.Module):
             h = self.proj(h)
         return h * self.scale.to(dtype=h.dtype)
 
+_LEAKY_SLOPE: float = float(os.environ.get("LEAKY_SLOPE", 0.5))
+
+class GatedTrigramEmbedding(nn.Module):
+    """Trigram hash embedding with per-element sigmoid gate (EngramLite-style).
+    Gate is initialized nearly closed (bias=-2.0) so the model learns when
+    trigram context is reliable."""
+    def __init__(self, trigram_vocab_size: int, dim: int, model_dim: int):
+        super().__init__()
+        self.trigram_vocab_size = trigram_vocab_size
+        self.embed = nn.Embedding(trigram_vocab_size, dim)
+        nn.init.zeros_(self.embed.weight)
+        self.gate_w = nn.Linear(dim, dim, bias=True)
+        nn.init.zeros_(self.gate_w.weight)
+        nn.init.constant_(self.gate_w.bias, -2.0)
+        self.proj = CastedLinear(dim, model_dim, bias=False) if dim != model_dim else None
+        if self.proj is not None:
+            nn.init.zeros_(self.proj.weight)
+        self.scale = nn.Parameter(torch.tensor(0.05, dtype=torch.float32))
+    def trigram_hash(self, tokens: Tensor) -> Tensor:
+        t = tokens.to(torch.int32)
+        mod = self.trigram_vocab_size - 1
+        out = torch.empty_like(t)
+        out[..., 0] = mod
+        out[..., 1] = mod
+        out[..., 2:] = (17239 * t[..., 2:] + 23497 * t[..., 1:-1] + 11003 * t[..., :-2]) % mod
+        return out.long()
+    def forward(self, token_ids: Tensor) -> Tensor:
+        h = self.embed(self.trigram_hash(token_ids))
+        gate = torch.sigmoid(self.gate_w(h))
+        h = h * gate
+        if self.proj is not None:
+            h = self.proj(h)
+        return h * self.scale.to(dtype=h.dtype)
+
 class MLP(nn.Module):
     def __init__(self, dim: int, mlp_mult: int):
         super().__init__()
         # No CastedLinear -- weights come from banks
     def forward(self, x: Tensor, up_w: Tensor, down_w: Tensor) -> Tensor:
-        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=0.5)
+        x = F.leaky_relu(F.linear(x, up_w.to(x.dtype)), negative_slope=_LEAKY_SLOPE)
         return F.linear(x.square(), down_w.to(x.dtype))
 
 class Block(nn.Module):
@@ -800,6 +837,8 @@ class GPT(nn.Module):
         mtp_loss_weight: float = 0.1,
         bigram_vocab_size: int = 0,
         bigram_dim: int = 128,
+        trigram_vocab_size: int = 0,
+        trigram_dim: int = 64,
         xsa_last_n: int = 0,
         rope_dims: int = 0,
         ln_scale: bool = False,
@@ -822,6 +861,7 @@ class GPT(nn.Module):
         self.mtp_loss_weight = mtp_loss_weight
         self.tok_emb = nn.Embedding(vocab_size, model_dim)
         self.bigram = BigramHashEmbedding(bigram_vocab_size, bigram_dim, model_dim) if bigram_vocab_size > 0 else None
+        self.trigram = GatedTrigramEmbedding(trigram_vocab_size, trigram_dim, model_dim) if trigram_vocab_size > 0 else None
         self.smear = SmearGate(model_dim)
         self.num_encoder_layers = num_layers // 2
         self.num_decoder_layers = num_layers - self.num_encoder_layers
@@ -920,6 +960,8 @@ class GPT(nn.Module):
         x = self.tok_emb(input_ids)
         if self.bigram is not None:
             x = x + self.bigram(input_ids)
+        if self.trigram is not None:
+            x = x + self.trigram(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x = self.smear(x)
         x0 = x
@@ -978,6 +1020,8 @@ class GPT(nn.Module):
         x = self.tok_emb(input_ids)
         if self.bigram is not None:
             x = x + self.bigram(input_ids)
+        if self.trigram is not None:
+            x = x + self.trigram(input_ids)
         x = F.rms_norm(x, (x.size(-1),))
         x = self.smear(x)
         x0 = x
@@ -1481,6 +1525,8 @@ def main() -> None:
         mtp_loss_weight=args.mtp_loss_weight,
         bigram_vocab_size=args.bigram_vocab_size,
         bigram_dim=args.bigram_dim,
+        trigram_vocab_size=args.trigram_vocab_size,
+        trigram_dim=args.trigram_dim,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims,
         ln_scale=args.ln_scale,
@@ -1531,6 +1577,12 @@ def main() -> None:
         tok_params.append({"params": [base_model.bigram.embed.weight], "lr": token_lr, "base_lr": token_lr})
         if base_model.bigram.proj is not None:
             scalar_params.append(base_model.bigram.proj.weight)
+    if base_model.trigram is not None:
+        tok_params.append({"params": [base_model.trigram.embed.weight], "lr": token_lr, "base_lr": token_lr})
+        scalar_params.extend([base_model.trigram.gate_w.weight, base_model.trigram.gate_w.bias])
+        if base_model.trigram.proj is not None:
+            scalar_params.append(base_model.trigram.proj.weight)
+        scalar_params.append(base_model.trigram.scale)
     if base_model.ve_shared is not None:
         tok_params.append({"params": [base_model.ve_shared.embed.weight], "lr": token_lr, "base_lr": token_lr})
         if base_model.ve_shared.proj is not None:
@@ -1803,7 +1855,7 @@ def main() -> None:
     quant_buf = io.BytesIO()
     torch.save({"w": quant_result, "m": quant_meta}, quant_buf)
     quant_raw = quant_buf.getvalue()
-    quant_blob = lzma.compress(quant_raw, preset=6)
+    quant_blob = lzma.compress(quant_raw, preset=args.lzma_preset)
     if master_process:
         with open("final_model.int6.ptz", "wb") as f:
             f.write(quant_blob)
@@ -1829,6 +1881,7 @@ def main() -> None:
         logit_softcap=args.logit_softcap, rope_base=args.rope_base, qk_gain_init=args.qk_gain_init,
         mtp_num_heads=0, mtp_loss_weight=0.0,
         bigram_vocab_size=args.bigram_vocab_size, bigram_dim=args.bigram_dim,
+        trigram_vocab_size=args.trigram_vocab_size, trigram_dim=args.trigram_dim,
         xsa_last_n=args.xsa_last_n,
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
