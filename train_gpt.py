@@ -109,6 +109,11 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_per_layer_lr = bool(int(os.environ.get("TTT_PER_LAYER_LR", "0")))
+    ttt_mlp_lr_scale = float(os.environ.get("TTT_MLP_LR_SCALE", "3.0"))
+    vnorm_enabled = bool(int(os.environ.get("VNORM_ENABLED", "0")))
+    skip_norm_enabled = bool(int(os.environ.get("SKIP_NORM_ENABLED", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -636,6 +641,7 @@ class CausalSelfAttention(nn.Module):
         self.rope_dims = 0  # set by GPT.__init__ for partial RoPE
         self.rotary = Rotary(self.head_dim, base=rope_base, train_seq_len=1024)
         self.use_xsa = False  # set by GPT.__init__ for deep layers only
+        self.vnorm_enabled = False  # set by GPT.__init__
         # Gated attention and value residual (non-banked small params)
         self.gated_attention = gated_attention
         if gated_attention:
@@ -663,6 +669,8 @@ class CausalSelfAttention(nn.Module):
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        if self.vnorm_enabled:
+            v = F.rms_norm(v, (v.size(-1),))
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
@@ -771,9 +779,11 @@ class Block(nn.Module):
             nn.init.constant_(self.dtg_gate.bias, 2.0)
         else:
             self.dtg_gate = None
+        self.skip_norm_enabled = False  # set by GPT.__init__
     def forward(self, x: Tensor, x0: Tensor, q_w: Tensor, k_w: Tensor, v_w: Tensor, out_w: Tensor, up_w: Tensor, down_w: Tensor, v_embed: Tensor | None = None, v0: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
         mix = self.resid_mix.to(dtype=x.dtype)
-        x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+        x0_mix = F.rms_norm(x0, (x0.size(-1),)) if self.skip_norm_enabled else x0
+        x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0_mix
         attn_out, raw_v = self.attn(self.attn_norm(x_in) * self.ln_scale_factor, q_w, k_w, v_w, out_w, v_embed=v_embed, v0=v0)
         x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
         x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
@@ -809,6 +819,8 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        vnorm_enabled: bool = False,
+        skip_norm_enabled: bool = False,
     ):
         super().__init__()
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
@@ -882,6 +894,12 @@ class GPT(nn.Module):
         if xsa_last_n > 0:
             for i in range(max(0, num_layers - xsa_last_n), num_layers):
                 self.blocks[i].attn.use_xsa = True
+        if vnorm_enabled:
+            for block in self.blocks:
+                block.attn.vnorm_enabled = True
+        if skip_norm_enabled:
+            for block in self.blocks:
+                block.skip_norm_enabled = True
         self._init_weights()
     def _init_weights(self) -> None:
         if self.tie_embeddings:
@@ -1136,7 +1154,28 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer.lower() == "adamw":
+        if args.ttt_per_layer_lr:
+            mlp_ttt, other_ttt = [], []
+            for name, p in base_model.named_parameters():
+                if p.requires_grad:
+                    if ".mlp." in name:
+                        mlp_ttt.append(p)
+                    else:
+                        other_ttt.append(p)
+            ttt_pg = [
+                {"params": mlp_ttt, "lr": args.ttt_lr * args.ttt_mlp_lr_scale, "base_lr": args.ttt_lr * args.ttt_mlp_lr_scale},
+                {"params": other_ttt, "lr": args.ttt_lr, "base_lr": args.ttt_lr},
+            ]
+            optimizer = torch.optim.AdamW(ttt_pg, weight_decay=0.0)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0)
+            for pg in optimizer.param_groups:
+                pg["base_lr"] = pg["lr"]
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+        for pg in optimizer.param_groups:
+            pg["base_lr"] = pg["lr"]
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1228,9 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_factor = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    pg['lr'] = pg.get('base_lr', args.ttt_lr) * cos_factor
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1490,6 +1529,8 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        vnorm_enabled=args.vnorm_enabled,
+        skip_norm_enabled=args.skip_norm_enabled,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1833,6 +1874,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        vnorm_enabled=args.vnorm_enabled, skip_norm_enabled=args.skip_norm_enabled,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
