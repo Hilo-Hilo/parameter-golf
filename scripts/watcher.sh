@@ -151,6 +151,30 @@ process_job() {
     update_gpu_job_status "$JOB_ID" "collecting"
   fi
 
+  # Re-anchor TTL from lease_expires_at now that the job is dispatched.
+  # The plan-only TTL (enqueue_time + 4h) can expire before training starts
+  # if the job sits in the queue for hours. Use the actual lease expiry instead.
+  local lease_ttl_epoch
+  lease_ttl_epoch="$(python3 - "$LEASE_FILE" <<'PY'
+import json, pathlib, sys
+from datetime import datetime, timezone
+lf = pathlib.Path(sys.argv[1])
+if lf.exists():
+    try:
+        d = json.loads(lf.read_text())
+        exp = d.get("lease_expires_at", "")
+        if exp:
+            print(int(datetime.strptime(exp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).timestamp()))
+            raise SystemExit(0)
+    except SystemExit:
+        raise
+    except Exception:
+        pass
+print(0)
+PY
+  )"
+  [ "${lease_ttl_epoch:-0}" -gt 0 ] && TTL_EPOCH="$lease_ttl_epoch"
+
   local SSH_TARGET SSH_PORT
   SSH_TARGET="$(jq -r '.ssh.host // empty' "$LEASE_FILE")"
   SSH_PORT="$(jq -r '.ssh.port // "22"' "$LEASE_FILE")"

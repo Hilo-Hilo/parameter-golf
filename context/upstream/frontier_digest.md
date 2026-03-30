@@ -1,5 +1,5 @@
 # Frontier Digest
-Generated at Wed 25 Mar 2026 20:28:13 UTC
+Generated at Mon Mar 30 14:19:04 UTC 2026
 
 ## Official Leaderboard (from README)
 ## Leaderboard

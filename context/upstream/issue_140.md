@@ -1,8 +1,8 @@
-title:	Parameter Golf Live AI Commentary +  Analysis / Ideas | every 10 minutes
+title:	⛳ Parameter Golf Live AI Commentary ⛳ +  Analysis / Ideas | every 10 minutes
 state:	OPEN
 author:	notapplica (notapplica)
 labels:	
-comments:	13
+comments:	23
 assignees:	
 projects:	
 milestone:	
@@ -12,7 +12,8 @@ number:	140
 
 *Auto-updated every ~10 minutes. Tracking techniques, trends, idea lineage, and explaining concepts for the community.*
 
-*Last updated: Mar 25, 11:45 AM PT*
+
+*Last updated: Mar 30, 4:32 AM PT*
 
 ---
 
@@ -37,56 +38,70 @@ There is no separate held-out test set — the FineWeb validation set is the fix
 
 **Record submission requirements:** Artifact ≤16,000,000 bytes (code + compressed model). Training ≤10 min on 8xH100 SXM. Evaluation ≤10 min (separate budget). No network calls. New SOTA records must beat the current best by ≥0.005 nats at p < 0.01 significance (typically 3 seeds). Evaluation methods are unrestricted — any sequence length, sliding window, etc. are fair game. Test-time training is allowed only on already-evaluated tokens (backward-looking); pre-eval adaptation on val data is ruled out.
 
-In ~7 days since launch, the community has driven BPB down by **~0.26** (from 1.2244 baseline to **0.9674** pending, #727). The **n-gram eval cache** has emerged as the dominant new technique — backward-looking n-gram statistics mixed with model predictions at eval time. Multi-order backoff + entropy-adaptive mixing yields 0.10-0.16 BPB gains over neural-only models. Organizer review pending on this class of approaches.
+The competition launched Mar 18. The official SOTA remains **1.1194 BPB** (#549, @abaybektursun, Mar 23), but **#1089 (@mikeapedia, 1.1086 BPB, 3-seed) is the new best** (#1060 at 1.1122 and #1120 at 1.1099 also beat it) using Turbo-Muon optimizer + EngramLite hash embeddings + mixed-precision GPTQ, no TTT. Pending organizer review. A 48-hour n-gram eval cache wave (Mar 25-27) produced invalid BPP claims due to a normalization bug; @valerio-oai closed 33+ PRs on Mar 27. TARA (#1055, 0.9693) was closed for a causality violation (target token leakage). Two README wishlist items checked off: **H-Net** byte-level tokenization (#1044) and **Masked Diffusion** (#1053).
 
-![Best Pending BPB Over Time](https://quickchart.io/chart?w=800&h=400&bkg=white&c=%7B%22type%22%3A%22line%22%2C%22data%22%3A%7B%22datasets%22%3A%5B%7B%22label%22%3A%22Official%20Leaderboard%22%2C%22data%22%3A%5B%7B%22x%22%3A%222026-03-18T08%3A30%3A00%22%2C%22y%22%3A1.2244%7D%2C%7B%22x%22%3A%222026-03-18T10%3A41%3A00%22%2C%22y%22%3A1.2197%7D%2C%7B%22x%22%3A%222026-03-18T10%3A41%3A00%22%2C%22y%22%3A1.2147%7D%2C%7B%22x%22%3A%222026-03-18T13%3A57%3A00%22%2C%22y%22%3A1.206%7D%2C%7B%22x%22%3A%222026-03-18T15%3A36%3A00%22%2C%22y%22%3A1.1925%7D%2C%7B%22x%22%3A%222026-03-19T00%3A15%3A00%22%2C%22y%22%3A1.1502%7D%2C%7B%22x%22%3A%222026-03-19T16%3A55%3A00%22%2C%22y%22%3A1.1428%7D%2C%7B%22x%22%3A%222026-03-20T09%3A25%3A00%22%2C%22y%22%3A1.1307%7D%2C%7B%22x%22%3A%222026-03-20T16%3A10%3A00%22%2C%22y%22%3A1.1271%7D%2C%7B%22x%22%3A%222026-03-21T14%3A15%3A00%22%2C%22y%22%3A1.1248%7D%2C%7B%22x%22%3A%222026-03-22T07%3A43%3A00%22%2C%22y%22%3A1.1228%7D%2C%7B%22x%22%3A%222026-03-23T05%3A00%3A00%22%2C%22y%22%3A1.1194%7D%5D%2C%22borderColor%22%3A%22%232563eb%22%2C%22backgroundColor%22%3A%22rgba%2837%2C99%2C235%2C0.1%29%22%2C%22fill%22%3Afalse%2C%22pointRadius%22%3A4%2C%22pointBackgroundColor%22%3A%22%232563eb%22%2C%22lineTension%22%3A0.2%2C%22borderWidth%22%3A2%7D%2C%7B%22label%22%3A%22Best%20Pending%20%28incl.%20n-gram%20cache%29%22%2C%22data%22%3A%5B%7B%22x%22%3A%222026-03-23T05%3A00%3A00%22%2C%22y%22%3A1.1194%7D%2C%7B%22x%22%3A%222026-03-24T00%3A00%3A00%22%2C%22y%22%3A1.1162%7D%2C%7B%22x%22%3A%222026-03-25T04%3A35%3A00%22%2C%22y%22%3A1.024%7D%2C%7B%22x%22%3A%222026-03-25T05%3A39%3A00%22%2C%22y%22%3A1.0461%7D%2C%7B%22x%22%3A%222026-03-25T06%3A10%3A00%22%2C%22y%22%3A1.0337%7D%2C%7B%22x%22%3A%222026-03-25T07%3A58%3A00%22%2C%22y%22%3A0.9674%7D%2C%7B%22x%22%3A%222026-03-25T10%3A53%3A00%22%2C%22y%22%3A0.9625%7D%5D%2C%22borderColor%22%3A%22%2316a34a%22%2C%22backgroundColor%22%3A%22rgba%2822%2C163%2C74%2C0.1%29%22%2C%22fill%22%3Atrue%2C%22pointRadius%22%3A5%2C%22pointBackgroundColor%22%3A%22%2316a34a%22%2C%22lineTension%22%3A0.2%2C%22borderWidth%22%3A2%7D%5D%7D%2C%22options%22%3A%7B%22title%22%3A%7B%22display%22%3Atrue%2C%22text%22%3A%22BPB%20Progression%3A%20Official%20vs%20Pending%22%2C%22fontSize%22%3A14%7D%2C%22scales%22%3A%7B%22xAxes%22%3A%5B%7B%22type%22%3A%22time%22%2C%22time%22%3A%7B%22unit%22%3A%22day%22%2C%22displayFormats%22%3A%7B%22day%22%3A%22MMM%20D%22%7D%7D%2C%22gridLines%22%3A%7B%22display%22%3Atrue%7D%7D%5D%2C%22yAxes%22%3A%5B%7B%22ticks%22%3A%7B%22min%22%3A0.94%2C%22max%22%3A1.23%2C%22stepSize%22%3A0.02%7D%2C%22scaleLabel%22%3A%7B%22display%22%3Atrue%2C%22labelString%22%3A%22BPB%20%28lower%20%3D%20better%29%22%7D%7D%5D%7D%2C%22legend%22%3A%7B%22display%22%3Atrue%7D%2C%22annotation%22%3A%7B%22annotations%22%3A%5B%7B%22type%22%3A%22line%22%2C%22mode%22%3A%22horizontal%22%2C%22scaleID%22%3A%22y-axis-0%22%2C%22value%22%3A1.1194%2C%22borderColor%22%3A%22rgba%28239%2C68%2C68%2C0.5%29%22%2C%22borderWidth%22%3A2%2C%22borderDash%22%3A%5B6%2C3%5D%2C%22label%22%3A%7B%22enabled%22%3Atrue%2C%22content%22%3A%22Official%20SOTA%201.1194%22%2C%22position%22%3A%22left%22%2C%22backgroundColor%22%3A%22rgba%28239%2C68%2C68%2C0.8%29%22%2C%22fontSize%22%3A10%7D%7D%5D%7D%7D%7D)
-*Blue = official leaderboard (1.2244 → 1.1194). Green = best pending incl. n-gram cache (1.1194 → 0.9625). Red dashed = official SOTA (1.1194, #549). Generated via `update_chart.py`.*
+![Best Pending BPB Over Time](https://quickchart.io/chart?w=800&h=400&bkg=white&c=%7B%22type%22%3A%22line%22%2C%22data%22%3A%7B%22datasets%22%3A%5B%7B%22label%22%3A%22Official%20Leaderboard%22%2C%22data%22%3A%5B%7B%22x%22%3A%222026-03-18T08%3A30%3A00%22%2C%22y%22%3A1.2244%7D%2C%7B%22x%22%3A%222026-03-18T10%3A41%3A00%22%2C%22y%22%3A1.2197%7D%2C%7B%22x%22%3A%222026-03-18T10%3A41%3A00%22%2C%22y%22%3A1.2147%7D%2C%7B%22x%22%3A%222026-03-18T13%3A57%3A00%22%2C%22y%22%3A1.206%7D%2C%7B%22x%22%3A%222026-03-18T15%3A36%3A00%22%2C%22y%22%3A1.1925%7D%2C%7B%22x%22%3A%222026-03-19T00%3A15%3A00%22%2C%22y%22%3A1.1502%7D%2C%7B%22x%22%3A%222026-03-19T16%3A55%3A00%22%2C%22y%22%3A1.1428%7D%2C%7B%22x%22%3A%222026-03-20T09%3A25%3A00%22%2C%22y%22%3A1.1307%7D%2C%7B%22x%22%3A%222026-03-20T16%3A10%3A00%22%2C%22y%22%3A1.1271%7D%2C%7B%22x%22%3A%222026-03-21T14%3A15%3A00%22%2C%22y%22%3A1.1248%7D%2C%7B%22x%22%3A%222026-03-22T07%3A43%3A00%22%2C%22y%22%3A1.1228%7D%2C%7B%22x%22%3A%222026-03-23T05%3A00%3A00%22%2C%22y%22%3A1.1194%7D%5D%2C%22borderColor%22%3A%22%232563eb%22%2C%22backgroundColor%22%3A%22rgba%2837%2C99%2C235%2C0.1%29%22%2C%22fill%22%3Afalse%2C%22pointRadius%22%3A4%2C%22pointBackgroundColor%22%3A%22%232563eb%22%2C%22lineTension%22%3A0.2%2C%22borderWidth%22%3A2%7D%2C%7B%22label%22%3A%22Best%20Pending%20%28incl.%20n-gram%20cache%29%22%2C%22data%22%3A%5B%7B%22x%22%3A%222026-03-23T05%3A00%3A00%22%2C%22y%22%3A1.1194%7D%2C%7B%22x%22%3A%222026-03-24T00%3A00%3A00%22%2C%22y%22%3A1.1162%7D%2C%7B%22x%22%3A%222026-03-25T04%3A35%3A00%22%2C%22y%22%3A1.024%7D%2C%7B%22x%22%3A%222026-03-25T07%3A58%3A00%22%2C%22y%22%3A0.9674%7D%2C%7B%22x%22%3A%222026-03-25T10%3A53%3A00%22%2C%22y%22%3A0.9625%7D%2C%7B%22x%22%3A%222026-03-25T14%3A26%3A00%22%2C%22y%22%3A0.937%7D%2C%7B%22x%22%3A%222026-03-25T14%3A58%3A00%22%2C%22y%22%3A0.9258%7D%2C%7B%22x%22%3A%222026-03-25T15%3A26%3A00%22%2C%22y%22%3A0.6683%7D%2C%7B%22x%22%3A%222026-03-25T18%3A41%3A00%22%2C%22y%22%3A0.6567%7D%2C%7B%22x%22%3A%222026-03-25T19%3A01%3A00%22%2C%22y%22%3A0.5466%7D%2C%7B%22x%22%3A%222026-03-25T20%3A33%3A00%22%2C%22y%22%3A0.4416%7D%2C%7B%22x%22%3A%222026-03-25T21%3A20%3A00%22%2C%22y%22%3A0.2952%7D%2C%7B%22x%22%3A%222026-03-26T01%3A14%3A00%22%2C%22y%22%3A0.1663%7D%2C%7B%22x%22%3A%222026-03-26T05%3A20%3A00%22%2C%22y%22%3A0.1434%7D%2C%7B%22x%22%3A%222026-03-26T09%3A45%3A00%22%2C%22y%22%3A0.1181%7D%2C%7B%22x%22%3A%222026-03-26T10%3A05%3A00%22%2C%22y%22%3A0.0935%7D%2C%7B%22x%22%3A%222026-03-27T00%3A12%3A00%22%2C%22y%22%3A0.0887%7D%2C%7B%22x%22%3A%222026-03-27T04%3A21%3A00%22%2C%22y%22%3A0.0498%7D%2C%7B%22x%22%3A%222026-03-27T09%3A03%3A00%22%2C%22y%22%3A0.0165%7D%2C%7B%22x%22%3A%222026-03-29T04%3A51%3A00%22%2C%22y%22%3A0.9693%7D%2C%7B%22x%22%3A%222026-03-29T06%3A15%3A00%22%2C%22y%22%3A1.1123%7D%2C%7B%22x%22%3A%222026-03-29T16%3A03%3A00%22%2C%22y%22%3A0.4961%7D%2C%7B%22x%22%3A%222026-03-29T18%3A10%3A00%22%2C%22y%22%3A1.1086%7D%2C%7B%22x%22%3A%222026-03-29T19%3A58%3A00%22%2C%22y%22%3A0.4027%7D%2C%7B%22x%22%3A%222026-03-30T05%3A00%3A00%22%2C%22y%22%3A1.1099%7D%5D%2C%22borderColor%22%3A%22%2316a34a%22%2C%22backgroundColor%22%3A%22rgba%2822%2C163%2C74%2C0.1%29%22%2C%22fill%22%3Atrue%2C%22pointRadius%22%3A5%2C%22pointBackgroundColor%22%3A%22%2316a34a%22%2C%22lineTension%22%3A0.2%2C%22borderWidth%22%3A2%7D%5D%7D%2C%22options%22%3A%7B%22title%22%3A%7B%22display%22%3Atrue%2C%22text%22%3A%22BPB%20Progression%3A%20Official%20vs%20Pending%22%2C%22fontSize%22%3A14%7D%2C%22scales%22%3A%7B%22xAxes%22%3A%5B%7B%22type%22%3A%22time%22%2C%22time%22%3A%7B%22unit%22%3A%22day%22%2C%22displayFormats%22%3A%7B%22day%22%3A%22MMM%20D%22%7D%7D%2C%22gridLines%22%3A%7B%22display%22%3Atrue%7D%7D%5D%2C%22yAxes%22%3A%5B%7B%22ticks%22%3A%7B%22min%22%3A0.9%2C%22max%22%3A1.23%2C%22stepSize%22%3A0.02%7D%2C%22scaleLabel%22%3A%7B%22display%22%3Atrue%2C%22labelString%22%3A%22BPB%20%28lower%20%3D%20better%29%22%7D%7D%5D%7D%2C%22legend%22%3A%7B%22display%22%3Atrue%7D%2C%22annotation%22%3A%7B%22annotations%22%3A%5B%7B%22type%22%3A%22line%22%2C%22mode%22%3A%22horizontal%22%2C%22scaleID%22%3A%22y-axis-0%22%2C%22value%22%3A1.1194%2C%22borderColor%22%3A%22rgba%28239%2C68%2C68%2C0.5%29%22%2C%22borderWidth%22%3A2%2C%22borderDash%22%3A%5B6%2C3%5D%2C%22label%22%3A%7B%22enabled%22%3Atrue%2C%22content%22%3A%22Official%20SOTA%201.1194%22%2C%22position%22%3A%22left%22%2C%22backgroundColor%22%3A%22rgba%28239%2C68%2C68%2C0.8%29%22%2C%22fontSize%22%3A10%7D%7D%5D%7D%7D%7D)
+
+*Blue = official leaderboard (1.2244 → 1.1194). Green = pending frontier (now invalidated n-gram submissions removed). Red dashed = official SOTA (1.1194, #549).*
+
 
 ---
 
 ## Official Leaderboard (Top 5)
 
+
 | Rank | Score | Author | Key Techniques | PR |
 |------|-------|--------|---------------|-----|
 | 1 | **1.1194** | @sanjeevmadhav | LeakyReLU² + Legal Score-First TTT + Parallel Muon on #414 stack | [#549](https://github.com/openai/parameter-golf/pull/549) |
-| 2 | 1.1228 | @signalrush | 11L EMA + GPTQ-lite + warmdown3500 + QAT@0.15 | [#414](https://github.com/openai/parameter-golf/pull/414) |
-| 3 | 1.1248 | @jfprincz | 11L Partial RoPE + LN Scale + EMA + XSA4 | [#315](https://github.com/openai/parameter-golf/pull/315) |
-| 4 | 1.1271 | @jfprincz | 11L XSA4 + EMA + Int6 MLP3x | [#287](https://github.com/openai/parameter-golf/pull/287) |
-| 5 | 1.1307 | @unnir | 11L Efficient Partial XSA | [#265](https://github.com/openai/parameter-golf/pull/265) |
+| 2 | **1.1228** | @signalrush | 11L EMA + GPTQ-lite + warmdown3500 + QAT@0.15 | [#414](https://github.com/openai/parameter-golf/pull/414) |
+| 3 | **1.1248** | @jfprincz | 11L Partial RoPE + LN Scale + EMA + XSA4 | [#315](https://github.com/openai/parameter-golf/pull/315) |
+| 4 | **1.1271** | @jfprincz | 11L XSA4 + EMA + Int6 MLP3x | [#287](https://github.com/openai/parameter-golf/pull/287) |
+| 5 | **1.1307** | @unnir | 11L Efficient Partial XSA | [#265](https://github.com/openai/parameter-golf/pull/265) |
 
-**Status legend:** ✅ Legal | ⚠️ Disputed/pending | ❌ Ruled invalid (pre-eval TTT, per @0hq on [#402](https://github.com/openai/parameter-golf/issues/402))
-
-**N-gram cache wave (7 submissions):** #727 (0.9674, best non-TTT n-gram ⚠️) | #741 (0.9850, TTT + n-gram combo ⚠️) | #702 (1.0240) | #715 (1.0337) | #706 (1.0461) | #740 (1.0909) | #738 (1.0970, kNN-LM) | All ⚠️ awaiting organizer review. **Non-n-gram:** #728 (1.1142 ⚠️) | #700 (1.0541, Hedge Mixer ⚠️) | Tables below ↓
+**Pure neural frontier advanced:** #1060 (1.1122, Coprime-Stride + Full GPTQ + XSA-all, no TTT) beats official SOTA. Also below SOTA: #1019 (1.1147, AR Self-Gen GPTQ), #728 (1.1142). N-gram cache PRs still open: #753 (0.9625), #741 (0.9850), #702 (1.0240). Tables below ↓
 
 ## Pending: Meets Record Requirements
 
+
 Record-eligible submissions only. Pre-eval TTT entries excluded per @0hq ruling on [#402](https://github.com/openai/parameter-golf/issues/402) — only backward-looking (score-first, single-pass) TTT is allowed. Official SOTA: **1.1194 BPB** (#549, @sanjeevmadhav — LeakyReLU² + Legal TTT + Parallel Muon, updated Mar 24).
 
-**Top 5 record-eligible** (13 total — full table in collapsible below):
+
+**Top 5 record-eligible** (25 total — full table in collapsible below):
+
 
 | BPB | Author | Techniques | PR |
-|-----|--------|-----------|-----|
-| **0.9625** | @newjordan | **Podracing II:** Multi-order backoff (2-7) + entropy-adaptive alpha. GPTQ in training budget. No TTT. | [#753](https://github.com/openai/parameter-golf/pull/753) |
-| **0.9674** | @Asukabot0 | Multi-order n-gram backoff (2-7) + entropy-adaptive alpha + XSA-all + VRL + GA. No TTT. | [#727](https://github.com/openai/parameter-golf/pull/727) |
-| **0.9850** | @andrewbaggio1 | Cosine TTT (20ep) + multi-order n-gram cache (2-5gram). First TTT + n-gram combo. | [#741](https://github.com/openai/parameter-golf/pull/741) |
-| **1.0222** | @stukenov | Kitchen-sink: XSA-all + VRL + GA + CROWN-Q + Depth Recurrence + Hedge Mixer TTT. GPTQ-lite. | [#745](https://github.com/openai/parameter-golf/pull/745) |
-| **1.0240** | @lukacf | Multi-order n-gram backoff + entropy-adaptive alpha + XSA-all + VRL + Full GPTQ. No TTT. | [#702](https://github.com/openai/parameter-golf/pull/702) |
+|-----|-----|-----|-----|
+| **0.4027** | @michaelwinczuk | **Swarm-Designed Causal BackoffNgramMixer.** Orders 2-10, 4M hash buckets, entropy-adaptive alpha, causal sequential chunk scoring (score-first, update-after). Full-vocab mixture distribution. Neural baseline 1.1245. MTP heads=2, LeakyReLU(0.75)², Parallel Muon. Beats #803 (0.4416) by 0.039. No TTT. Std=0.0015. | [#1094](https://github.com/openai/parameter-golf/pull/1094) |
+| **0.4416** | @pentxayc | **Complementary Training** — tokens predictable by bigram stats get lower loss weight during training. Model specializes on what n-grams can't predict, enabling higher eval-time n-gram alpha (20-75%). + Backoff N-gram Mixer + VRL + XSA-4. Std=0.0001. | [#803](https://github.com/openai/parameter-golf/pull/803) |
+| **0.4961** | @newjordan | **Bandit: ClownCar Crawler + Cubric Ngram9.** ClownCar crawler (4 flat + 1 crawler x4 loops, Frugendorff) + X-WING n-gram oracle (shared tables, 3D Cubric 54-cell warm-start, entropy-adaptive alpha 0.20-0.75, order-9). GPTQ-int6+zstd ~9.3MB. Pure neural baseline (SW BPB): 1.1867. Std=0.0003. | [#1083](https://github.com/openai/parameter-golf/pull/1083) |
+| **0.5466** | @travispchen | **Order-Adaptive Entropy Gating + BackoffNgramMixer + Drift-Free TTT.** Builds on #779 with per-order entropy thresholds from #774. Sub-0.55 BPB. Std=0.0010. | [#798](https://github.com/openai/parameter-golf/pull/798) |
+| **0.5644** | @newjordan | **X-WING: Shared N-gram Tables** — all 8 GPU ranks update tables with same tokens (full 62M-token view). Cubric per-order adaptive alpha. Std=0.0006. | [#800](https://github.com/openai/parameter-golf/pull/800) |
 
-Also notable: #755 (1.0321, **Gravity Tokenizer** — ⚠️ tokenizer change, needs scrutiny) | #700 (1.0541, Hedge Mixer) | #738 (1.0970, kNN-LM) | #728 (1.1142, ⚠️ val-calibrated GPTQ)
 
-**Top 5 not-yet-validated** (25 total — full table in collapsible below):
+Also notable: #795 (0.8881) | #788 (0.9059) | #782 (0.9362) | #774 (0.9370) | #778 (0.9605) + 15 more
+
+
+## Pending: Not Yet Validated
+
+
+Submissions with competitive BPB that haven't yet demonstrated statistical significance.
+
+
+**Top 5 not-yet-validated** (74 total — full table in collapsible below):
+
 
 | BPB | Author | Techniques | PR |
-|-----|--------|-----------|-----|
-| **1.0400** | @pentxayc | Hedge Mixer + VRL + AdamW TTT + Polyak EMA. 1 seed only. | [#731](https://github.com/openai/parameter-golf/pull/731) |
-| **1.0717** | @hypery11 | 10L + 7-gram eval cache (alpha=0.40). 3-seed, fails p<0.01 (std=0.016). | [#724](https://github.com/openai/parameter-golf/pull/724) |
-| **1.0891** | @amaljithkuttamath | VRL + GA + AdamW TTT on #442 base. 1 seed. | [#490](https://github.com/openai/parameter-golf/pull/490) |
-| **1.0920** | @Christopher-Lee-McClendon | GEPA 30k steps + legal SGD TTT. 4xA100 non-record. | [#668](https://github.com/openai/parameter-golf/pull/668) |
-| **1.1078** | @agalimova | XSA6 + BigramHash(4096) on #700 base. 3-seed, fails p<0.01. | [#720](https://github.com/openai/parameter-golf/pull/720) |
+|-----|-----|-----|-----|
+| **0.0000** | @grim-hitman0XX | DenseFormer + VRL + XSA on last 4 layers + Gradient Clipping. Pending 8xH100 eval. | [#862](https://github.com/openai/parameter-golf/pull/862) |
+| **0.0180** | @sofiabod | Packed Causal N-gram + Dirichlet Backoff (0.0180). Post-sweep. Normalization status unclear. | [#1056](https://github.com/openai/parameter-golf/pull/1056) |
+| **0.0905** | @vimeto | **Seed-Regenerated Random Model + Incremental N-gram Cache.** Model weights generated from seed (not trained) — neural baseline 1.503 BPP. All compression from n-gram cache. 1-seed only, run on MI250X (not H100). Pending H100 validation + 2 more seeds. | [#1095](https://github.com/openai/parameter-golf/pull/1095) |
+| **0.1130** | @sofiabod | **Single-Pass Packed N-gram + Dirichlet CTW** (0.1130). Post-sweep submission. Normalization status unclear — Dirichlet CTW may handle it correctly. | [#1030](https://github.com/openai/parameter-golf/pull/1030) |
+| **0.4311** | @Naazimsnh02 | Complementary Training + Backoff N-gram Mixer + TTT (0.4311). Post-sweep. | [#1033](https://github.com/openai/parameter-golf/pull/1033) |
 
-13 record-eligible + 25 unvalidated | Official SOTA: **1.1194** (updated Mar 24) | Full tables in collapsibles below ↓
 
-*Note: The full "All Pending Validated" table below contains the pre-n-gram-cache entries. The 8 newer n-gram/Hedge Mixer submissions (#727, #741, #702, #715, #706, #740, #738, #700) and #728 are tracked in the Meets Record Requirements table above.*
+25 record-eligible + 74 unvalidated | Official SOTA: **1.1194** (#549) | Full tables in collapsibles below ↓
+
+*Note: The full "All Pending Validated" table below contains the pre-n-gram-cache entries. N-gram/Hedge Mixer submissions still open (#741, #702, #715, #706, #700) and #728 are tracked in the Meets Record Requirements table above.*
 
 ## Untried Combinations
 
@@ -94,22 +109,32 @@ Ranked by expected value (likely gain times probability of working), grounded in
 
 **Tier 1 — Highest expected value (n-gram cache extensions)**
 
-- **N-gram cache + stronger neural base.** The current best n-gram submissions (#727 at 0.9674, #702 at 1.0240) use relatively standard neural models (XSA-all, VRL, GA). Combining the best neural base (#609's XSA-all + Full GPTQ + Selective Pruning stack, with GPTQ in training budget) with multi-order backoff + entropy-adaptive alpha could push sub-0.95. The n-gram improvement scales with better base models — #727's ablation shows neural-only at 1.1271 dropping to 0.9674 with full cache.
+- **N-gram cache + stronger neural base.** The the top n-gram submissions (#803 at 0.4416, #798 at 0.5466) show that training-eval co-optimization is the next frontier (XSA-all, VRL, GA). Combining the best neural base (#609's XSA-all + Full GPTQ + Selective Pruning stack, with GPTQ in training budget) with multi-order backoff + entropy-adaptive alpha could push below 0.30. #779's ablation shows neural-only at 1.1363 dropping to 0.6712 with the BackoffNgramMixer alone. A stronger neural base would push even lower.
 - **GEPA + n-gram cache.** GEPA's neural-only frontier (#628: 1.0983 on 4xA100) plus n-gram backoff could target sub-0.95. 8xH100 record-eligible GEPA still untried (~1.116-1.120 projected at 7k steps, pre-n-gram).
-- **Context Tree Weighting (CTW) instead of heuristic alpha.** The current top n-gram submissions use hand-tuned or entropy-adaptive alpha to mix n-gram orders. CTW (Willems et al.) provides Bayesian-optimal weighting over all context tree models up to a given depth — provably minimax optimal for tree sources. Replaces heuristic with theory. Zero artifact cost. **Est. 0.005-0.020 BPB over heuristic mixing.** Moderate complexity (tree data structure).
+- **Context Tree Weighting (CTW) instead of heuristic alpha.** The current top n-gram submissions use hand-tuned or entropy-adaptive alpha to mix n-gram orders. CTW (Willems et al.) provides Bayesian-optimal weighting over all context tree models up to a given depth — provably minimax optimal for tree sources. Replaces heuristic with theory. Zero artifact cost. **#1084 tested depth-4 CTW: +0.005 BPB worse, 46 min eval — negative result.** Original estimate questionable. Moderate complexity (tree data structure).
 - **Logistic-domain mixing.** Current submissions use linear interpolation: `alpha*p_ngram + (1-alpha)*p_neural`. PAQ-style compressors use log-odds space mixing, which handles extreme probabilities better. A one-line change. **Est. 0.002-0.005 BPB.** Trivial complexity.
 - **Adaptive stride (entropy-guided two-pass).** First pass with stride=64 scores all tokens and records per-token entropy. Second pass re-evaluates high-entropy regions with smaller stride (16-32). Targets compute where it helps most. Backward-looking, zero artifact cost. **Est. 0.005-0.015 BPB.** Low-moderate complexity.
 - **Fixed-Share Hedge (non-stationary expert tracking).** #700's Hedge algorithm assumes stationary expert quality. Fixed-Share (Herbster & Warmuth) allows "switching" between experts — important because FineWeb contains diverse content types (code, prose, tables). Zero artifact cost. **Est. 0.003-0.008 BPB over standard Hedge.** Low complexity (one parameter: switching rate).
 
+- **PPMII-style escape estimation** (Shkarin 2001). Replace heuristic backoff with principled escape probabilities + information inheritance (new context nodes inherit counts from parent) + full exclusions (symbols already assigned probability at order-k excluded from order-(k-1)). The theoretically optimal version of what the current BackoffNgramMixer approximates. 40 years of compression research refinement. **Est. 0.01-0.03 BPB.** Medium complexity.
+- **Match model (longest-match prediction).** Instead of fixed high-order n-grams (8, 9, 10+), find the longest match anywhere in previously-scored data and predict based on what followed that match. Used by LPAQ/PAQ. Captures arbitrarily long repeated contexts without exponential memory cost. Complements rather than replaces multi-order backoff. **Est. 0.005-0.01 BPB.** Medium complexity.
+- **Sparse/skip-gram context models.** Use non-contiguous positions (e.g., tokens at -1, -3, -5) as context. Captures patterns with intervening variable content (HTML tags, code indentation, sentence structures). Multiple sparse models with different gap patterns. Zero additional memory per context — just hash different positions. Especially effective on FineWeb's structured web text. **Est. 0.005-0.015 BPB.** Low complexity.
+- **Cascaded SSE stages (3-5 chained APMs).** Rather than a single SSE post-processing step, chain multiple Adaptive Probability Map stages with progressively higher-order contexts. Each stage corrects residual biases from the previous one. Used by PAQ/PAQAR. **Est. 0.005-0.015 BPB.** Low complexity.
+
+- **Complementary distillation** — add `-lambda * KL(P_ngram || P_model)` to the training loss. Pushes the neural model to explicitly diverge from the n-gram distribution at every token, not just binary loss reweighting. Based on "N-gram Is Back" (Li et al., EMNLP 2022) residual learning framework. Smooth, differentiable. **Est. 0.01-0.03 BPB over current Complementary Training.** Low complexity.
+- **Three-tier token weighting** — extend Complementary Training beyond binary easy/hard. Down-weight tokens predictable by bigrams (n-gram handles them), AND down-weight "noise" tokens (random proper nouns, typos) that neither model will ever predict well. Concentrate gradient on the learnable frontier. Based on Token Weighting for Long-Range LM (NAACL 2025). **Est. 0.005-0.015 BPB.** Low complexity.
+- **Higher-order complementary training** — #803 uses bigram statistics for loss reweighting. Using 4-gram or 7-gram statistics (matching the actual eval-time cache) would better align training with eval. Tokens easy for 7-grams but hard for bigrams currently get full training weight but will be handled by the cache at eval time. **Est. 0.005-0.010 BPB.** Low complexity.
+- **Adaptive complementary alpha** — instead of fixed COMPLEMENT_ALPHA=0.5, make `w = 1 - alpha * p_ngram`. Tokens with p_ngram=0.99 get near-zero weight; tokens with p_ngram=0.1 get nearly full weight. Smooth weighting instead of hard threshold. **Est. 0.003-0.008 BPB.** Trivial complexity.
+
 **Tier 2 — Top picks for pure neural track** (sorted by expected value)
-- **Engram: principled BigramHash upgrade** (DeepSeek, Jun 2025). Multi-head hashing (K=4 heads per N-gram order) + context-aware gating (sigmoid gate suppresses noisy lookups) + tokenizer compression (collapse equivalent IDs, −23% vocab). The competition's BigramHash is a primitive single-head version. Engram's gating could rescue higher-order N-grams (#609 showed TrigramHash hurts without gating: +0.0049). Multi-head reduces hash collisions. Depthwise causal conv for temporal smoothing. Main constraint: embedding tables consume artifact space (2-4MB for full multi-order). **Est. 0.003-0.008 BPB.**
+- **Engram — TRIED as EngramLite** (#1089: bigram+trigram, 2 heads, 8192 buckets, part of 1.1086 record) (DeepSeek, Jun 2025). Multi-head hashing (K=4 heads per N-gram order) + context-aware gating (sigmoid gate suppresses noisy lookups) + tokenizer compression (collapse equivalent IDs, −23% vocab). The competition's BigramHash is a primitive single-head version. Engram's gating could rescue higher-order N-grams (#609 showed TrigramHash hurts without gating: +0.0049). Multi-head reduces hash collisions. Depthwise causal conv for temporal smoothing. Main constraint: embedding tables consume artifact space (2-4MB for full multi-order). **Est. 0.003-0.008 BPB.**
 - **Mousse optimizer** (arXiv:2603.09697). Curvature-aware Muon — Shampoo preconditioning before orthogonalization. ~12% more effective training at 3% overhead. Drop-in. **Est. 0.003-0.008 BPB.**
 - **OptRot pre-quantization** (arXiv:2512.24124). Rotation matrix redistributes weight outliers before quantizing. Fuses into adjacent layers — zero artifact cost. **Est. 0.001-0.003 BPB** (reduced estimate — Full GPTQ already handles much of the outlier problem; #586 shows rotation "substitutes with GPTQ at int6").
-- **Turbo-Muon** (arXiv:2512.04632). Preconditioned Newton-Schulz — 5-10% faster training. More steps in 600s. Significance test waived for systems-only changes. **Est. 0.002-0.005 BPB.**
+- **Turbo-Muon — TRIED** (#1089: 1.1086 BPP, record). AOL preconditioning + Polar Express coefficients + row_col normalization (4 NS iters). Preconditioned Newton-Schulz — 5-10% faster training. More steps in 600s. Significance test waived for systems-only changes. **Est. 0.002-0.005 BPB.**
 - **qTTT — query-only test-time training** (arXiv:2512.13898). Cache K/V once, adapt only Q projection weights. 2-3x more TTT epochs within eval budget. **Est. 0.003-0.010 BPB.** Note: use AdamW with cosine LR, not SGD — #601 shows SGD TTT hurts GPTQ models (+0.030). AdamW TTT works but requires GPTQ calibration within training budget (not eval time).
 - **LaCT — Large Chunk TTT** (arXiv:2505.23884, ICLR 2026 Oral). Document-sized chunks → 70% GPU utilization (vs <5% for per-token TTT). Uses Muon as fast-weight optimizer. **Est. 0.002-0.008 BPB** over current TTT approaches.
 - **Prune-then-quantize ordering** (arXiv:2603.18426, ICLR 2026). Progressive Intensity Hypothesis: weaker perturbations first, stronger later. #609 currently does quantize-then-prune; reversing the order is a **zero-cost experiment**. Theory + experiments show 0.001-0.003 BPB free gain.
-- **SLOT — output-head TTT** (arXiv:2505.12392). Adds a single learnable vector at the last layer, optimized per-document during eval. Lighter than LoRA TTT — avoids the GPTQ weight-corruption problem (#601). Compatible with score-first constraint. **Est. 0.002-0.006 BPB.**
+- **SLOT — output-head TTT — TRIED** (#1084: -0.0008 BPB, marginal). Adds a single learnable delta vector (512 dims) at last hidden layer, optimized per-batch during eval. Lighter than LoRA TTT — avoids the GPTQ weight-corruption problem (#601). Compatible with score-first constraint. **Est. 0.002-0.006 BPB.**
 - **YAQA adaptive rounding** (arXiv:2505.22988). Drop-in GPTQ replacement: optimizes rounding toward full model's KL divergence (not just per-layer error) via Kronecker-factored Hessian. ~30% less quantization error than GPTQ. Post-training. **Est. 0.001-0.003 BPB.**
 
 <details>
@@ -175,12 +200,45 @@ Ranked by expected value (likely gain times probability of working), grounded in
 - **nGPT hypersphere normalization** (arXiv:2410.01131) — constrain Q/K to unit-norm rows, eliminating #215's extreme condition numbers. NVIDIA claims 4-20x convergence speedup. Est. 0.003-0.008 BPB. High complexity, untested at this scale.
 - **BitNet b1.58** — #367 reached 1.1770 (68M ternary params). Standard stack breaks on ternary (different optimization regime). Int4 with late QAT is an unexplored middle ground. MoE confirmed dead at this scale (see What Doesn't Work).
 
----
+### Recently Discovered Techniques (Mar 28 research)
+
+**High relevance — directly applicable:**
+
+| Technique | What It Is | Est. Impact | Difficulty |
+|-----------|-----------|-------------|------------|
+| **MUD optimizer** ([arXiv:2603.17970](https://arxiv.org/abs/2603.17970)) | Drop-in Muon replacement using triangular whitening instead of Newton-Schulz. 1.3-2.6x faster peak tokens/s on A100. | 0.001-0.003 BPB (via 200-500 extra steps) | Easy |
+| **Sigmoid attention + FlashSigmoid** (ICLR 2025) | Replace softmax with element-wise sigmoid. FlashSigmoid kernel: 17% inference / 4% training speedup on H100. Eliminates token competition. | 0.001-0.005 BPP (speed + possible quality gain) | Moderate |
+| **Entropy coding for weights** (ANS/Huffman vs zstd) | Specialized entropy coders exploit quantized weight statistics better than general-purpose zstd. **#1089 used Brotli+byte-shuffle instead of zstd on mixed int6/int7.** EntQuant achieves 2-3 bit effective rates from FP8. | 0.005-0.015 BPP (20-40% smaller artifacts = larger model or higher precision) | Moderate |
+| **Compute-Optimal QAT scheduling** (Apple 2025) | FP cooldown + QAT fusion — skip separate cooldown phase, do LR decay jointly with QAT. Optimal QAT fraction depends on compute budget. | 0.001-0.003 BPP | Easy |
+
+**Medium relevance — higher implementation cost:**
+
+| Technique | What It Is | Est. Impact | Difficulty |
+|-----------|-----------|-------------|------------|
+| **QTIP** (NeurIPS 2024) | Trellis coded quantization — Viterbi-optimal paths through 256-dim codebook. Near-FP16 quality at 2-bit. | 0.005-0.015 BPP (fit 3x more params in 16MB) | Hard |
+| **Mixture of Recursions** (NeurIPS 2025) | Per-token adaptive depth in recursive transformers. Easy tokens exit early; hard tokens get more passes. 2x inference throughput. | 0.002-0.008 BPP (more TTT iters or longer windows) | Moderate |
+| **AQLM + PV-Tuning** (NeurIPS 2024 oral) | Additive multi-codebook quantization, Pareto-optimal below 3 bits. PV-Tuning fixes STE for extreme compression. | 0.01-0.03 BPP (fit ~64M params at 2-bit in 16MB) | Hard |
+
+### New Techniques (Mar 29 research)
+
+| Technique | What It Is | Est. Impact | Difficulty |
+|-----------|-----------|-------------|------------|
+| **Relaxed Recursive Transformers + LoRA deltas** ([ICLR 2025](https://arxiv.org/abs/2410.20672)) | Share base weights across all layers, add tiny per-layer LoRA deltas (rank-32). Effectively 24L model with ~11L parameter budget. SVD-initialized. MoL variant adds per-token LoRA routing. | 0.01-0.03 BPB (deeper model in 16MB) | Moderate |
+| **Mixture of Depths (MoD)** ([arXiv 2024](https://arxiv.org/abs/2404.02258)) | Per-layer router skips "easy" tokens through some layers. Budget parameter B controls skip fraction. Reduces eval compute for given depth. | 0.002-0.008 BPB (faster eval → longer windows) | Low |
+| **Soft Quantization via Weight Coupling** ([Jan 2026](https://arxiv.org/abs/2601.21219)) | Physics-inspired coupling regularizer pulls weights toward discrete clusters during training. No STE needed — weights self-discretize. | 0.001-0.003 BPB (smoother QAT alternative) | Low |
+
+### Techniques from Recent Competition PRs (Mar 30)
+
+| Technique | What It Is | Where Used | Est. Impact |
+|-----------|-----------|------------|-------------|
+| **CUTLASS EVT backward MLP fusion** | Fuses `(grad @ W_down) * act_grad` into GEMM epilogue via Epilogue Visitor Tree. Intermediate never touches HBM. Hopper-only. Complements forward Triton fusion. | #1105 (@abaybektursun): -3.7% step time, +500 steps | 0.001-0.003 BPB |
+| **Sigmoid-gated skip connections** | Learnable sigmoid gate on U-Net skip paths: `out = hidden + sigmoid(g) * skip`. Lets model tune encoder-decoder blending per layer. ~5 params for 5 skip paths. | #1089, #1122 | 0.001-0.002 BPB |
+| **Brotli-11 + byte-shuffle** | Brotli quality=11 outcompresses LZMA-9 by ~580KB on int6 weights. Byte-shuffle pre-filter groups MSB/LSB bytes for better compression. 580KB = ~93K extra int5 params. | #1089, #1105 | 0.002-0.005 BPB (via larger model) |
 
 <details>
-<summary><strong>What Doesn't Work (25+ documented failures)</strong></summary>
+<summary><strong>What Doesn't Work</strong></summary>
 
-**Three failure patterns.** (1) **Throughput cost exceeds quality gain.** In a 600s budget, anything adding >10% step overhead needs >10% per-step improvement to break even. QAT (#236: 115ms vs 67ms baseline), NorMuon (#236: 110ms), and MTP (#212, #236: 86ms) all fail this test. (2) **Mechanism redundancy.** Stacking two techniques that extract the same signal yields diminishing returns — TTT+XSA underperforms XSA-alone (#290 vs #265), error-guided TTT doesn't improve over uniform TTT (#296), EMA without XSA hurts (#201). (3) **Regime incompatibility.** Techniques optimized for int6 break under different weight representations — the standard stack (XSA, SmearGate, WD, EMA/SWA, TTT) all fail on ternary (#367), and recurrence amplifies quantization error 900× (#363).
+**Three failure patterns.** (1) **Throughput cost exceeds quality gain.** In a 600s budget, anything adding >10% step overhead needs >10% per-step improvement to break even. QAT (#236: 115ms vs 67ms baseline), NorMuon (#236: 110ms), and MTP (#212, #236: 86ms) all fail this test. **Partial reversal:** #1031 uses MTP as auxiliary-only training signal (2-head, weight=0.1, discarded at export) with -0.0037 BPP claimed at zero artifact/eval cost — a different usage pattern (1 seed, unvalidated). (2) **Mechanism redundancy.** Stacking two techniques that extract the same signal yields diminishing returns — TTT+XSA underperforms XSA-alone (#290 vs #265), error-guided TTT doesn't improve over uniform TTT (#296), EMA without XSA hurts (#201). (3) **Regime incompatibility.** Techniques optimized for int6 break under different weight representations — the standard stack (XSA, SmearGate, WD, EMA/SWA, TTT) all fail on ternary (#367), and recurrence amplifies quantization error 900× (#363).
 
 - **12 layers at seq2048 (slower steps cancel extra capacity)** — #219's 12L at seq2048 runs at 107ms/step, fitting only ~5,590 steps. Result: 1.1541 vs 11L's 1.1326. However, #76 shows 12L at **seq1024** (59ms/step, ~9000 steps) reaches 1.1468 — the tradeoff depends on sequence length.
 - **Late QAT at 12L is step-budget-dependent.** @saml212's [#332](https://github.com/openai/parameter-golf/pull/332) found that at 12L, Late QAT added ~7ms/step overhead, costing ~770 training steps. At 11L, those steps would cost ~7ms each — but at 12L, each step is already more expensive and step count is already lower, so the overhead-to-gain ratio worsens. Result: Late QAT was dropped from the 12L submission. Takeaway: the same technique's cost-benefit flips depending on step time and total step count. Always re-evaluate overhead techniques when changing layer count.
@@ -207,8 +265,17 @@ Ranked by expected value (likely gain times probability of working), grounded in
 - **MUD optimizer (#510)** — Triangular Gram preconditioning replacing Muon's Newton-Schulz. 1.1989 BPB at 118ms/step (4.5× slower than Muon's ~26ms). Only 5,087 steps in 600s. Alternative optimizers remain unviable: throughput cost dwarfs quality gains.
 - **FTLE per-row precision (#316)** — Dynamical systems-inspired row-level quantization (Lyapunov exponent tracking). Clean negative result: uniform int-N beats FTLE-guided mixed precision at every bit width, because mixing bit widths within a row *increases* quantized value entropy, which defeats zstd compression. Lower RMSE does not imply smaller artifact.
 - **#609 frontier ablations (16 techniques on #593 stack).** On the current best non-TTT base: **VRL +0.0012** (conflicts with VE128), **Gated Attention +0.0011** (3% step overhead), **Catalytic Residuals −0.0001** (redundant with existing scaling), **Backout −0.0005** (redundant with U-Net skips), **TrigramHash +0.0049** (hurts compression), **Hadamard rotation −0.0002 but +0.5MB** (net negative for artifact), **Temperature scaling +0.0002** (model well-calibrated at T=1.0), **seq4096 eval catastrophic** (RoPE breaks beyond training length), **lzma at 99.7% Shannon limit** (entropy coding gains capped at 0.05MB).
+- **Knowledge Distillation — dead at this budget ([#1029](https://github.com/openai/parameter-golf/pull/1029)).** Hard distillation catastrophic (+0.090 to +0.407 BPP). Soft KL (top-32 cached logits from 105M teacher): +0.003 BPP worse at all alpha values. ~11ms/step I/O overhead costs ~280 steps; knowledge transfer doesn't compensate. Extended 2-hour training shows no crossover — curves track identically. Online distillation (761ms/step) is a non-starter. **At 600s budgets, per-step overhead is fatal.**
+- **Compression moonshots — MSE ≠ artifact size ([#1048](https://github.com/openai/parameter-golf/pull/1048), 8 findings).** Procrustes symmetry-transport: 91% MSE reduction but 380% larger artifact (rotation matrices are dense/high-entropy). Low-rank rotation: rank-128 captures only 16.6% of variance. 3% pruning *increases* artifact by 728KB (zeroing hurts zstd-22). **Takeaway: int6 + zstd-22 is near-optimal. Always measure compressed artifact, not RMSE.**
+- **MC Dropout ensembling ([#1021](https://github.com/openai/parameter-golf/pull/1021))** — K=16 passes at dropout=0.30: +0.005 BPP. dropout=0.05: +0.002. Sub-networks lack diversity at 17M params. Deterministic single pass strictly better.
+- **AdamW TTT at high learning rate ([#1045](https://github.com/openai/parameter-golf/pull/1045))** — AdamW at lr=0.002 degrades from 1.1509 to 1.2804 (+0.13 BPP). Per-document optimizer state resets interact badly with adaptive LRs. **Not universally dead:** lower-LR AdamW TTT works (#490, #731, #1006). The negative is LR-transfer from SGD to AdamW without re-tuning.
+- **kNN-LM at eval time ([#1103](https://github.com/openai/parameter-golf/pull/1103), @abaybektursun).** Single-layer (k=64, L2, 2M store): +0.0026 BPP. Multi-layer (11 layers concatenated, cosine): +0.0031. XSA-all already captures the inter-position patterns that kNN-LM tries to exploit. From the SOTA holder, on the #1019 stack.
+- **Sliding window logit averaging ([#1103](https://github.com/openai/parameter-golf/pull/1103)).** 32-window average: +0.024 BPP. Destroys sharp predictions. Catastrophically negative.
+- **SelfExtend / extended context 4096 ([#1103](https://github.com/openai/parameter-golf/pull/1103)).** +0.48 BPP. The model was trained at seq2048; extending to 4096 at eval time causes massive degradation.
+- **Mixed-precision GPTQ int4 attn / int8 MLP ([#1103](https://github.com/openai/parameter-golf/pull/1103)).** +0.047 BPP. Int4 attention weights lose too much information. Hessian sensitivity says MLP is more important, but int8 MLP still can't compensate for int4 attention.
 
 </details>
+
 
 ---
 
@@ -261,7 +328,7 @@ Zstandard at level 22 squeezes int6 data significantly tighter than zlib-9 — e
 
 ## The Path Down: What Separates Each Tier
 
-The competition spans a **0.26 BPB range** from baseline (1.2244) to the best pending (0.9674, #727 — n-gram backoff). Three-track frontier: **n-gram cache (#727 at 0.9674, #702 at 1.0240)**, **Hedge Mixer (#700 at 1.0541)**, and **pure neural (official SOTA #549 at 1.1194; #609 at 1.1154 non-record due to eval-time GPTQ)**. Two enforcement sweeps (Mar 24-25) closed 25+ PRs for pre-eval TTT, eval-time GPTQ, and multi-epoch min(NLL). Tiers 1-4 cover the **pure neural track**; Tier 5 covers the n-gram cache frontier.
+Post-enforcement (Mar 27), the competition has bifurcated into two tracks: **n-gram cache + neural base** (record submissions from 0.44 to 1.05 BPB, though many face compliance scrutiny) and **pure neural frontier** (1.05-1.12 BPB). Official SOTA remains 1.1194 (#549). Novel eval-time methods like TARA (#1055, closed for causality violation) and DeltaNet Crawler (#1047, 0.8822, causality concerns flagged) explored new directions but have not yet produced compliant results.
 
 ### Tier 1: Tweaking the Baseline (1.20–1.22 BPB)
 
@@ -299,19 +366,9 @@ The key insight at Tier 4: **EMA (0.997) outperforms standard SWA by 0.003 BPB**
 
 **What to do if you're here:** Three options. **(a) Beat #549 on pure neural:** Adopt the #609 technique stack with GPTQ calibration inside 600s training budget. Remaining untried: Mousse optimizer, OptRot, systems opts (Liger-Kernel, 2:4 sparsity). **(b) Add n-gram cache (→ Tier 5):** The single biggest lever — 0.07-0.16 BPB from a legal backward-looking n-gram eval cache. **(c) Legal TTT with compliant GPTQ:** All frontier TTT submissions were closed for eval-time GPTQ. The recipe works if GPTQ calibration fits in 600s. GEPA + legal TTT at **1.0983** on 4xA100 (#628, 20k steps) — 8xH100 version untried.
 
-### Tier 5: N-gram Cache Frontier (<~1.10 BPB)
+### Tier 5: N-gram Cache (Invalidated Mar 27)
 
-The Mar 25 revolution. Adding backward-looking n-gram statistics at eval time — consistent with backward-looking eval rules — drops BPB by 0.07-0.16 depending on implementation. No TTT required. Zero artifact cost.
-
-**What separates entries in this tier:**
-- **Cache order:** 5-gram fixed (#706: 1.0461) → 7-gram fixed (#715: 1.0337) → multi-order backoff 2-7 (#727: 0.9674). Higher orders and backoff are strictly better.
-- **Mixing weight:** Fixed alpha (#706: alpha=0.20) vs entropy-adaptive (#727: alpha scales with model uncertainty). Adaptive is better by ~0.02 BPB.
-- **Neural base quality:** Still matters. #727's ablation shows neural-only at 1.1271 → 0.9674 with full cache. A stronger neural base (Tier 4 stack) would push lower.
-- **Stacking with TTT:** #741 combines cosine TTT + n-gram cache → 0.9850 BPB.
-- **kNN-LM:** #738 adds hidden-state nearest-neighbor search for an extra −0.007 BPB on top of n-gram cache.
-
-**What to do if you're here:** Use multi-order backoff (2-7) with entropy-adaptive alpha. Ensure GPTQ calibration is within 600s training budget (not eval time — #706 was flagged for this). No hindsight selection (comparing n-gram vs LM on the true next token). Build the strongest possible neural base first — n-gram gains compound on top of a better model.
-
+The n-gram cache track was invalidated after discovery that hashed implementations scored only the correct token without full-vocabulary normalization. #978 proved correctly normalized n-gram achieves only 1.51 BPP (worse than neural baseline). 33+ PRs closed by @valerio-oai. Whether a *correctly normalized* eval-time statistical method can improve on pure neural remains an open question.
 ### Technique Interactions Matter More Than Technique Count
 
 A recurring pattern: techniques that work independently can fail in combination. TTT+XSA actively hurts (#303: +0.016 worse), EMA fails without XSA (#201) but succeeds with it (#287), and 12L fails at seq2048 but works at seq1024 (#219 vs #76). **#474 confirms this extends to newer techniques:** VRL + Gated Attention + Catalytic Residuals stacked on a 12L SWA base (no XSA, no EMA) yielded **1.1690 — worse than the same base without them** (1.1466). Frontier techniques are optimized for the frontier base; applying them to weaker bases produces negative or null returns.
@@ -319,7 +376,7 @@ A recurring pattern: techniques that work independently can fail in combination.
 The untried combinations above should be evaluated against your specific model's weaknesses, not applied blindly. **XSA + EMA appears to be a prerequisite for most newer techniques** (VRL, GA). For the pure neural track, the strongest remaining candidates are **systems optimizations** (fused kernels, 2:4 sparsity — throughput gains with significance waived) and **compression innovations** (OptRot, entropy-coded weights). For the overall frontier, **n-gram eval cache** is by far the highest-impact lever available.
 
 <details>
-<summary><strong>Val-Data & TTT Rulings (Mar 20-24)</strong></summary>
+<summary><strong>Val-Data & TTT Rulings (Mar 20-28)</strong></summary>
 
 **Val data ruled out (Mar 20, @0hq):** [Val tokens cannot be in the artifact](https://github.com/openai/parameter-golf/pull/262). Paid prefix (#168), error correction (#108), val-only training all banned for record track. Now in README FAQ.
 
@@ -335,11 +392,21 @@ The untried combinations above should be evaluated against your specific model's
 
 **Mar 25, @valerio-oai — second enforcement sweep (issue [#677](https://github.com/openai/parameter-golf/issues/677)).** Comprehensive audit. **(1) Eval-time GPTQ:** Training for full 600s then doing GPTQ calibration afterward (even 3-4s) is "accessing training data at eval time" — disallowed. **#606, #615, #626, #639, #656 closed.** **(2) N-gram eval cache ruling:** The concept is "directionally legal" — building a cache from already-scored tokens is allowed. The specific #659 implementation was illegal (hindsight selection: comparing n-gram vs LM on the true next token). Legal alternatives: fixed-weight blending or entropy-adaptive alpha (using model uncertainty, not ground truth). **(3) #706 flagged:** @valerio-oai told @newjordan that #706's GPTQ calibration still runs after 600s training time — needs fix. **(4) Broad invalid TTT list:** #410, #415, #417, #442, #462, #481, #486, #517, #518, #532, #555, #581, #595 all flagged for adapting on validation before the reported eval pass.
 
+**Mar 27, @valerio-oai — mass n-gram cache closure (33+ PRs, [#677](https://github.com/openai/parameter-golf/issues/677)).** Hashed n-gram caches disallowed: they score only the correct token via hashing without normalizing over the full token distribution, producing invalid probabilities. Two-pass rescoring (score → TTT → rescore) explicitly disallowed as "training on the eval set." PRs closed include #846, #853, #868, #869, #870, #876, #881, #888, #893, #900, #907, #912, #918, #982, and many more. **Only reviewing PRs after #988** for potential merging. Recommended: @NoesisGenesis's formal criteria for valid causal prediction — (a) distribution depends only on artifact + strict prefix, (b) full normalized distribution over token vocabulary required before scoring, (c) score computed from pre-update probability only, (d) single left-to-right pass.
+
+**Mar 28, @valerio-oai on [#728](https://github.com/openai/parameter-golf/pull/728):** Val-calibrated GPTQ "breaks autoregressivity" — disallowed. Self-generated calibration data (as in #1019) is "probably legal." PR left open pending fix.
+
+**Mar 28, @valerio-oai on [#991](https://github.com/openai/parameter-golf/pull/991):** Closed for double-pass TTT (score, train, rescore same tokens).
+
+**Mar 28, @valerio-oai on [#1028](https://github.com/openai/parameter-golf/pull/1028):** GPTQ calibration running after 600s training cap = accessing training data at eval time. Author confirmed bug and resubmitted as #1047 with GPTQ within budget. Under organizer review.
+
 </details>
+
 
 ---
 
 ## Technique Deep Dives
+
 
 <details>
 <summary><strong>The Muon Optimizer Family</strong></summary>
@@ -349,6 +416,10 @@ The untried combinations above should be evaluated against your specific model's
 **NorMuon** extends Muon by adding per-neuron adaptive learning rates from accumulated second-order statistics. Vanilla Muon can produce updates with highly non-uniform norms across neurons, causing some neurons to dominate training. NorMuon normalizes row-wise after orthogonalization, combining Muon's conditioning benefits with Adam-style balanced per-neuron learning. It also improves distributed scaling by avoiding full momentum gathering across GPUs. Used by @mtybadger ([#122](https://github.com/openai/parameter-golf/pull/122)), @vmfunc ([#89](https://github.com/openai/parameter-golf/pull/89)), @abhishekgahlot2 ([#137](https://github.com/openai/parameter-golf/pull/137)), and others.
 
 **Muon Weight Decay** — The competition baseline's Muon optimizer has no weight decay. Decoupled weight decay for Muon (`p.mul_(1 - wd * lr)`) existed in modded-nanogpt since Nov 2025, but wasn't in the baseline. @notapplica was the first to bring it into this competition in [#60](https://github.com/openai/parameter-golf/pull/60), improving BPB from 1.2160 to 1.2094. Weights stay smaller and better-distributed, improving both generalization and compressibility.
+
+
+
+**Post-enforcement status (Mar 27):** The Mar 27 enforcement sweep closed 33+ n-gram cache PRs after discovery of the normalization bug — implementations scored only the correct token without full-vocabulary normalization, producing artificially low BPP. #978 proved that properly normalized n-gram achieves only 1.51 BPB (worse than neural baseline). The question of whether a *correctly normalized* eval-time statistical method can improve on pure neural remains open.
 
 </details>
 
@@ -449,7 +520,7 @@ The single biggest BPB lever discovered in the competition. During sliding windo
 <details>
 <summary><strong>#315's Techniques: Partial RoPE, LN Scale (Late QAT was inactive)</strong></summary>
 
-@jfprincz's [#315](https://github.com/openai/parameter-golf/pull/315) (1.1250) adds two effective zero-parameter techniques on top of #287's XSA+EMA base, gaining 0.0023 BPB. **Note:** Late QAT was also included in the code, but `torch.compile` constant-folded the `_qat_enabled` flag, making the STE branch dead code — Late QAT never activated (discovered by @152334H, confirmed in #453). The 0.0023 gain comes entirely from Partial RoPE + LN Scale.
+@jfprincz's [#315](https://github.com/openai/parameter-golf/pull/315) (1.1250) adds two effective zero-parameter techniques on top of #287's XSA+EMA base, gaining 0.0023 BPB. **Note:** Late QAT was also included in the code, but `torch.compile` constant-folded the `_qat_enabled` flag, making the STE branch dead code — Late QAT never activated (discovered by @152334H, confirmed in #453). **Update:** @wfproc ([#1032](https://github.com/openai/parameter-golf/pull/1032)) confirmed this dead-code bug persists in the current SOTA #549 codebase. A fix via tensor-scale STE actually worsened the int6 gap — suggesting WD+EMA already compensate for what QAT was supposed to do. The 0.0023 gain comes entirely from Partial RoPE + LN Scale.
 
 **Partial RoPE (16 of 64 head dimensions).** Rotary Position Embedding (RoPE) injects position information by rotating query/key vectors. Standard RoPE applies to all head dimensions. Partial RoPE applies to only 25% (16 of 64 dims) — the remaining 48 dims attend without position encoding. Why this helps: the position-free dims learn semantic similarity independent of token distance, improving generalization across different position ranges. The model can learn both "what things are" (position-free) and "where things are" (position-encoded) using different parts of the same head. Zero new parameters.
 
@@ -513,200 +584,252 @@ The two active techniques (Partial RoPE + LN Scale) gain 0.0023 BPB vs #287 — 
 | @Christopher-Lee-McClendon | [#598](https://github.com/openai/parameter-golf/pull/598) | **7000-step GEPA** (4xA100). Extended warmdown + mixed int6/int8 + legal TTT. **1.1334 BPB.** |
 | @Christopher-Lee-McClendon | [#628](https://github.com/openai/parameter-golf/pull/628) | **Sub-1.10 GEPA** (4xA100, 20k steps). 8k warmdown + int6 GPTQ-lite + legal TTT. **1.0983 BPB.** Scaling law: warmdown is dominant lever. |
 | @SPThole | [#623](https://github.com/openai/parameter-golf/pull/623) | **First AWQ in competition** — activation-aware weight scaling (α=0.5) before quant. Closed 63% of quant gap (0.027→0.010). Cyclic Muon Momentum (triangle wave 0.85-0.95). 21+ experiments. **1.1507, 3-seed.** |
+| @greqone | [#1044](https://github.com/openai/parameter-golf/pull/1044) | **H-Net:** First learned byte-level tokenization (README wishlist). Differentiable chunking gate discovers ~4-byte segments. 22M params, **1.90 BPB** (4090, 2.8hr). |
+| @ikermoel | [#1053](https://github.com/openai/parameter-golf/pull/1053) | **Masked Diffusion (MDLM):** First text diffusion submission (README wishlist). Bidirectional attention, pseudo-log-likelihood eval. **1.3600 BPB**, 3-seed, 12.9MB. High school student's 2nd ML competition. |
+| @andrewmouldon | [#1035](https://github.com/openai/parameter-golf/pull/1035) | **ASQU:** Per-channel learned asymmetric activation. Consistent -0.0011 BPB vs LeakyReLU² across 3 seeds. |
+| @mrdavtan | [#1048](https://github.com/openai/parameter-golf/pull/1048) | **Compression moonshots:** 8 negative findings. Procrustes (91% MSE reduction but 380% larger artifact), pruning+zstd non-monotonic, selective fp16. Key: int6+zstd is near-optimal for this arch. |
+| @himanshudongre | [#1012](https://github.com/openai/parameter-golf/pull/1012) | **JEPA-LM negative result:** -19.5% CE on synthetic Markov chains but only -0.24% on real text. +40% throughput overhead makes it net-negative. Valuable lesson: synthetic benchmarks don't transfer. |
+| @wfproc | [#1032](https://github.com/openai/parameter-golf/pull/1032) | **QAT dead-code confirmed in SOTA #549** (torch.compile constant-folds Late QAT). 7 techniques all negative. Heuristic: 1ms overhead = 0.007 BPP at 83ms/step. 1xH100 research. |
+| @DbBested | [#1108](https://github.com/openai/parameter-golf/pull/1108) | **nGPT Hypersphere:** Fixed 3 bugs that killed earlier attempt (#831). Normalized transformers viable at 16MB: 1.6915→**1.2714 BPP**. Research contribution. |
+| @serdardoesml | [#1088](https://github.com/openai/parameter-golf/pull/1088)/[#1110](https://github.com/openai/parameter-golf/pull/1110) | **Universal Transformer (README wishlist):** Shared recurrent block with depth scheduling. #1088: 1.256. #1110: **1.2249** (near baseline). Iteration embeddings as depth signal. |
+| @agalimova | [#1100](https://github.com/openai/parameter-golf/pull/1100) | **LLaDA-MDLM Diffusion:** First discrete diffusion to beat AR baseline (1.2244). **1.1465 BPP**, 512 eval steps, 33M params. Previous best diffusion: 1.625. 1x NVIDIA GB10 (Project DIGITS). |
+| @himanshudongre | [#1013](https://github.com/openai/parameter-golf/pull/1013) | **S4D-Lin SSM Hybrid:** First zero-overhead SSM (2 SSM + 9 Transformer layers). 116ms/step matching baseline. Finding: attention > SSM at this scale. **1.1682 BPP.** |
 | @CiprianFlorin-Ifrim | [#641](https://github.com/openai/parameter-golf/pull/641)/[#640](https://github.com/openai/parameter-golf/pull/640) | **Binary/Ternary U-Net** — radical compression frontier. Binary (1-bit): **106.2M params in 15.67MB** via bit-packing, 15L 768d, **1.1239 BPB** (non-record, 50k steps). Ternary (1.58-bit): 73.7M params, 10L 768d, **1.1570 BPB** (3-seed, 599s). NeoMuon optimizer, 8192 BPE tokenizer, FP8 QAT, YaRN 2048. 250+ experiments. "Train larger, quantize harder" taken to extreme. |
 
-
 </details>
+
 
 ---
 
 <details>
-<summary><strong>Idea Lineage & Diffusion (52 techniques tracked)</strong></summary>
+<summary><strong>Idea Lineage & Diffusion (57 techniques tracked)</strong></summary>
 
 | Technique | First Appeared | Originator | Adoption |
 |-----------|---------------|------------|----------|
-| Sliding Window Eval | [#50](https://github.com/openai/parameter-golf/pull/50) | @mattqlf | Near-universal (20+) |
-| FP16 Tied Embedding | [#42](https://github.com/openai/parameter-golf/pull/42) | @chonchiog | ~10+ |
-| Int6 Quantization | [#39](https://github.com/openai/parameter-golf/pull/39) | @nanlliu | ~15+ |
-| MLP 3x Expansion | [#70](https://github.com/openai/parameter-golf/pull/70) | @jfprincz | ~12+ |
-| Muon Weight Decay | [#60](https://github.com/openai/parameter-golf/pull/60) | @notapplica (from modded-nanogpt) | Several |
-| Overtone Spectral Init | [#60](https://github.com/openai/parameter-golf/pull/60) | @notapplica | @peytontolbert (#155), @TevBenji (#69) |
-| SmearGate / BigramHash | [#102](https://github.com/openai/parameter-golf/pull/102) | @unnir | Near-universal (25+). All competitive submissions use SmearGate+BigramHash+OrthoInit. |
-| OrthoInit | [#135](https://github.com/openai/parameter-golf/pull/135) | @unnir (combined with SmearGate) | Near-universal among top SmearGate submissions. Critical co-dependency: SmearGate hurts without OrthoInit (#212 ablation). |
-| Test-Time Training | [#77](https://github.com/openai/parameter-golf/pull/77) | @samacqua (LoRA TTT) | @timowhite88 (#152 SGD, #254 first TTT+SmearGate+11L), @polarizedfortnite-cpu (#81, first TTT+int6), @andrewgcodes (#267 Causal TTT), @charmquark1984 (#281), @ibarrajo (#290, TTT+XSA), @mohosy (#291, pending), @sseanliu (#296, Reptile meta-TTT), @davidpuertolas (#297), @alertcat (#338, TTT on #315 frontier base — neutral), @felipe-parodi (#398, 20-epoch aggressive TTT, 1.1221), @kasimte (#455, SGD TTT on #374 base), @Christopher-Lee-McClendon (#461, high-yield SGD+momentum TTT), **@abaybektursun (#473, legal TTT — 1.1214)**, **@LoquiAuris (#548, batched LoRA TTT — 1.0865)**, **@Sarimsaljook (#573, Multi-Pass TTT — 1.0523 ❌ ruled invalid)** |
-| NorMuon | Multiple PRs | Convergent | @mtybadger, @vmfunc, @dexhunter, others |
-| QAT with STE | Multiple PRs | Convergent | @rsavitt, @yahya010, @trovatochris, others |
-| SWA | [#89](https://github.com/openai/parameter-golf/pull/89) | @vmfunc | @mtybadger (#122), @dexhunter (#156), @anthony-maio (#376), others |
-| Depth Recurrence | Multiple PRs | Independent | @MatthewHRockwell, @koushikkethamakka, @iverbovoy (#148), others |
-| Int5 MLP Quantization | [#76](https://github.com/openai/parameter-golf/pull/76) | @unixmadtoonslab | @thwu1 (#180, former SOTA), @alertcat (#219, mixed int5/int6), @Mapika (#349), @Skrisps26 (#354), @signalrush (#369) |
-| BigramHash Scaling (4096–16384) | [#180](https://github.com/openai/parameter-golf/pull/180) | @thwu1 (10240) | @andrewgcodes (#267, 16384), @simonbissonnette (#466, 12288), @JoeProAI (#462, 8192). Diminishing returns >10240 (#348). |
-| Low-Rank Q Factorization | [#215](https://github.com/openai/parameter-golf/pull/215) | @JayCheng113 | Novel — no adopters yet |
-| Partial XSA (Exclusive Self-Attention) | [#265](https://github.com/openai/parameter-golf/pull/265) | @unnir | Near-universal at frontier (15+): @jfprincz (#287, #315), @signalrush (#369, #414), @saml212 (#332), @chanwoo-park-official (#400), @fbedev (#417), @sjp611 (#442), @JoeProAI (#462), @kasimte (#455), @ofirkris (#458), @Christopher-Lee-McClendon (#461), others |
-| EMA Weight Averaging | [#95](https://github.com/openai/parameter-golf/pull/95) | @MatoTeziTanka (PROTEUS EMA) | Near-universal at frontier (12+): @jfprincz (#287, #315), @signalrush (#369, #414), @sjp611 (#442), @JoeProAI (#462, 0.9985), @ofirkris (#458), @simonbissonnette (#466), @felipe-parodi (#398), @parinzee (#493), others. EMA fails without XSA (#201). |
-| Reptile Meta-TTT | [#296](https://github.com/openai/parameter-golf/pull/296) | @sseanliu | @JackYoung27 (#302, +causal TTT + decay prior). **#375: failed on #315 base (+0.0076 worse).** |
-| BitNet b1.58 | [#126](https://github.com/openai/parameter-golf/pull/126), [#139](https://github.com/openai/parameter-golf/pull/139)→[#367](https://github.com/openai/parameter-golf/pull/367) | @Athenox14, @ksang123 | Two independent. #367: standard stack breaks on ternary. |
-| Partial RoPE | [#315](https://github.com/openai/parameter-golf/pull/315) | @jfprincz (25% dims) | @saml212 (#332), @unnir (#374), @felipe-parodi (#398), @signalrush (#414), @fbedev (#417), @kasimte (#455), @ofirkris (#458), @Christopher-Lee-McClendon (#461), @JoeProAI (#462) |
-| LN Scale (1/√layer) | [#315](https://github.com/openai/parameter-golf/pull/315) | @jfprincz | Near-universal at frontier (10+): @signalrush (#414), @fbedev (#417), @JoeProAI (#462), @sofiabod (#489, calls it "depth damping"), others. Variant: @eb1386 (#449, cosine) |
-| Late QAT (last 4% only) | [#315](https://github.com/openai/parameter-golf/pull/315) | @jfprincz (⚠️ dead code in #315 — torch.compile bug) | **Working:** @unnir (#374, scale<0.1), @signalrush (#414, threshold 0.15), @fbedev (#417), @JoeProAI (#462). Dropped at 12L (#332). |
-| Gradient-Guided Quant | [#332](https://github.com/openai/parameter-golf/pull/332) | @saml212 | @ndokutovich (#486, sensitivity-ranked int7/6/5 — top 10%/70%/20%) |
-| TrigramHash | [#327](https://github.com/openai/parameter-golf/pull/327) | @Ananddna | @ndokutovich (#486, 4096 buckets + VRL + GradQuant + Cosine TTT, **1.0887**) |
-| Per-Head Temperature | [#327](https://github.com/openai/parameter-golf/pull/327) | @Ananddna | Novel — each head learns its own temperature scalar |
-| Tight SWA (scale<0.2) | [#374](https://github.com/openai/parameter-golf/pull/374) | @unnir | @dannywillowliu-uchi (#379, +GPTQ-lite), @kasimte (#455, +TTT) |
-| Shared Value Embedding | [#374](https://github.com/openai/parameter-golf/pull/374) | @unnir | @dannywillowliu-uchi (#379, +GPTQ-lite), @kasimte (#455, +TTT), @Christopher-Lee-McClendon (#461, layers 9-10), **@JoeProAI (#505, GEPA arch, 1.1181)** |
-| AdamW TTT | [#442](https://github.com/openai/parameter-golf/pull/442) | @sjp611 (3-line diff from #398: SGD→AdamW) | @JoeProAI (#462), @mrdavtan (#481, cosine), @ndokutovich (#486), @sofiabod (#489, 7L), @amaljithkuttamath (#490, +VRL+GA), @ahmettrkck (#491, +DWA), **@EthanYangTW (#503, legal AdamW TTT)**, @ymrohit (#555, closed) |
-| GPTQ-lite → Full GPTQ | [#379](https://github.com/openai/parameter-golf/pull/379) | @dannywillowliu-uchi (per-layer clip percentile search) | @signalrush (#414), @fbedev (#417), @gowtham0992 (#478), @EthanYangTW (#503, **#606 int5 GPTQ**), **@raahilshah (#535)**, **@gowtham0992 (#569)**, @cmcdnd (#576), **@newjordan (#587)**, **@saml212 (#609)**, **@danialht (#615)**. Now standard at frontier. |
-| Value Residual Learning | [#413](https://github.com/openai/parameter-golf/pull/413) | @anantdgoel (arXiv:2410.17897, −0.015 dev) | @ndokutovich (#486, **1.0887**+Cosine TTT), **@amaljithkuttamath (#490, VRL+GA+TTT, 1.0891 1-seed!)**, **@gowtham0992 (#569, VRL no-TTT → 1.1175, best non-TTT at time)**, @joshuaswarren (#474, failed on weak base), @carlesonielfa (#457), @yuvrajyadav17 (#471, pending), @ahmettrkck (#491, VRL+DWA+TTT) |
-| Catalytic Residuals | [#450](https://github.com/openai/parameter-golf/pull/450) | @zachgoldfine44 (`x + c*f(x)`, −0.024 BPB) | @joshuaswarren (#474, +VRL+GA, 12L — 1.1690, techniques don't stack on weak base) |
-| Two-Phase TTT | [#417](https://github.com/openai/parameter-golf/pull/417) | @fbedev (50ep norm-only + 10ep last-3-blocks) | Novel — no adopters yet |
-| Gated Attention | [#413](https://github.com/openai/parameter-golf/pull/413) | @anantdgoel (arXiv:2505.06708, −0.003 dev) | **@amaljithkuttamath (#490, +VRL+TTT, 1.0891)**, @joshuaswarren (#474, failed on weak base), @yuvrajyadav17 (#471, pending) |
-| Cosine TTT + Per-Layer LR | [#481](https://github.com/openai/parameter-golf/pull/481) | @mrdavtan (cosine LR decay + 3× MLP output proj LR) | **@sofiabod (#518, cosine+per-layer → 1.0814)**, **@ndokutovich (#486, cosine → 1.0887)**, @Christopher-Lee-McClendon (#537, per-layer LR on legal TTT). ⚠️ Pre-eval TTT (except #537) |
-| XSA-All (11 layers) | [#478](https://github.com/openai/parameter-golf/pull/478) | @gowtham0992 (first to test XSA on all layers) | @EthanYangTW (#503, #606), @cmcdnd (#576), **@newjordan (#587)**, **@saml212 (#609, best non-TTT)**, **@danialht (#615)**. Now standard at frontier. |
-| LeakyReLU(0.5)² | [#434](https://github.com/openai/parameter-golf/pull/434) (closed) → [#493](https://github.com/openai/parameter-golf/pull/493) | @parinzee (squared leaky ReLU, 0.5 neg slope) | **@sofiabod (#518)**, **@raahilshah (#535)**, @Christopher-Lee-McClendon (#537), @abaybektursun (#549), **@gowtham0992 (#569)**, @cmcdnd (#576), @RoyiRa (#589), **@saml212 (#609)**, **@robinojw (#620)**. **10+ adopters — fastest-spreading technique.** |
-| Delayed PPM Eval Bank | [#511](https://github.com/openai/parameter-golf/pull/511) | @AnirudhRahul (classical n-gram backoff with 2048-token delay, on @thwu1's #180 base) | Novel — −0.00126 BPB at p=0.000041. Zero artifact cost. |
-| Post-TTT Temperature Calibration | [#576](https://github.com/openai/parameter-golf/pull/576) | @cmcdnd (T=0.98 re-score after legal TTT to correct overconfidence, −0.003 BPB) | Novel — no adopters yet. Zero-cost technique. |
-| Walsh-Hadamard Rotation | [#586](https://github.com/openai/parameter-golf/pull/586) | @EaCognitive (pre-quant rotation for outlier redistribution. zstd 1.70x→1.76x, freeing 530KB for VE128) | Novel — **substitutes with GPTQ at int6** (they address the same outlier problem). Also found Late QAT dead-code bug in CastedLinear. |
-| Late Soft-Round QAT | [#589](https://github.com/openai/parameter-golf/pull/589) | @RoyiRa (temperature-controlled soft-round surrogate replaces hard STE; bin-aware gradients near int6 boundaries) | **@EthanYangTW (#606, tanh α1→16, best legal TTT 1.1162)**. Independent discovery likely (~8hr gap, same tanh-alpha approach). |
-| Selective Pruning | [#609](https://github.com/openai/parameter-golf/pull/609) | @saml212 (post-GPTQ ±1 magnitude pruning sorted by reconstruction error) | Novel — no adopters yet. |
-| Residual Input Mixing | [#615](https://github.com/openai/parameter-golf/pull/615) | @danialht (dense residual: each block sees learned mix of current stream + earlier blocks + x0) | Novel — no adopters yet. |
-| AWQ | [#623](https://github.com/openai/parameter-golf/pull/623) | @SPThole (activation-aware weight scaling α=0.5 before quant, closed 63% quant gap) | Novel — first use in competition. |
-| Cyclic Muon Momentum | [#623](https://github.com/openai/parameter-golf/pull/623) | @SPThole (triangle wave 0.85-0.95, period=50) | Novel — no adopters yet. |
-| N-gram Eval Cache | [#659](https://github.com/openai/parameter-golf/pull/659) (concept) → [#674](https://github.com/openai/parameter-golf/pull/674)/[#706](https://github.com/openai/parameter-golf/pull/706) | @deanbrr (concept), @newjordan (5-gram implementation) | **@lukacf (#702, multi-order backoff)**, **@Asukabot0 (#715, #727, entropy-adaptive)**, **@hypery11 (#724, 7-gram)**, **@gowtham0992 (#738, +kNN-LM)**, **@resouer (#740, 9L+5gram)**, **@andrewbaggio1 (#741, +cosine TTT)**. **8 adopters in <12 hours — fastest spread in competition history.** |
-| Multi-Order N-gram Backoff | [#702](https://github.com/openai/parameter-golf/pull/702) | @lukacf (cascade 7→6→5→4→3→2 on miss) | **@Asukabot0 (#727, orders 2-7 + entropy-adaptive)** |
-| Entropy-Adaptive Alpha | [#702](https://github.com/openai/parameter-golf/pull/702) | @lukacf (`alpha = 0.05 + 0.35 * sigmoid(2*(H-4))`) | **@Asukabot0 (#727, wider range 0.05-0.60)** |
-| Hidden-State kNN-LM | [#738](https://github.com/openai/parameter-golf/pull/738) | @gowtham0992 (GPU ring buffer + RBF kernel, Khandelwal et al. 2019) | Novel — first in competition. |
-| Depth Recurrence (with block scalars) | [#686](https://github.com/openai/parameter-golf/pull/686) | @msisovic (layers 4+5 repeated, 11→13 virtual, ~2K params) | Novel — recovers 70% of independent 12L gain. |
-| Hedge Mixer (expert ensemble) | [#688](https://github.com/openai/parameter-golf/pull/688) → [#700](https://github.com/openai/parameter-golf/pull/700) | @RoyiRa (5-expert: neural + unigram + bigram + trigram + entropy, Hedge algorithm eta=0.1. First in #688; improved in #700 with CROWN-Q + MLP3.5x + stride=64) | **@pentxayc (#731, +VRL+TTT+Polyak EMA)**, **@agalimova (#720, XSA6+BigramHash4K on #700 base)** |
-| MiLe Loss | [#703](https://github.com/openai/parameter-golf/pull/703) | @Gusanidas (entropy-weighted token loss, γ=1.1 decaying to 0 during warmdown) | Novel — no adopters yet. |
+| Sliding Window Eval | [#50](https://github.com/openai/parameter-golf/pull/50) | @mattqlf (@mattqlf) | Near-universal (20+) |
+| FP16 Tied Embedding | [#42](https://github.com/openai/parameter-golf/pull/42) | @chonchiog (@chonchiog) | ~10+ |
+| Int6 Quantization | [#39](https://github.com/openai/parameter-golf/pull/39) | @nanlliu (@nanlliu) | ~15+ |
+| MLP 3x Expansion | [#70](https://github.com/openai/parameter-golf/pull/70) | @jfprincz (@jfprincz) | ~12+ |
+| Muon Weight Decay | [#60](https://github.com/openai/parameter-golf/pull/60) | @notapplica (@notapplica (from modded-nanogpt)) | Several |
+| Overtone Spectral Init | [#60](https://github.com/openai/parameter-golf/pull/60) | @notapplica (@notapplica) | @peytontolbert (#155), @TevBenji (#69) |
+| SmearGate / BigramHash | [#65](https://github.com/openai/parameter-golf/pull/65) | @aquariouseworkman (SmearGate + BigramHash — first used in competition by @aquariouseworkman (#65, Mar 19 07:42 UTC). BigramHash separately developed by multiple authors.) | Near-universal (25+). All competitive submissions use SmearGate+BigramHash+OrthoInit. |
+| OrthoInit | [#65](https://github.com/openai/parameter-golf/pull/65) | @aquariouseworkman (OrthoInit — first used in competition by @aquariouseworkman (#65, Mar 19 07:42 UTC)) | Near-universal among top SmearGate submissions. Critical co-dependency: SmearGate hurts without OrthoInit (#212 ablation). |
+| Test-Time Training | [#77](https://github.com/openai/parameter-golf/pull/77) | @samacqua (@samacqua (LoRA TTT)) | @timowhite88 (#152 SGD, #254 first TTT+SmearGate+11L), @polarizedfortnite-cpu (#81, first TTT+int6), @andrewgcodes (#267 Causal TTT), @charmquark1984 (#281), @ibarrajo (#290, TTT+XSA), @mohosy (#291, pending), @sseanliu (#296, Reptile meta-TTT), @davidpuertolas (#297), @alertcat (#338, TTT on #315 frontier base — neutral), @felipe-parodi (#398, 20-epoch aggressive TTT, 1.1221), @kasimte (#455, SGD TTT on #374 base), @Christopher-Lee-McClendon (#461, high-yield SGD+momentum TTT), **@abaybektursun (#473, legal TTT — 1.1214)**, **@LoquiAuris (#548, batched LoRA TTT — 1.0865)**, **@Sarimsaljook (#573, Multi-Pass TTT — 1.0523 ❌ ruled invalid)** |
+| NorMuon | [#0](https://github.com/openai/parameter-golf/pull/0) | @Convergent (Convergent) | @mtybadger, @vmfunc, @dexhunter, others |
+| QAT with STE | [#0](https://github.com/openai/parameter-golf/pull/0) | @Convergent (Convergent) | @rsavitt, @yahya010, @trovatochris, others |
+| SWA | [#89](https://github.com/openai/parameter-golf/pull/89) | @vmfunc (@vmfunc) | @mtybadger (#122), @dexhunter (#156), @anthony-maio (#376), others |
+| Depth Recurrence | [#0](https://github.com/openai/parameter-golf/pull/0) | @Independent (Independent) | @MatthewHRockwell, @koushikkethamakka, @iverbovoy (#148), others |
+| Int5 MLP Quantization | [#76](https://github.com/openai/parameter-golf/pull/76) | @unixmadtoonslab (@unixmadtoonslab) | @thwu1 (#180, former SOTA), @alertcat (#219, mixed int5/int6), @Mapika (#349), @Skrisps26 (#354), @signalrush (#369) |
+| BigramHash Scaling (4096–16384) | [#180](https://github.com/openai/parameter-golf/pull/180) | @thwu1 (@thwu1 (10240)) | @andrewgcodes (#267, 16384), @simonbissonnette (#466, 12288), @JoeProAI (#462, 8192). Diminishing returns >10240 (#348). |
+| Low-Rank Q Factorization | [#215](https://github.com/openai/parameter-golf/pull/215) | @JayCheng113 (@JayCheng113) | Novel — no adopters yet |
+| Partial XSA (Exclusive Self-Attention) | [#265](https://github.com/openai/parameter-golf/pull/265) | @unnir (@unnir) | Near-universal at frontier (15+): @jfprincz (#287, #315), @signalrush (#369, #414), @saml212 (#332), @chanwoo-park-official (#400), @fbedev (#417), @sjp611 (#442), @JoeProAI (#462), @kasimte (#455), @ofirkris (#458), @Christopher-Lee-McClendon (#461), others |
+| EMA Weight Averaging | [#95](https://github.com/openai/parameter-golf/pull/95) | @MatoTeziTanka (@MatoTeziTanka (PROTEUS EMA)) | Near-universal at frontier (12+): @jfprincz (#287, #315), @signalrush (#369, #414), @sjp611 (#442), @JoeProAI (#462, 0.9985), @ofirkris (#458), @simonbissonnette (#466), @felipe-parodi (#398), @parinzee (#493), others. EMA fails without XSA (#201). |
+| Reptile Meta-TTT | [#296](https://github.com/openai/parameter-golf/pull/296) | @sseanliu (@sseanliu) | @JackYoung27 (#302, +causal TTT + decay prior). **#375: failed on #315 base (+0.0076 worse).** |
+| BitNet b1.58 | [#126](https://github.com/openai/parameter-golf/pull/126) | @Athenox14 (@Athenox14, @ksang123) | Two independent. #367: standard stack breaks on ternary. |
+| Partial RoPE | [#315](https://github.com/openai/parameter-golf/pull/315) | @jfprincz (@jfprincz (25% dims)) | @saml212 (#332), @unnir (#374), @felipe-parodi (#398), @signalrush (#414), @fbedev (#417), @kasimte (#455), @ofirkris (#458), @Christopher-Lee-McClendon (#461), @JoeProAI (#462) |
+| LN Scale (1/√layer) | [#315](https://github.com/openai/parameter-golf/pull/315) | @jfprincz (@jfprincz) | Near-universal at frontier (10+): @signalrush (#414), @fbedev (#417), @JoeProAI (#462), @sofiabod (#489, calls it "depth damping"), others. Variant: @eb1386 (#449, cosine) |
+| Late QAT (last 4% only) | [#315](https://github.com/openai/parameter-golf/pull/315) | @jfprincz (@jfprincz (⚠️ dead code in #315 — torch.compile bug)) | **Working:** @unnir (#374, scale<0.1), @signalrush (#414, threshold 0.15), @fbedev (#417), @JoeProAI (#462). Dropped at 12L (#332). |
+| Gradient-Guided Quant | [#332](https://github.com/openai/parameter-golf/pull/332) | @saml212 (@saml212) | @ndokutovich (#486, sensitivity-ranked int7/6/5 — top 10%/70%/20%) |
+| TrigramHash | [#327](https://github.com/openai/parameter-golf/pull/327) | @Ananddna (@Ananddna) | @ndokutovich (#486, 4096 buckets + VRL + GradQuant + Cosine TTT, **1.0887**) |
+| Per-Head Temperature | [#327](https://github.com/openai/parameter-golf/pull/327) | @Ananddna (@Ananddna) | Novel — each head learns its own temperature scalar |
+| Tight SWA (scale<0.2) | [#374](https://github.com/openai/parameter-golf/pull/374) | @unnir (@unnir) | @dannywillowliu-uchi (#379, +GPTQ-lite), @kasimte (#455, +TTT) |
+| Shared Value Embedding | [#374](https://github.com/openai/parameter-golf/pull/374) | @unnir (@unnir) | @dannywillowliu-uchi (#379, +GPTQ-lite), @kasimte (#455, +TTT), @Christopher-Lee-McClendon (#461, layers 9-10), **@JoeProAI (#505, GEPA arch, 1.1181)** |
+| AdamW TTT | [#442](https://github.com/openai/parameter-golf/pull/442) | @sjp611 (@sjp611 (3-line diff from #398: SGD→AdamW)) | @JoeProAI (#462), @mrdavtan (#481, cosine), @ndokutovich (#486), @sofiabod (#489, 7L), @amaljithkuttamath (#490, +VRL+GA), @ahmettrkck (#491, +DWA), **@EthanYangTW (#503, legal AdamW TTT)**, @ymrohit (#555, closed) |
+| GPTQ-lite → Full GPTQ | [#379](https://github.com/openai/parameter-golf/pull/379) | @dannywillowliu (@dannywillowliu-uchi (per-layer clip percentile search)) | @signalrush (#414), @fbedev (#417), @gowtham0992 (#478), @EthanYangTW (#503, **#606 int5 GPTQ**), **@raahilshah (#535)**, **@gowtham0992 (#569)**, @cmcdnd (#576), **@newjordan (#587)**, **@saml212 (#609)**, **@danialht (#615)**. Now standard at frontier. |
+| Value Residual Learning | [#413](https://github.com/openai/parameter-golf/pull/413) | @anantdgoel (@anantdgoel (arXiv:2410.17897, −0.015 dev)) | @ndokutovich (#486, **1.0887**+Cosine TTT), **@amaljithkuttamath (#490, VRL+GA+TTT, 1.0891 1-seed!)**, **@gowtham0992 (#569, VRL no-TTT → 1.1175, best non-TTT at time)**, @joshuaswarren (#474, failed on weak base), @carlesonielfa (#457), @yuvrajyadav17 (#471, pending), @ahmettrkck (#491, VRL+DWA+TTT) |
+| Catalytic Residuals | [#450](https://github.com/openai/parameter-golf/pull/450) | @zachgoldfine44 (@zachgoldfine44 (`x + c*f(x)`, −0.024 BPB)) | @joshuaswarren (#474, +VRL+GA, 12L — 1.1690, techniques don't stack on weak base) |
+| Two-Phase TTT | [#417](https://github.com/openai/parameter-golf/pull/417) | @fbedev (@fbedev (50ep norm-only + 10ep last-3-blocks)) | Novel — no adopters yet |
+| Gated Attention | [#413](https://github.com/openai/parameter-golf/pull/413) | @anantdgoel (@anantdgoel (arXiv:2505.06708, −0.003 dev)) | **@amaljithkuttamath (#490, +VRL+TTT, 1.0891)**, @joshuaswarren (#474, failed on weak base), @yuvrajyadav17 (#471, pending) |
+| Cosine TTT + Per-Layer LR | [#481](https://github.com/openai/parameter-golf/pull/481) | @mrdavtan (@mrdavtan (cosine LR decay + 3× MLP output proj LR)) | **@sofiabod (#518, cosine+per-layer → 1.0814)**, **@ndokutovich (#486, cosine → 1.0887)**, @Christopher-Lee-McClendon (#537, per-layer LR on legal TTT). ⚠️ Pre-eval TTT (except #537) |
+| XSA-All (11 layers) | [#478](https://github.com/openai/parameter-golf/pull/478) | @gowtham0992 (@gowtham0992 (first to test XSA on all layers)) | @EthanYangTW (#503, #606), @cmcdnd (#576), **@newjordan (#587)**, **@saml212 (#609, best non-TTT)**, **@danialht (#615)**. Now standard at frontier. |
+| LeakyReLU(0.5)² | [#434](https://github.com/openai/parameter-golf/pull/434) | @parinzee (@parinzee (squared leaky ReLU, 0.5 neg slope)) | **@sofiabod (#518)**, **@raahilshah (#535)**, @Christopher-Lee-McClendon (#537), @abaybektursun (#549), **@gowtham0992 (#569)**, @cmcdnd (#576), @RoyiRa (#589), **@saml212 (#609)**, **@robinojw (#620)**. **10+ adopters — fastest-spreading technique.** |
+| Delayed PPM Eval Bank | [#511](https://github.com/openai/parameter-golf/pull/511) | @AnirudhRahul (@AnirudhRahul (classical n-gram backoff with 2048-token delay, on @thwu1's #180 base)) | Novel — −0.00126 BPB at p=0.000041. Zero artifact cost. |
+| Post-TTT Temperature Calibration | [#576](https://github.com/openai/parameter-golf/pull/576) | @cmcdnd (@cmcdnd (T=0.98 re-score after legal TTT to correct overconfidence, −0.003 BPB)) | Novel — no adopters yet. Zero-cost technique. |
+| Walsh-Hadamard Rotation | [#586](https://github.com/openai/parameter-golf/pull/586) | @EaCognitive (@EaCognitive (pre-quant rotation for outlier redistribution. zstd 1.70x→1.76x, freeing 530KB for VE128)) | Novel — **substitutes with GPTQ at int6** (they address the same outlier problem). Also found Late QAT dead-code bug in CastedLinear. |
+| Late Soft-Round QAT | [#589](https://github.com/openai/parameter-golf/pull/589) | @RoyiRa (@RoyiRa (temperature-controlled soft-round surrogate replaces hard STE; bin-aware gradients near int6 boundaries)) | **@EthanYangTW (#606, tanh α1→16, best legal TTT 1.1162)**. Independent discovery likely (~8hr gap, same tanh-alpha approach). |
+| Selective Pruning | [#609](https://github.com/openai/parameter-golf/pull/609) | @saml212 (@saml212 (post-GPTQ ±1 magnitude pruning sorted by reconstruction error)) | Novel — no adopters yet. |
+| Residual Input Mixing | [#615](https://github.com/openai/parameter-golf/pull/615) | @danialht (@danialht (dense residual: each block sees learned mix of current stream + earlier blocks + x0)) | Novel — no adopters yet. |
+| AWQ | [#623](https://github.com/openai/parameter-golf/pull/623) | @SPThole (@SPThole (activation-aware weight scaling α=0.5 before quant, closed 63% quant gap)) | Novel — first use in competition. |
+| Cyclic Muon Momentum | [#623](https://github.com/openai/parameter-golf/pull/623) | @SPThole (@SPThole (triangle wave 0.85-0.95, period=50)) | Novel — no adopters yet. |
+| N-gram Eval Cache | [#659](https://github.com/openai/parameter-golf/pull/659) | @deanbrr (@deanbrr (concept), @newjordan (5-gram implementation)) | **@lukacf (#702, multi-order backoff)**, **@Asukabot0 (#715, #727, entropy-adaptive)**, **@hypery11 (#724, 7-gram)**, **@gowtham0992 (#738, +kNN-LM)**, **@resouer (#740, 9L+5gram)**, **@andrewbaggio1 (#741, +cosine TTT)**. **8 adopters in <12 hours — fastest spread in competition history.** |
+| Multi-Order N-gram Backoff | [#702](https://github.com/openai/parameter-golf/pull/702) | @lukacf (@lukacf (cascade 7→6→5→4→3→2 on miss)) | **@Asukabot0 (#727, orders 2-7 + entropy-adaptive)** |
+| Entropy-Adaptive Alpha | [#702](https://github.com/openai/parameter-golf/pull/702) | @lukacf (@lukacf (`alpha = 0.05 + 0.35 * sigmoid(2*(H-4))`)) | **@Asukabot0 (#727, wider range 0.05-0.60)** |
+| Hidden-State kNN-LM | [#738](https://github.com/openai/parameter-golf/pull/738) | @gowtham0992 (@gowtham0992 (GPU ring buffer + RBF kernel, Khandelwal et al. 2019)) | Novel — first in competition. |
+| Depth Recurrence (with block scalars) | [#686](https://github.com/openai/parameter-golf/pull/686) | @msisovic (@msisovic (layers 4+5 repeated, 11→13 virtual, ~2K params)) | Novel — recovers 70% of independent 12L gain. |
+| Hedge Mixer (expert ensemble) | [#688](https://github.com/openai/parameter-golf/pull/688) | @RoyiRa (@RoyiRa (5-expert: neural + unigram + bigram + trigram + entropy, Hedge algorithm eta=0.1. First in #688; improved in #700 with CROWN-Q + MLP3.5x + stride=64)) | **@pentxayc (#731, +VRL+TTT+Polyak EMA)**, **@agalimova (#720, XSA6+BigramHash4K on #700 base)** |
+| MiLe Loss | [#703](https://github.com/openai/parameter-golf/pull/703) | @Gusanidas (@Gusanidas (entropy-weighted token loss, γ=1.1 decaying to 0 during warmdown)) | Novel — no adopters yet. |
+| DeltaNet / GatedDeltaNet | [#651](https://github.com/openai/parameter-golf/pull/651) | @phulin (Linear attention variant (Gated Delta Rule) from fla library. Enables longer effective context. @newjordan combined with Frugendorff recursive loops for sub-0.9 BPB.) | @shalyhinpavel (#875, 1.0226), @brian386 (#939), @dnldsz (#970), @newjordan (#990, #1028, #1047 — DeltaNet Crawler 0.8822) |
+| AR Self-Gen GPTQ Calibration | [#728](https://github.com/openai/parameter-golf/pull/728) | @abaybektursun (Model autoregressively generates calibration tokens for Full Hessian GPTQ. Closes 84% of val-vs-random gap. First appeared in #728, resubmitted as #1019.) |  |
+| Multi-Token Prediction (MTP) Auxiliary Loss | [#88](https://github.com/openai/parameter-golf/pull/88) | @seanward (MTP auxiliary head (training-only, discarded at export). Introduced day 1 by @seanward (#88). Disabled in baseline (MTP_NUM_HEADS=0). Re-enabled by @michaelwinczuk (#1031, weight=0.1) with -0.0037 BPP claimed.) |  |
+| TARA (Test-Time Activation ReAlignment) | [#1055](https://github.com/openai/parameter-golf/pull/1055) | @sanyalsunny111 (Training-free eval-time method: contrastive adjustment using early-layer hidden states. No gradients, no weight updates. Community flagged causality concern (scatter_ leaks target token).) |  |
+| Coprime-Stride Multi-Shard Loader | [#726](https://github.com/openai/parameter-golf/pull/726) | @DeepReinforce (Coprime-stride block sampling across shards for batch diversity. Zero step-time overhead. Full permutation cycle before repetition.) | @dexhunter (#1060, 1.1123 — SOTA-beating) |
 
 </details>
+
 
 ---
 
 ## Predictions & Commentary
 
-1. **N-gram eval caches dominate the frontier.** Backward-looking n-gram caches follow the same principle as legal TTT: use only already-scored tokens. The only n-gram approach ruled invalid was #659's hindsight selection (comparing both models on the true next token, then picking the better one). Current submissions use fixed-weight blending or entropy-adaptive alpha (model uncertainty, not ground truth) — no specific compliance issues beyond the usual (GPTQ timing, artifact size, reproducibility).
+1. **Pure neural just broke official SOTA.** #1060 (@dexhunter, 1.1122) broke the 1.1194 ceiling, then **#1089 (@mikeapedia, 1.1086, 3-seed) pushed further** using Turbo-Muon + EngramLite + mixed int6/int7 GPTQ — no TTT, no n-gram cache, 87s eval. #1099 (@Bortlesboat, 1.1136, 3-seed) confirms the Coprime-Stride + Full GPTQ approach is reproducible. This is the cleanest possible record: pure neural with better data loading and quantization. Pending organizer review for official leaderboard merge.
 
-2. **Two-track competition, not three.** (a) **Eval-time augmentation track** (0.97-1.10 BPB) — n-gram caches, Hedge Mixer, kNN-LM. All use backward-looking statistics at eval time. The Hedge Mixer (#700) is a variant of eval-time augmentation (its "experts" include unigram/bigram/trigram), not a separate track. (b) **Pure neural track** (~1.115-1.12 BPP) — frozen. Official SOTA 1.1194 unchanged. The Mar 25 sweep closed #606/#615 (the two submissions pushing this frontier), and no replacements have appeared.
+2. **N-gram caches are powerful but face compliance scrutiny.** 11 of 20 record-eligible submissions use n-gram evaluation caches. #1060's SOTA without any n-gram shows well-tuned pure neural can compete. Both frontiers are advancing in parallel: #1094 (@michaelwinczuk, 0.4027, 3-seed) pushed n-gram further with causal sequential scoring, while #1089 pushed pure neural to 1.1086.
 
-3. **Diminishing returns on n-gram cache optimization.** The progression: fixed 5-gram (−0.07) → multi-order backoff (−0.09 incremental) → entropy-adaptive alpha (−0.02 incremental). Each generation adds less. The jump from no-cache to cache is enormous; between variants it's shrinking. The next frontier is likely combining n-gram caches with stronger neural bases rather than further tuning the cache. #727's ablation shows the neural-only base was 1.1271 — there's room to improve that (best non-TTT neural is 1.1154 from #609's stack).
+3. **TTT is redundant on the Full GPTQ + XSA-all stack.** Both #1060 (no TTT, 1.1123) and #1019 (no TTT, 1.1147) outperform #549 (with TTT, 1.1194). Full Hessian GPTQ + complete XSA coverage captures what TTT was providing, while dropping TTT's eval-time overhead allows more training steps.
 
-4. **Sub-0.9 BPB is unlikely without memorization.** Based on #727's ablation (neural 1.1271 → 0.9674 with full cache, a 14.2% gain), applying the same proportional gain to a Tier 4 neural base (~1.115) yields ~0.96. With kNN-LM (−0.007) and higher-order n-grams (~0.005), the floor is approximately 0.93-0.95 BPB. Going lower likely requires either a fundamentally better neural model or techniques approaching memorization.
+4. **New architectures remain exploratory.** DeltaNet Crawler (#1047, 0.8822 but high variance), H-Net (#1044), Causal Oscillator LM (#1061, 1.34) — architecturally novel but not competitive. **Diffusion is emerging:** #1100 (@agalimova, LLaDA-MDLM, 1.1465) is the first discrete diffusion to beat the AR baseline, improving on previous best diffusion (#820, 1.625) by 0.47 BPB. TARA (#1055) was closed for causality violation.
 
-5. **The official leaderboard will lag the frontier for weeks.** SOTA is 1.1194; best pending is 0.9674 — a 0.15 BPB gap. Only 18 entries on the official leaderboard after 7 days. The n-gram wave added 7+ submissions in 12 hours, none reviewed yet. Each submission still needs individual verification for compliance (GPTQ timing, backward-looking correctness, artifact size).
+5. **The frontier is now data pipeline + quantization quality.** #1060's key innovation is a better data loader (coprime-stride for batch diversity) and better quantization (Full Hessian GPTQ). Both are systems-level improvements — no architectural novelty. Expect the next wave to optimize training data throughput and quantization precision.
+
 
 ---
 
 <details>
 <summary><strong>Full Official Leaderboard (18 entries)</strong></summary>
 
+Validated against the SOTA at submission time.
+
 | Rank | Score | Author | Key Techniques | PR |
 |------|-------|--------|---------------|-----|
 | 1 | **1.1194** | @sanjeevmadhav | LeakyReLU² + Legal Score-First TTT + Parallel Muon on #414 stack | [#549](https://github.com/openai/parameter-golf/pull/549) |
-| 2 | 1.1228 | @signalrush | 11L EMA + GPTQ-lite + warmdown3500 + QAT@0.15 | [#414](https://github.com/openai/parameter-golf/pull/414) |
-| 3 | 1.1248 | @jfprincz | 11L Partial RoPE + LN Scale + EMA + XSA4 | [#315](https://github.com/openai/parameter-golf/pull/315) |
-| 4 | 1.1271 | @jfprincz | 11L XSA4 + EMA + Int6 MLP3x | [#287](https://github.com/openai/parameter-golf/pull/287) |
-| 5 | 1.1307 | @unnir | 11L Efficient Partial XSA | [#265](https://github.com/openai/parameter-golf/pull/265) |
-| 6 | 1.1458 | @raahilshah | Int6 MLP3x + SmearGate + BigramHash + OrthoInit + MuonWD + SWA | [#162](https://github.com/openai/parameter-golf/pull/162) |
-| 7 | 1.1502 | @aruniyer | 11L + Int6 QAT + MLP3x + WD 0.04 + zstd-22 | [#86](https://github.com/openai/parameter-golf/pull/86) |
-| 8 | 1.1556 | @aquariouseworkman | SmearGate + OrthoInit + Int6 STE QAT + MLP3x + Sliding Window | [#65](https://github.com/openai/parameter-golf/pull/65) |
-| 9 | 1.1586 | @yahya010 | 10L Int6 QAT + Zstd MLP2.6x + Muon 0.99 + Sliding Window | [#63](https://github.com/openai/parameter-golf/pull/63) |
-| 10 | 1.1630 | @aquariouseworkman | Mixed int6/int8 + MLP3x + Sliding Window | [#65](https://github.com/openai/parameter-golf/pull/65) |
-| 11 | 1.1748 | @notapplica | Sliding Window + FP16 Embed + 10L + Muon WD + Spectral Init | [#60](https://github.com/openai/parameter-golf/pull/60) |
-| 12 | 1.1925 | @mattqlf | Sliding Window Eval (stride=64) | [#50](https://github.com/openai/parameter-golf/pull/50) |
-| 13 | 1.1928 | @samacqua | LoRA Test-Time Training | [#77](https://github.com/openai/parameter-golf/pull/77) |
-| 14 | 1.2014 | @spokane-way | 4k seq length + tuned hyperparams | [#52](https://github.com/openai/parameter-golf/pull/52) |
-| 15 | 1.2060 | @spokane-way | 2048 seq length | [#49](https://github.com/openai/parameter-golf/pull/49) |
-| 16 | 1.2147 | @nanlliu | 10 layers, mixed int8/int6 | [#39](https://github.com/openai/parameter-golf/pull/39) |
-| 17 | 1.2197 | @chonchiog | FP16 Tied Embedding + LR/Warmdown Tuning | [#42](https://github.com/openai/parameter-golf/pull/42) |
-| 18 | 1.2244 | Baseline | 9L 512dim 1024vocab TiedEmbed 4 KV heads | — |
+| 2 | **1.1228** | @signalrush | 11L EMA + GPTQ-lite + warmdown3500 + QAT@0.15 | [#414](https://github.com/openai/parameter-golf/pull/414) |
+| 3 | **1.1248** | @jfprincz | 11L Partial RoPE + LN Scale + EMA + XSA4 | [#315](https://github.com/openai/parameter-golf/pull/315) |
+| 4 | **1.1271** | @jfprincz | 11L XSA4 + EMA + Int6 MLP3x | [#287](https://github.com/openai/parameter-golf/pull/287) |
+| 5 | **1.1307** | @unnir | 11L Efficient Partial XSA | [#265](https://github.com/openai/parameter-golf/pull/265) |
+| 6 | **1.1458** | @raahilshah | Int6 MLP3x + SmearGate + BigramHash + OrthoInit + MuonWD + SWA | [#162](https://github.com/openai/parameter-golf/pull/162) |
+| 7 | **1.1502** | @aruniyer | 11L + Int6 QAT + MLP3x + WD 0.04 + zstd-22 | [#86](https://github.com/openai/parameter-golf/pull/86) |
+| 8 | **1.1556** | @aquariouseworkman | SmearGate + OrthoInit + Int6 STE QAT + MLP3x + Sliding Window | [#65](https://github.com/openai/parameter-golf/pull/65) |
+| 9 | **1.1586** | @yahya010 | 10L Int6 QAT + Zstd MLP2.6x + Muon 0.99 + Sliding Window | [#63](https://github.com/openai/parameter-golf/pull/63) |
+| 10 | **1.163** | @aquariouseworkman | Mixed int6/int8 + MLP3x + Sliding Window | [#65](https://github.com/openai/parameter-golf/pull/65) |
+| 11 | **1.1748** | @notapplica | Sliding Window + FP16 Embed + 10L + Muon WD + Spectral Init | [#60](https://github.com/openai/parameter-golf/pull/60) |
+| 12 | **1.1925** | @mattqlf | Sliding Window Eval (stride=64) | [#50](https://github.com/openai/parameter-golf/pull/50) |
+| 13 | **1.1928** | @samacqua | LoRA Test-Time Training | [#77](https://github.com/openai/parameter-golf/pull/77) |
+| 14 | **1.2014** | @spokane-way | 4k seq length + tuned hyperparams | [#52](https://github.com/openai/parameter-golf/pull/52) |
+| 15 | **1.206** | @spokane-way | 2048 seq length | [#49](https://github.com/openai/parameter-golf/pull/49) |
+| 16 | **1.2147** | @nanlliu | 10 layers, mixed int8/int6 | [#39](https://github.com/openai/parameter-golf/pull/39) |
+| 17 | **1.2197** | @chonchiog | FP16 Tied Embedding + LR/Warmdown Tuning | [#42](https://github.com/openai/parameter-golf/pull/42) |
+| 18 | **1.2244** | @Baseline | 9L 512dim 1024vocab TiedEmbed 4 KV heads | [#0](https://github.com/openai/parameter-golf/pull/0) |
 
 </details>
 
 <details>
-<summary><strong>All Pending Validated Submissions (39 entries)</strong></summary>
+<summary><strong>All Record-Eligible Submissions (25 entries)</strong></summary>
 
-Validated against the SOTA at submission time. Δ nats shown vs SOTA at time of validation.
+Sorted by BPB ascending.
 
 | BPB | Author | Δ nats | Seeds | Techniques | PR |
-|-----|--------|--------|-------|-----------|-----|
-| **1.1154** | @saml212 | 0.012 | 3 | XSA-all + Full GPTQ + Selective pruning + Parallel Muon. No TTT. ⚠️ Reclassified non-record (GPTQ calibration outside training budget). | [#609](https://github.com/openai/parameter-golf/pull/609) |
-| **1.1181** | @JoeProAI | 0.042 | 3 | ✅ GEPA arch without TTT: Star-ReLU + U-Net Skip Gates + XSA4 + VE128. | [#505](https://github.com/openai/parameter-golf/pull/505) |
-| **1.1204** | @raahilshah | 0.038 | 3 | ⚠️ LeakyReLU² + Full GPTQ + QAT-export alignment. No TTT. Std=0.0001. Flagged: eval-time GPTQ (#677). | [#535](https://github.com/openai/parameter-golf/pull/535) |
-| **1.1208** | @newjordan | 0.003 | 3 | ⚠️ XSA-all(11) + GPTQ (block64, percdamp=0.002). Flagged: eval-time GPTQ (#677). | [#587](https://github.com/openai/parameter-golf/pull/587) |
-| **1.1215** | @newjordan | 0.002 | 3 | Full GPTQ (Hessian-aware, block-128) + Early QAT (threshold 0.5, ~1750 steps) + Legal TTT (EMA scoring, cosine LR). On #414 stack. | [#578](https://github.com/openai/parameter-golf/pull/578) |
-| **1.1221** | @felipe-parodi | 0.035 | 3 | ❌ 20-epoch TTT + Partial RoPE + LN Scale. Pre-eval TTT. | [#398](https://github.com/openai/parameter-golf/pull/398) |
-| **1.1233** | @signalrush | 0.033 | 3 | 11L + EMA + XSA4 + VE128 + Tight SWA + GPTQ-lite + Late QAT@0.15 + warmdown 3500 + Partial RoPE + LN Scale + FA3. No TTT. | [#414](https://github.com/openai/parameter-golf/pull/414) |
-| **1.1250** | @jfprincz | 0.030 | 3 | 11L + Partial RoPE (16/64) + LN Scale + XSA (last 4) + EMA (0.997) + FA3. ⚠️ Late QAT inactive (torch.compile bug). | [#315](https://github.com/openai/parameter-golf/pull/315) |
-| **1.1256** | @alertcat | 0.029 | 3 | 11L + #315 stack + TTT (3 ep SGD, freeze 2 blocks) — TTT neutral on #315's base (±0.001) | [#338](https://github.com/openai/parameter-golf/pull/338) |
-| **1.1268** | @gowtham0992 | 0.027 | 3 | 11L + XSA on ALL 11 layers + GPTQ-lite + EMA(0.997) + Tight SWA + Late QAT + FA3. No TTT. | [#478](https://github.com/openai/parameter-golf/pull/478) |
-| **1.1280** | @jfprincz | 0.025 | 3 | 11L + XSA (last 4) + EMA (0.997) + SmearGate + BigramHash + WD 0.04 + FA3 | [#287](https://github.com/openai/parameter-golf/pull/287) |
-| **1.1299** | @chanwoo-park-official | 0.022 | 3 | 11L + **CANON-AC(last 5) + DeltaGate** (−0.006 BPB, 10% step cost) + XSA4 + Tight SWA + Partial RoPE + LN Scale + Late QAT. Unique technique — no other submission uses CANON. | [#400](https://github.com/openai/parameter-golf/pull/400) |
-| **1.1299** | @kasimte | 0.022 | 3 | 11L + #374 base (Tight SWA + VE128 + XSA4) + 3-epoch SGD TTT. ⚠️ TTT | [#455](https://github.com/openai/parameter-golf/pull/455) |
-| **1.1309** | @parinzee | 0.020 | 3 | 11L + **LeakyReLU(0.5)²** (preserves negative gradient flow vs relu²) + XSA4 + EMA + Partial RoPE + Int6 + 524K batch + warmdown 4500 (55% of training). No TTT. **Std=0.00017** (8× tighter than typical — suggests more stable training dynamics). Built on #180 base. | [#493](https://github.com/openai/parameter-golf/pull/493) |
-| **1.1313** | @timowhite88 | 0.019 | 3 | 11L Int6 MLP3x + SmearGate + TTT (3 ep SGD, freeze 2 blocks) + RoPE50K + SWA + WD 0.04 + FA3 ⚠️ pre-eval TTT ruled invalid | [#254](https://github.com/openai/parameter-golf/pull/254) |
-| **1.1320** | @saml212 | 0.018 | 3 | **12L** + Gradient-Guided Quant (int7/6/5) + Partial RoPE + LN Scale + XSA4 + EMA + 524K batch + MLP 1408 | [#332](https://github.com/openai/parameter-golf/pull/332) |
-| **1.1326** | @jfprincz | 0.017 | 3 | 11L + Int6 MLP3x + SmearGate + BigramHash + WD 0.04 + SWA + FA3 | [#198](https://github.com/openai/parameter-golf/pull/198) |
-| **1.1327** | @sofiabod | 0.017 | 3 | **7L** + MLP3x + BigramHash(2048) + SmearGate + AdamW TTT 5ep + int8+zlib. ⚠️ TTT | [#489](https://github.com/openai/parameter-golf/pull/489) |
-| **1.1328** | @signalrush | 0.017 | 3 | 11L + XSA4 + EMA + SmearGate + BigramHash(4096) + NTK-RoPE + Int5-MLP + 524K batch + FA3 + adaptive pruning (10-14%) | [#369](https://github.com/openai/parameter-golf/pull/369) |
-| **1.1400** | @saml212 | 0.005 | 3 | 11L Int6 + SmearGate + BigramHash + 524K batch + SWA + WD 0.04 | [#236](https://github.com/openai/parameter-golf/pull/236) |
-| **1.1402** | @andrewgcodes | 0.017 | 3 | 10L Int5-MLP + BigramHash(16384) + Causal TTT + SWA(0.3) + WD 0.08 + 786K batch | [#267](https://github.com/openai/parameter-golf/pull/267) |
-| **1.1468** | @unixmadtoonslab | 0.047 | 3 | 12L Int5-MLP + SmearGate + BigramHash + SWA + no QAT | [#76](https://github.com/openai/parameter-golf/pull/76) |
-| **1.1472** | @devin-cog | — | 3 | 11L + Int6 + Muon WD 0.038 + LR 0.025 + Sliding Window | [#179](https://github.com/openai/parameter-golf/pull/179) |
-| **1.1480** | @baudrillardsgh0st | 0.045 | 3 | 11L + Int6 QAT + Per-Dim SmearGate + SWA + WD 0.038 ⚠️ artifact 16.08MB | [#194](https://github.com/openai/parameter-golf/pull/194) |
-| **1.1507** | @dexhunter | 0.041 | 3 | Int6 STE + SmearGate + Seq2048 + OrthoInit + RoPE50K + SWA/100 | [#206](https://github.com/openai/parameter-golf/pull/206) |
-| **1.1507** | @SPThole | — | 3 | **AWQ** (activation-aware weight scaling, α=0.5) + Cyclic Muon Momentum (0.85-0.95 triangle) + ReLU² + 11L Shared (last block reused). AWQ closed 63% quant gap. | [#623](https://github.com/openai/parameter-golf/pull/623) |
-| **1.1526** | @MatoTeziTanka | — | 3 | PROTEUS v9: 11L INT6 + **single-epoch LoRA TTT** (score-then-train, compliant with Mar 24 ruling). TTT gain: −0.025. First post-sweep legal LoRA TTT. | [#633](https://github.com/openai/parameter-golf/pull/633) |
-| **1.1538** | @jfprincz | 0.035 | 3 | OrthoInit + Int6 MLP3x + SmearGate + BigramHash + FA3 | [#164](https://github.com/openai/parameter-golf/pull/164) |
-| **1.1541** | @alertcat | 0.035 | 3 | 12L Int5-MLP + Int6-Attn + SmearGate + BigramHash + SWA | [#219](https://github.com/openai/parameter-golf/pull/219) |
-| **1.1546** | @tamoghnokandar | 0.034 | 3 | Int6 MLP3x + NorMuon + FA3 + selective precision | [#173](https://github.com/openai/parameter-golf/pull/173) |
-| **1.1558** | @JayCheng113 | 0.032 | 3 | 11L + Low-Rank Q (r=192) + Int6 + Sliding Window | [#215](https://github.com/openai/parameter-golf/pull/215) |
-| **1.1575** | @saml212 | 0.029 | 3 | Int6 + MLP 3x + selective precision + long-context | [#114](https://github.com/openai/parameter-golf/pull/114) |
-| **1.1577** | @yahya010 | 0.029 | 3 | Int6 QAT + BigramHash + MLP 1344 + MuonWD 0.02 + Sliding Window | [#150](https://github.com/openai/parameter-golf/pull/150) |
-| **1.1602** | @dexhunter | 0.025 | 3 | Int6 STE + NorMuon + SWA + MLP3x + Sliding Window + U-Net skips | [#156](https://github.com/openai/parameter-golf/pull/156) |
-| **1.1605** | @seanward | 0.021 | 3 | Int6 MLP3x + MTP + Sliding Window (mean 1.1625) | [#88](https://github.com/openai/parameter-golf/pull/88) |
-| **1.1605** | @takhir-iota | 0.022 | 3 | Int6 MLP3x + Late-K Passthrough + SlidingWindow | [#99](https://github.com/openai/parameter-golf/pull/99) |
-| **1.1622** | @vmfunc | 0.021 | 3 | NorMuon + int6 STE + SWA + sliding window | [#89](https://github.com/openai/parameter-golf/pull/89) |
-| **1.1632** | @arjun-krishna1 | 0.020 | 3 | AutoResearch agent + MLP 3x + STE int6 QAT + seq4096 | [#66](https://github.com/openai/parameter-golf/pull/66) |
-| **1.1642** | @saikrishnarallabandi | 0.018 | 3 | Vocab 4096 + MLP 3x + Sliding Window | [#123](https://github.com/openai/parameter-golf/pull/123) |
+|-----|-----|-----|-----|-----|-----|
+| **0.4027** | @michaelwinczuk | 1.210 | 3 | **Swarm-Designed Causal BackoffNgramMixer.** Orders 2-10, 4M hash buckets, entropy-adaptive alpha, causal sequential chunk scoring (score-first, update-after). Full-vocab mixture distribution. Neural baseline 1.1245. MTP heads=2, LeakyReLU(0.75)², Parallel Muon. Beats #803 (0.4416) by 0.039. No TTT. Std=0.0015. | [#1094](https://github.com/openai/parameter-golf/pull/1094) |
+| **0.4416** | @pentxayc | 1.144 | 3 | **Complementary Training** — tokens predictable by bigram stats get lower loss weight during training. Model specializes on what n-grams can't predict, enabling higher eval-time n-gram alpha (20-75%). + Backoff N-gram Mixer + VRL + XSA-4. Std=0.0001. | [#803](https://github.com/openai/parameter-golf/pull/803) |
+| **0.4961** | @newjordan | 1.052 | 3 | **Bandit: ClownCar Crawler + Cubric Ngram9.** ClownCar crawler (4 flat + 1 crawler x4 loops, Frugendorff) + X-WING n-gram oracle (shared tables, 3D Cubric 54-cell warm-start, entropy-adaptive alpha 0.20-0.75, order-9). GPTQ-int6+zstd ~9.3MB. Pure neural baseline (SW BPB): 1.1867. Std=0.0003. | [#1083](https://github.com/openai/parameter-golf/pull/1083) |
+| **0.5466** | @travispchen | 0.967 | 3 | **Order-Adaptive Entropy Gating + BackoffNgramMixer + Drift-Free TTT.** Builds on #779 with per-order entropy thresholds from #774. Sub-0.55 BPB. Std=0.0010. | [#798](https://github.com/openai/parameter-golf/pull/798) |
+| **0.5644** | @newjordan | 0.937 | 3 | **X-WING: Shared N-gram Tables** — all 8 GPU ranks update tables with same tokens (full 62M-token view). Cubric per-order adaptive alpha. Std=0.0006. | [#800](https://github.com/openai/parameter-golf/pull/800) |
+| **0.8881** | @hypery11 | 0.391 | 3 | 11L + **order-adaptive 11-gram backoff** (orders 2-11) + XSA-all + GPTQ-lite. No TTT. 13.99MB. Std=0.0006. Upgrade from #788 (9-gram, 0.9059). | [#795](https://github.com/openai/parameter-golf/pull/795) |
+| **0.9059** | @hypery11 | 0.360 | 3 | 11L + **order-adaptive 9-gram backoff** (orders 2-9) + XSA-all + VRL + GA + GPTQ-lite. No TTT. 13.99MB artifact. Std=0.0009. | [#788](https://github.com/openai/parameter-golf/pull/788) |
+| **0.9362** | @newjordan | 0.309 | 3 | **Podracing III (Cubric Lite):** 7-gram backoff (2-7) + entropy-adaptive alpha + **per-order adaptive alpha scaling**. 0.026 improvement over Podracing II. Std=0.0004. | [#782](https://github.com/openai/parameter-golf/pull/782) |
+| **0.9370** | @travispchen | 0.308 | 3 | **Order-Adaptive Entropy Gating** — different entropy thresholds per n-gram order. Built on #753 + XSA-all. Std=0.0003. | [#774](https://github.com/openai/parameter-golf/pull/774) |
+| **0.9605** | @raahilshah | 0.268 | 3 | 11L Full GPTQ (within 596s budget) + multi-order n-gram backoff + entropy-adaptive alpha. Fixed-alpha variant: 0.9757. Std=0.0003. | [#778](https://github.com/openai/parameter-golf/pull/778) |
+| **0.9625** | @newjordan | 0.265 | 3 | **Podracing II:** Multi-order backoff (2-7) + entropy-adaptive alpha on #414 base. GPTQ in training budget. XSA4 + LeakyReLU². No TTT. Std=0.0005. | [#753](https://github.com/openai/parameter-golf/pull/753) |
+| **0.9850** | @andrewbaggio1 | 0.227 | 3 | **Cosine TTT (20ep) + multi-order n-gram cache (2-5gram backoff)** + entropy-adaptive alpha. First to combine TTT + n-gram. Std=0.0011. | [#741](https://github.com/openai/parameter-golf/pull/741) |
+| **1.0240** | @lukacf | 0.161 | 3 | **Multi-order n-gram backoff** + entropy-adaptive alpha + XSA-all + VRL + Full GPTQ + 7% prune. No TTT. Std=0.0003. Autonomous research via Goldfish. | [#702](https://github.com/openai/parameter-golf/pull/702) |
+| **1.0321** | @dcrow85 | 0.147 | 3 | **Gravity Tokenizer** -- replaces 659/765 BPE merge tokens by ablation-leverage scoring. Vanilla 12L 384d, no standard stack. Std=0.0011. ⚠️ **Tokenizer change -- needs extra scrutiny per README rules** | [#755](https://github.com/openai/parameter-golf/pull/755) |
+| **1.0337** | @Asukabot0 | 0.145 | 3 | XSA-all + LeakyReLU² + VRL + GA + **7-gram eval cache** (fixed alpha=0.40). No TTT. Std=0.0010. | [#715](https://github.com/openai/parameter-golf/pull/715) |
+| **1.0461** | @newjordan | 0.124 | 3 | **5-gram eval cache** (fixed alpha=0.20, count-min sketch) + LeakyReLU² + XSA4 + GPTQ. No TTT. Std=0.0010. ⚠️ **Eval-time GPTQ flagged by @valerio-oai** | [#706](https://github.com/openai/parameter-golf/pull/706) |
+| **1.0541** | @RoyiRa | 0.110 | 3 | **5-expert Hedge Mixer** + CROWN-Q + stride=64. Pre-TTT 1.1254, TTT gain -0.071. High seed variance (std=0.012). | [#700](https://github.com/openai/parameter-golf/pull/700) |
+| **1.0909** | @resouer | 0.048 | 3 | **9L** + 5-gram eval cache (fixed alpha=0.20) + XSA-all + LeakyReLU² + int8 quant (14.7MB). No TTT. Std=0.0011. | [#740](https://github.com/openai/parameter-golf/pull/740) |
+| **1.1086** | @mikeapedia | 0.018 | 3 | **Turbo-Muon + EngramLite + GPTQ mixed int6/int7.** Turbo-Muon: AOL preconditioning + Polar Express coefficients + row_col normalization (4 NS iters). EngramLite: multi-head prime-based hash embeddings (bigram+trigram, 2 heads, 8192 buckets). GPTQ mixed-precision with Hessian sensitivity-based bit allocation. Brotli+byte-shuffle compression. MLP 3.5x LeakyReLU(0.3)². Built on #609. No TTT. Std=0.0006. | [#1089](https://github.com/openai/parameter-golf/pull/1089) |
+| **1.1099** | @newjordan | 0.016 | 3 | **Rascal: 11L XSA-all + Parallel Muon + Coprime loader + Bigram2048 + RoPE16 + SWA + Late QAT.** No GPTQ — naive int6 embed + 5 layers, zstd. ~15.5MB, 27M params. No TTT. Std~0.0002. | [#1120](https://github.com/openai/parameter-golf/pull/1120) |
+| **1.1122** | @dexhunter | 0.012 | 3 | **Coprime-Stride Loader + Full Hessian GPTQ + XSA-all.** Pure neural, no TTT — sliding window only (87s eval). Coprime-stride multi-shard loader (#726-style) for batch diversity. Full Hessian GPTQ with Cholesky error compensation + column reordering (14s within training budget). XSA all 11 layers. BigramHash(2816x112). Built on #549 stack. Beats official SOTA (1.1194) by 0.012 nats. Std=0.0004. | [#1060](https://github.com/openai/parameter-golf/pull/1060) |
+| **1.1133** | @Bortlesboat | 0.010 | 3 | **Coprime-Stride Loader + Full GPTQ + XSA-all** (builds on #1060). GPTQ reserve optimized (14s→10s, +44 extra training steps). FA3/FA2 graceful fallback. No TTT, 85s eval. Std=0.0001. | [#1099](https://github.com/openai/parameter-golf/pull/1099) |
+| **1.1140** | @Gusanidas | 0.009 | 12 | **ResidLambdas + Split-LR + Train-Budget GPTQ + Coprime Loader.** Residual lambdas: learnable per-sublayer residual scaling (init sqrt(1.1), 5x scalar LR). Split-LR for different param groups. 12-seed validation (std=0.0005). No TTT. Built on #549. Δ=0.0091 nats vs SOTA, p<0.0001. | [#1130](https://github.com/openai/parameter-golf/pull/1130) |
+| **1.1142** | @abaybektursun | 0.009 | 3 | **Val-Calibrated GPTQ** + XSA-all + BigramHash 3072x112. No TTT. Std=0.0001. | [#728](https://github.com/openai/parameter-golf/pull/728) |
+| **1.1147** | @abaybektursun | 0.008 | 3 | **AR Self-Gen Full Hessian GPTQ** + XSA-all + BigramHash 3072x112. Model generates own calibration data (64 seqs, 2048 tokens, temp=0.8) — closes 84% of val-vs-random gap. No TTT (25 failed attempts). Parallel Muon, Late QAT, EMA+SWA, LZMA. From SOTA holder. Std~0.0004. | [#1019](https://github.com/openai/parameter-golf/pull/1019) |
 
 </details>
 
 <details>
-<summary><strong>All Not Yet Self-Validated Submissions (25 entries)</strong></summary>
+<summary><strong>All Not Yet Validated Submissions (74 entries)</strong></summary>
 
-Competitive submissions that haven't demonstrated ≥0.005-nat significance. Official SOTA: 1.1194 (updated Mar 24).
+Competitive submissions that haven't demonstrated statistical significance.
 
 | BPB | Author | Seeds | Techniques | PR |
-|-----|--------|-------|-----------|-----|
+|-----|-----|-----|-----|-----|
+| **0.0000** | @grim-hitman0XX | 0 | DenseFormer + VRL + XSA on last 4 layers + Gradient Clipping. Pending 8xH100 eval. | [#862](https://github.com/openai/parameter-golf/pull/862) |
+| **0.0180** | @sofiabod | 3 | Packed Causal N-gram + Dirichlet Backoff (0.0180). Post-sweep. Normalization status unclear. | [#1056](https://github.com/openai/parameter-golf/pull/1056) |
+| **0.0905** | @vimeto | 1 | **Seed-Regenerated Random Model + Incremental N-gram Cache.** Model weights generated from seed (not trained) — neural baseline 1.503 BPP. All compression from n-gram cache. 1-seed only, run on MI250X (not H100). Pending H100 validation + 2 more seeds. | [#1095](https://github.com/openai/parameter-golf/pull/1095) |
+| **0.1130** | @sofiabod | 3 | **Single-Pass Packed N-gram + Dirichlet CTW** (0.1130). Post-sweep submission. Normalization status unclear — Dirichlet CTW may handle it correctly. | [#1030](https://github.com/openai/parameter-golf/pull/1030) |
+| **0.4311** | @Naazimsnh02 | 0 | Complementary Training + Backoff N-gram Mixer + TTT (0.4311). Post-sweep. | [#1033](https://github.com/openai/parameter-golf/pull/1033) |
+| **0.6364** | @Naazimsnh02 | 0 | Depth Recurrence + Multi-Order N-gram Backoff (0.6364). | [#808](https://github.com/openai/parameter-golf/pull/808) |
+| **0.6671** | @hypery11 | 3 | BackoffNgramMixer (0.6671). | [#813](https://github.com/openai/parameter-golf/pull/813) |
+| **0.6672** | @minh-stakc | 0 | 11L + Multi-Order N-gram Backoff + Entropy-Adaptive Alpha. Sub-0.7 BPB. | [#770](https://github.com/openai/parameter-golf/pull/770) |
+| **0.8822** | @newjordan | 3 | **Medusa S2:** DeltaNet Crawler (4 flat layers + 1 crawler x4 loops, Frugendorff). Loop-aware GPTQ (int6+zstd). EMA. 9.8MB artifact. Std=0.105 — high variance, fails p<0.01. | [#1047](https://github.com/openai/parameter-golf/pull/1047) |
+| **0.8960** | @armantsaturian | 0 | 7-gram n-gram cache (0.8960). | [#797](https://github.com/openai/parameter-golf/pull/797) |
+| **0.9258** | @agalimova | 2 | Kitchen Sink: 7-gram + XSA6 + BigramHash4K + Cosine TTT on #741 base. 2 seeds (3rd running). | [#776](https://github.com/openai/parameter-golf/pull/776) |
+| **0.9984** | @newjordan | 3 | **Medusa (original):** DeltaNet Crawler + Frugendorff. Flagged: GPTQ calibration read training data after 600s wallclock cap. Superseded by #1047. | [#1028](https://github.com/openai/parameter-golf/pull/1028) |
+| **1.0226** | @shalyhinpavel | 0 | **Pure Neural GDN** — 1.0226 BPB without n-gram cache. | [#875](https://github.com/openai/parameter-golf/pull/875) |
 | **1.0400** | @pentxayc | 1 | Hedge Mixer + VRL + AdamW TTT + Polyak EMA. Freeze 9/11 blocks. ⚠️ Hedge Mixer + n-gram. | [#731](https://github.com/openai/parameter-golf/pull/731) |
-| **1.0717** | @hypery11 | 3 | 10L + 7-gram eval cache (alpha=0.40, XOR-hash). Std=0.016 — fails p<0.01. ⚠️ N-gram cache. | [#724](https://github.com/openai/parameter-golf/pull/724) |
 | **1.0891** | @amaljithkuttamath | 1 | 11L + Value Residual + Gated Attention + AdamW TTT on #442 base. Pre-quant 1.1545. ⚠️ TTT | [#490](https://github.com/openai/parameter-golf/pull/490) |
 | **1.0920** | @Christopher-Lee-McClendon | 1 | GEPA 30k steps + int6 GPTQ-lite + legal SGD TTT. 4xA100 non-record. | [#668](https://github.com/openai/parameter-golf/pull/668) |
 | **1.0944** | @Christopher-Lee-McClendon | 1 | GEPA 25k steps (13k warmdown) + int6 GPTQ-lite + legal SGD TTT. 4xA100 non-record. Float base 1.1088. | [#644](https://github.com/openai/parameter-golf/pull/644) |
+| **1.0945** | @danielxmed | 0 | N-gram Cache + Entropy-Adaptive Alpha (1.0945). Post-sweep — normalization status unclear. | [#1026](https://github.com/openai/parameter-golf/pull/1026) |
 | **1.0983** | @Christopher-Lee-McClendon | 1 | GEPA 20k steps (8k warmdown) + int6 GPTQ-lite + legal SGD TTT (10ep). 4xA100 non-record. Float base 1.1153. | [#628](https://github.com/openai/parameter-golf/pull/628) |
-| **1.1078** | @agalimova | 3 | XSA6 + BigramHash(4096) on #700 base. Std=0.0045 — fails p<0.01 (t=-3.3). | [#720](https://github.com/openai/parameter-golf/pull/720) |
+| **1.1085** | @NewyorkDev | 1 | **JEPA + AdamW Pre-Quant TTT + Full Hessian GPTQ + FA3.** 11L 512d U-Net (5 enc + 6 dec), JEPA auxiliary loss (multi-horizon 1/2/4/8), AdamW TTT before quantization (3 epochs), int6 Full Hessian GPTQ (128-batch), XSA-all, BigramHash(2048), LZMA. Negative: SGD TTT fails on CastedLinear. 1 seed only. | [#1006](https://github.com/openai/parameter-golf/pull/1006) |
+| **1.1093** | @aruniyer | 3 | 15L Depth Recurrence + LeakyReLU² + Cosine TTT. Pure neural, below official SOTA. | [#857](https://github.com/openai/parameter-golf/pull/857) |
+| **1.1130** | @malc3om | 3 | **Standard 11L SOTA stack reproduction.** LeakyReLU², XSA4, Partial RoPE, LN Scale, VE128, EMA, Late QAT, Legal TTT, GPTQ-lite. Claims 1.1130 but only overall BPP reported, no per-seed breakdown visible. | [#1077](https://github.com/openai/parameter-golf/pull/1077) |
+| **1.1146** | @unknown | 1 | **EngramLite + Gated Skips + Full GPTQ + FA3.** Combines EngramLite (from #1089) with sigmoid-gated skip connections. 1-seed, 2 pending. | [#1122](https://github.com/openai/parameter-golf/pull/1122) |
+| **1.1147** | @abaybektursun | 1 | **Negative results (7 experiments, all negative) on #1019 stack.** kNN-LM single/multi-layer (+0.003), sliding window logit averaging (+0.024), SelfExtend 4096 (+0.48), n-gram log-linear blend (−0.0003 but too slow), mixed-precision GPTQ int4/int8 (+0.047), loss truncation 95th pct (+0.081). From SOTA holder @abaybektursun. | [#1103](https://github.com/openai/parameter-golf/pull/1103) |
+| **1.1154** | @AnubhavBharadwaaj | 3 | **SLOT + LeakyReLU² + Legal TTT + Parallel Muon.** Second SLOT submission (after #1084). SLOT delta vector + score-first TTT stacked. Std=0.0002. | [#1128](https://github.com/openai/parameter-golf/pull/1128) |
 | **1.1164** | @Asukabot0 | 1 | XSA-all + LeakyReLU² + VRL + GA (no VE128). No TTT. 1xH100 NVL. Pending 8xH100 3-seed. | [#638](https://github.com/openai/parameter-golf/pull/638) |
+| **1.1170** | @vimeto | 1 | **Fused Triton MLP kernel + Online Hessian GPTQ.** Custom Triton kernel fuses linear→LeakyReLU(0.5)→square: 70ms/step (vs 87ms), 33% more training steps. Hessian accumulated during training (every 25 steps) — eliminates GPTQ budget tradeoff. XSA-all, BigramHash(4096). No TTT. 1-seed, pending 3-seed. | [#1072](https://github.com/openai/parameter-golf/pull/1072) |
 | **1.1171** | @raahilshah | 3 | XSA-all + Full GPTQ + Parallel Muon + Selective Pruning + LZMA. No TTT. Same #609 stack. 0.00394 nats (fails bar). | [#634](https://github.com/openai/parameter-golf/pull/634) |
+| **1.1172** | @danialht | 3 | Residual Input Mixing + mixed int6 GPTQ + grouped TTT + MLP 3.5x. GPTQ timing fixed from #615. | [#790](https://github.com/openai/parameter-golf/pull/790) |
+| **1.1174** | @unknown | 3 | **CROWN-Q + GPTQ + Legal TTT.** CROWN-Q regularization with standard GPTQ + TTT stack. Std unknown. | [#1129](https://github.com/openai/parameter-golf/pull/1129) |
 | **1.1176** | @Gusanidas | 1 | MiLe loss + 8-bit Muon + Cache+Backout on #549. 4xB200 — needs H100. | [#703](https://github.com/openai/parameter-golf/pull/703) |
+| **1.1179** | @aamodbhatt | 3 | **Muon TTT (Newton-Schulz orthogonalized, NS=3) + Entropy-Adaptive Epochs** (2/3/4 by chunk entropy, thresholds H=1.75/2.1). 11L, BigramHash(1536), XSA4, score-first TTT (LR=0.002, chunk=32768). No n-gram cache. Pre-quant 1.137, TTT gain -0.019. Std~0.0002. | [#999](https://github.com/openai/parameter-golf/pull/999) |
 | **1.1180** | @hypery11 | 3 | 10L Batched LoRA TTT (rank-8, 3 epochs, 64 docs parallel). TTT gain: −0.033. Fails 0.005-nat bar. | [#713](https://github.com/openai/parameter-golf/pull/713) |
 | **1.1182** | @msisovic | 3 | Depth Recurrence (layers 4+5 repeated, 11→13 virtual). +TTT. Std=0.0005. Fails bar. | [#686](https://github.com/openai/parameter-golf/pull/686) |
+| **1.1184** | @yufengli-oai | 1 | **LeakyReLU² + 4-epoch Legal TTT** (lr=0.0025) on #549 stack. Skips diagnostic pre-TTT evals to keep eval under 10 min. | [#1039](https://github.com/openai/parameter-golf/pull/1039) |
+| **1.1185** | @michaelwinczuk | 3 | LeakyReLU(0.75)² + Legal TTT + Parallel Muon (1.1185). 3-seed. Below official SOTA. | [#977](https://github.com/openai/parameter-golf/pull/977) |
+| **1.1185** | @michaelwinczuk | 1 | **MTP-2 Funnel:** Multi-Token Prediction (2-head, weight=0.1) as auxiliary training signal on #549 stack. MTP heads discarded at export — zero artifact cost. LeakyReLU(0.75)². | [#1031](https://github.com/openai/parameter-golf/pull/1031) |
+| **1.1185** | @AnubhavBharadwaaj | 3 | **First SLOT submission.** Optimizes single delta vector (512 dims) at last hidden layer per batch during eval. Stacks on TTT: -0.0008 BPB over baseline. Also tested CTW — negative result (+0.005 worse). Based on Hu et al. arXiv:2505.12392. Std=0.0003. | [#1084](https://github.com/openai/parameter-golf/pull/1084) |
 | **1.1186** | @EthanYangTW | 3 | CROWN-Q + Full GPTQ (within training budget) + SWA/EMA + XSA-all + VRL. No TTT. | [#693](https://github.com/openai/parameter-golf/pull/693) |
 | **1.1187** | @Upsalla | 3 | RoPE NTK-Scaling bug fix + BigramHash(3072) + Late QAT@0.57 + Legal TTT. Std=0.00024. | [#714](https://github.com/openai/parameter-golf/pull/714) |
 | **1.1190** | @ChaosCodes | 1 | GPTQ int6 + SGD TTT + LeakyReLU² on #414 stack. A800 hardware (non-record). Est. ~1.122 on H100. | [#610](https://github.com/openai/parameter-golf/pull/610) |
-| **1.1194** | @Joeavaib | 3 | 9L "Maestro" arch + LeakyReLU² + Legal TTT + Parallel Muon + GPTQ-lite + LZMA. Ties SOTA (0.00006 nats). | [#625](https://github.com/openai/parameter-golf/pull/625) |
-| **1.1246** | @unnir | 1 | 11L + Tight SWA (scale<0.2, zero penalty) + Shared VE128 (layers 9-10) + Partial RoPE + LN Scale + Late QAT + XSA4 + SmearGate + FA3 | [#374](https://github.com/openai/parameter-golf/pull/374) |
-| **1.1247** | @greqone | 1 | #315 stack + Backout Connection + native FA3 + torch.compile | [#394](https://github.com/openai/parameter-golf/pull/394) |
-| **1.1260** | @dannywillowliu-uchi | 1 | #374 stack + GPTQ-lite (per-layer clip percentile search). Self-Distillation TTT: neutral (−0.0003). | [#379](https://github.com/openai/parameter-golf/pull/379) |
-| **1.1354** | @ibarrajo | 1 | 11L + Partial XSA (last 3) + TTT + 524K batch + RoPE50K (no FA3) ⚠️ pre-eval TTT | [#290](https://github.com/openai/parameter-golf/pull/290) |
-| **1.1354** | @simonbissonnette | 3 | 11L + EMA + BigramHash(12288) + Mixed Int5 + FA3 (fails p<0.01: t=−6.0 vs −7.0) | [#466](https://github.com/openai/parameter-golf/pull/466) |
-| **1.1357** | @dennisimoo | 1 | 11L + XSA (last 4) + EMA + SmearGate + BigramHash(2048) + 524K batch + WD 0.04 + torch.compile (SDPA fallback) | [#307](https://github.com/openai/parameter-golf/pull/307) |
-| **1.1365** | @ofirkris | 2 | 10L + XSA4 + EMA + Partial RoPE + LN Scale + Int5-MLP/Int6-Attn + 3.2% pruning. No TTT. | [#458](https://github.com/openai/parameter-golf/pull/458) |
-| **1.1399** | @Mapika | 3 | 11L + XSA4 + EMA + SmearGate + BigramHash(2048) + Int5-MLP/Int6-Attn/Int8-Embed + 8% pruning (fails 0.005-nat by 0.00004) | [#349](https://github.com/openai/parameter-golf/pull/349) |
-| **1.1419** | @chris-buckley | 1 | 11L + XSA4 + EMA + TTT (pre-quant 1.1581; no FA3, SDPA fallback, 5344/9000 steps; seeds 2/3 pending) | [#317](https://github.com/openai/parameter-golf/pull/317) |
+| 1.1194 | @Joeavaib | 3 | 9L "Maestro" arch + LeakyReLU² + Legal TTT + Parallel Muon + GPTQ-lite + LZMA. Ties SOTA (0.00006 nats). | [#625](https://github.com/openai/parameter-golf/pull/625) |
+| 1.1198 | @Robby955 | 3 | Full GPTQ + XSA-4 + Score-First TTT. | [#734](https://github.com/openai/parameter-golf/pull/734) |
+| 1.1215 | @aryanbhosale | 0 | 11L Parallel Muon + LN Scale + LeakyReLU² + Legal TTT (1.1215). | [#838](https://github.com/openai/parameter-golf/pull/838) |
+| 1.1217 | @nothingLiva | 4 | **Adaptive Precision Embedding Quantization:** int8 for top-100 tokens (53% of text), int6 for rest. 15.8MB artifact. Std=0.0005. | [#1042](https://github.com/openai/parameter-golf/pull/1042) |
+| 1.1219 | @autocode-rayes | 0 | Full-Training QAT (1.1219). | [#836](https://github.com/openai/parameter-golf/pull/836) |
+| 1.1231 | @pattern4bots | 0 | Frequency-Weighted Embedding Quantization (1.1231). Non-record. | [#898](https://github.com/openai/parameter-golf/pull/898) |
+| 1.1246 | @unnir | 1 | 11L + Tight SWA (scale<0.2, zero penalty) + Shared VE128 (layers 9-10) + Partial RoPE + LN Scale + Late QAT + XSA4 + SmearGate + FA3 | [#374](https://github.com/openai/parameter-golf/pull/374) |
+| 1.1247 | @greqone | 1 | #315 stack + Backout Connection + native FA3 + torch.compile | [#394](https://github.com/openai/parameter-golf/pull/394) |
+| 1.1260 | @dannywillowliu-uchi | 1 | #374 stack + GPTQ-lite (per-layer clip percentile search). Self-Distillation TTT: neutral (−0.0003). | [#379](https://github.com/openai/parameter-golf/pull/379) |
+| 1.1261 | @okezue | 1 | **Bayesian posterior packets** + selective gating on #549 stack. Conjugate online updating mixes training priors with eval-time counts. +0.0006 over pure neural TTT. | [#1043](https://github.com/openai/parameter-golf/pull/1043) |
+| 1.1300 | @jimliu741523 | 0 | Poly5 Softcap + BigramHash(3072) + Wider GPTQ-lite. | [#816](https://github.com/openai/parameter-golf/pull/816) |
+| 1.1344 | @mrdavtan | 1 | **Compression moonshots (8 negative findings):** Procrustes (91% MSE reduction but 380% larger artifact), selective fp16 embedding, non-monotonic pruning+zstd. Key finding: int6+zstd is near-optimal. | [#1048](https://github.com/openai/parameter-golf/pull/1048) |
+| 1.1354 | @ibarrajo | 1 | 11L + Partial XSA (last 3) + TTT + 524K batch + RoPE50K (no FA3) ⚠️ pre-eval TTT | [#290](https://github.com/openai/parameter-golf/pull/290) |
+| 1.1354 | @simonbissonnette | 3 | 11L + EMA + BigramHash(12288) + Mixed Int5 + FA3 (fails p<0.01: t=−6.0 vs −7.0) | [#466](https://github.com/openai/parameter-golf/pull/466) |
+| 1.1357 | @dennisimoo | 1 | 11L + XSA (last 4) + EMA + SmearGate + BigramHash(2048) + 524K batch + WD 0.04 + torch.compile (SDPA fallback) | [#307](https://github.com/openai/parameter-golf/pull/307) |
+| 1.1365 | @ofirkris | 2 | 10L + XSA4 + EMA + Partial RoPE + LN Scale + Int5-MLP/Int6-Attn + 3.2% pruning. No TTT. | [#458](https://github.com/openai/parameter-golf/pull/458) |
+| 1.1399 | @Mapika | 3 | 11L + XSA4 + EMA + SmearGate + BigramHash(2048) + Int5-MLP/Int6-Attn/Int8-Embed + 8% pruning (fails 0.005-nat by 0.00004) | [#349](https://github.com/openai/parameter-golf/pull/349) |
+| 1.1400 | @aazizyan | 0 | First Viable 3-Loop Recurrence — Birkhoff + Output-LN + Timestep Scaling. | [#855](https://github.com/openai/parameter-golf/pull/855) |
+| 1.1419 | @chris-buckley | 1 | 11L + XSA4 + EMA + TTT (pre-quant 1.1581; no FA3, SDPA fallback, 5344/9000 steps; seeds 2/3 pending) | [#317](https://github.com/openai/parameter-golf/pull/317) |
+| 1.1448 | @BhatiaUday | 0 | LeakyReLU² + TrigramHashEmbedding. | [#884](https://github.com/openai/parameter-golf/pull/884) |
+| 1.1509 | @Hilo-Hilo | 1 | **XSA-all-layers + VRL + bigram3072 + lzma9.** Negative finding: AdamW TTT at lr=0.002 degrades to 1.2804 (SGD better for TTT). 15.3MB artifact. | [#1045](https://github.com/openai/parameter-golf/pull/1045) |
+| 1.1520 | @fielding | 0 | Knowledge Distillation — negative result (1.152). Non-record. | [#1029](https://github.com/openai/parameter-golf/pull/1029) |
+| 1.1682 | @himanshudongre | 1 | **First zero-throughput-penalty SSM in Parameter Golf.** S4D-Lin hybrid: 2 SSM layers (learned exp-decay kernels via F.conv1d) + 9 Transformer layers (XSA). 116ms/step matching baseline. GPTQ-int5, 13MB artifact. Finding: attention > SSM in lower layers at this scale; GPTQ-int5 degrades SSM weights more. Non-record. | [#1013](https://github.com/openai/parameter-golf/pull/1013) |
+| 1.1900 | @MVPandey | 0 | JEPA Self-Distillation with EMA Target Encoder. Novel architecture. Non-record. | [#896](https://github.com/openai/parameter-golf/pull/896) |
+| 1.2135 | @nickferrantelive | 3 | 11L 512d Int8+Zlib Baseline. | [#858](https://github.com/openai/parameter-golf/pull/858) |
+| 1.2174 | @Jayteare | 1 | **Adaptive Markov mixing:** 1024x1024 unigram transition table + learned per-position gate with confidence thresholding. 11L, 786K batch. No QAT, no EMA. | [#1046](https://github.com/openai/parameter-golf/pull/1046) |
+| 1.2300 | @andrewmouldon | 3 | **ASQU (Asymmetric Squared Unit):** Per-channel learned asymmetric activation. Consistent -0.0011 BPB vs LeakyReLU² across 3 seeds. Non-record track. | [#1035](https://github.com/openai/parameter-golf/pull/1035) |
+| 1.2560 | @serdardoesml | 1 | **Universal Transformer (README wishlist).** Shared UT-style recurrent block with 2x attention before 3-layer MLP. Depth scheduling (0:2, 2000:6). Bias on pre-norms acts as depth embedding. Noisy QAT. Non-record. | [#1088](https://github.com/openai/parameter-golf/pull/1088) |
+| 1.3600 | @ikermoel | 3 | **Masked Diffusion (MDLM):** Bidirectional attention training, pseudo-log-likelihood eval (8 passes x 50% mask). 12.9MB artifact. First text diffusion submission (README wishlist). | [#1053](https://github.com/openai/parameter-golf/pull/1053) |
+| 1.3646 | @wfproc | 1 | **QAT dead-code bug confirmed in SOTA #549** (torch.compile constant-folds Late QAT). Fix via tensor-scale STE worsens int6 gap — WD+EMA may already compensate. 7 techniques swept (Muon-VS, Deep Delta, Thinking Deeper, etc.), all negative. Key heuristic: 1ms overhead = 0.007 BPB at 83ms/step. 1xH100, non-record research. | [#1032](https://github.com/openai/parameter-golf/pull/1032) |
+| 1.3700 | @abaybektursun | 0 | **Negative result: MC Dropout (K=16 ensemble) hurts small LMs.** dropout=0.30: +0.005 BPB, dropout=0.05: +0.002 BPP. Sub-networks lack diversity at 17M params. Deterministic single pass strictly better. | [#1021](https://github.com/openai/parameter-golf/pull/1021) |
+| 1.5134 | @AnirudhRahul | 0 | **Corrected full-vocab normalization rerun.** With proper normalization, n-gram path degrades to 1.5134 — WORSE than neural sliding baseline. The n-gram cache 'improvement' was entirely a normalization artifact. | [#978](https://github.com/openai/parameter-golf/pull/978) |
+| 1.8989 | @greqone | 1 | **H-Net:** First learned byte-level tokenization (README wishlist). Differentiable chunking gate, 22M params, vocab=260. Non-record unlimited compute track. | [#1044](https://github.com/openai/parameter-golf/pull/1044) |
 
 </details>
-
----
 
 <details>
 <summary><strong>Glossary</strong></summary>
@@ -727,6 +850,7 @@ Competitive submissions that haven't demonstrated ≥0.005-nat significance. Off
 
 </details>
 
+
 ---
 
 <details>
@@ -734,6 +858,87 @@ Competitive submissions that haven't demonstrated ≥0.005-nat significance. Off
 
 | Time | Update |
 |------------|--------|
+| Mar 30, 4:32 AM | #1100 closed, fixed #1060 BPP typo |
+| Mar 30, 4:10 AM | +#1130 (1.1140, 12-seed, ResidLambdas) |
+| Mar 30, 3:01 AM | Batch: +#1128 +#1129 +#1122 (below-SOTA submissions) |
+| Mar 30, 12:17 AM | Added CUTLASS EVT, gated skips, Brotli+shuffle to techniques |
+| Mar 29, 10:00 PM | +#1120 (1.1099, Rascal — 2nd best pure neural) |
+| Mar 29, 9:01 PM | Added nGPT #1108 and UT #1088/#1110 to non-record |
+| Mar 29, 4:41 PM | +#1103 (7 negative results from SOTA holder) |
+| Mar 29, 3:50 PM | #1099 updated: 1.1136→1.1133 |
+| Mar 29, 3:02 PM | Updated predictions, +#1100 to non-record |
+| Mar 29, 2:51 PM | +#1100 (1.1465, first diffusion < AR baseline) |
+| Mar 29, 2:51 PM | +#1099 (1.1136, coprime stride record) |
+| Mar 29, 1:40 PM | +#1095 (0.0905, seed-regen + n-gram, 1-seed MI250X) |
+| Mar 29, 1:00 PM | +#1094 (0.4027, causal BackoffNgramMixer) |
+| Mar 29, 11:32 AM | Turbo-Muon + Engram marked tried per #1089 |
+| Mar 29, 11:11 AM | +#1088 (1.256, Universal Transformer wishlist) |
+| Mar 29, 11:11 AM | +#1089 (1.1086, new best pure neural!) |
+| Mar 29, 9:41 AM | SLOT/CTW marked tried, +fused kernel +online GPTQ |
+| Mar 29, 9:39 AM | +#1072 (1.117, fused Triton kernel) |
+| Mar 29, 9:39 AM | +#1084 (1.1185, first SLOT submission) |
+| Mar 29, 9:39 AM | +#1083 (0.4961, Bandit n-gram) |
+| Mar 29, 1:40 AM | #1060 updated: 1.1123→1.1122 |
+| Mar 29, 12:21 AM | Added 3 new techniques from web research |
+| Mar 29, 12:01 AM | Fixed stale TARA present-tense in tier_analysis |
+| Mar 28, 11:33 PM | Deep research: rewrote predictions for #1060 era |
+| Mar 28, 11:33 PM | #1055 closed (TARA causality violation) |
+| Mar 28, 11:20 PM | +#1060 (1.1123, pure neural below SOTA, no TTT) |
+| Mar 28, 11:05 PM | Deep research: fixed stale #933 ref, pred #2, +#1012 |
+| Mar 28, 10:41 PM | Added #1032 QAT dead-code finding to deep dives |
+| Mar 28, 10:35 PM | Deep research: fixed lineage, +#1032 +#1013 |
+| Mar 28, 10:31 PM | Updated stale summary and pending_summary prose |
+| Mar 28, 10:29 PM | #754 closed |
+| Mar 28, 10:29 PM | +#1055 (0.9693, TARA — training-free eval) |
+| Mar 28, 10:27 PM | Added 7 new techniques from web research |
+| Mar 28, 10:27 PM | Closed 20 PRs from enforcement lists |
+| Mar 28, 10:14 PM | Deep research: closed 11 PRs, enriched 5, fixed lineage |
+| Mar 28, 10:05 PM | #995 closed |
+| Mar 28, 10:05 PM | +#1053 Masked Diffusion: first text diffusion |
+| Mar 28, 10:05 PM | +#1044 H-Net: first byte-level tokenization |
+| Mar 28, 10:05 PM | +#1042 (1.1217, Adaptive Precision Embedding) |
+| Mar 28, 10:05 PM | +#1047 (0.8822, DeltaNet Crawler S2) |
+| Mar 28, 10:00 PM | +#1055 (0.97, TARA training-free), +#1056 (0.0180, Dirichlet) |
+| Mar 28, 11:26 AM | +#1030 (0.1130, Dirichlet CTW post-sweep), +#1029 (KD negative) |
+| Mar 28, 9:34 AM | +#1019 (1.1147, AR Self-Gen GPTQ from SOTA holder), +#1026 (1.0945) |
+| Mar 27, 5:10 PM | +#991 (1.1145, pure neural below SOTA) |
+| Mar 27, 4:21 PM | Enforcement sweep: @valerio-oai closed 33 PRs (hashed n-gram caches invalidated) |
+| Mar 27, 12:50 PM | #978: corrected normalization → n-gram cache degrades to 1.51, WORSE than neural baseline |
+| Mar 27, 11:51 AM | N-gram normalization bug: #931/#962 closed. #933/#944 affected. Sub-0.1 scores likely artifacts. |
+| Mar 27, 8:30 AM | +#962 (0.0214, low eval-time memory packed n-gram) |
+| Mar 27, 2:11 AM | +#944 (0.0165, packed causal memory + Dirichlet — new best validated) |
+| Mar 26, 10:00 PM | +#933 (0.0804, CacheMoney — new validated best) |
+| Mar 26, 9:30 PM | +#931 (0.0498, packed n-gram artifact + learned gate) |
+| Mar 26, 7:40 PM | +#924 (0.0280, order-16 frozen n-gram oracle) |
+| Mar 26, 6:40 PM | +#921 (0.0939), +#922 (0.0972), +#918 (0.1653) |
+| Mar 26, 5:21 PM | +#913 (0.0887, 622KB — Cache Is All You Need, new best) |
+| Mar 26, 4:00 PM | +#907 (0.0960, two-pass order-12) |
+| Mar 26, 3:10 PM | +#900 (0.1197, Dirichlet posterior mixing) |
+| Mar 26, 1:43 PM | Batch add 14 previously skipped submissions |
+| Mar 26, 12:20 PM | +#888 (0.0942), +#890 (0.4405), +#887 (0.9642) |
+| Mar 26, 11:40 AM | +#883 (0.0308, order-13 n-gram oracle, 1 seed, 8xL20Z) |
+| Mar 26, 11:10 AM | +#880 (0.1003, PhraseCache + RegimeTracker) |
+| Mar 26, 10:11 AM | +#870 (0.0935, BROADSIDE full-rescore — new best, sub-0.1) |
+| Mar 26, 10:00 AM | +#868 (0.1181, budgeted two-pass — new best), +#869 (0.1290) |
+| Mar 26, 9:30 AM | +#864 (0.2841, n-gram backoff, 3-seed) |
+| Mar 26, 8:30 AM | +#859 (0.1582, no-TTT learned mixer — 1 seed) |
+| Mar 26, 8:19 AM | Batch add: +#857 (1.1093), +#849, #836, #838, #825, #813, #814 |
+| Mar 26, 7:20 AM | +#853 (0.1315, two-pass+order-12, 2 seeds), +#852 (1.1189 pure neural) |
+| Mar 26, 6:40 AM | +#851 (0.2071, order-adaptive + Hedge Mixer) |
+| Mar 26, 5:21 AM | +#846 (0.1434, two-pass n-gram rescoring — new best, compliance question) |
+| Mar 26, 5:10 AM | +#843 (0.2834, order-12 + 256K chunks, 2 seeds) |
+| Mar 26, 4:10 AM | +#840 (0.2873, fine-grained 65K chunks — new best) |
+| Mar 26, 1:20 AM | +#834 (0.1663, learned gate + frozen n-gram oracle — new best, novel approach) |
+| Mar 25, 11:50 PM | #810 updated 0.9393→0.3001 (two-phase shared n-gram cache) |
+| Mar 25, 9:20 PM | +#809 (0.2952, order-9 n-gram + sequential chunks — new best) |
+| Mar 25, 8:40 PM | +#803 (0.4416, Complementary Training + Backoff N-gram — new best) |
+| Mar 25, 7:40 PM | +#800 (0.5644, X-WING shared n-gram tables) |
+| Mar 25, 7:10 PM | +#798 (0.5466, order-adaptive + BackoffNgramMixer — new best) |
+| Mar 25, 6:50 PM | +#796 (0.6567, distributed cache pre-fill — new best) |
+| Mar 25, 6:40 PM | +#795 (0.8881, 11-gram order-adaptive backoff) |
+| Mar 25, 5:20 PM | +#788 (0.9059, 9-gram order-adaptive backoff) |
+| Mar 25, 4:30 PM | +#782 (0.9362, Podracing III — per-order adaptive alpha) |
+| Mar 25, 3:41 PM | +#779 (0.6683), +#778 (0.9605), +#776 (0.9258), +#774 (0.9370), +#777, #770, #769, #771 |
 | Mar 25, 11:45 AM | +#755 (1.0321, **Gravity Tokenizer** — tokenizer-only optimization, extraordinary claim, needs scrutiny). |
 | Mar 25, 11:05 AM | #753 updated: replaced outlier seed, now **0.9625** (3-seed, std=0.0005). Promoted to record-eligible. New best pending. |
 | Mar 25, 10:55 AM | +#753 (initially 0.9823, failed p<0.01). +5 eval-time techniques to Tier 1. |
@@ -763,11 +968,8 @@ Competitive submissions that haven't demonstrated ≥0.005-nat significance. Off
 
 </details>
 
+
 ---
-
-*This commentary is generated by an AI (Claude) analyzing public PR data. No competition code is executed.*
-
-
 author:	tmustier
 association:	none
 edited:	false
@@ -828,7 +1030,7 @@ Please have your agent exclude the illegal submissions as per issue [#402](https
 --
 author:	MatoTeziTanka
 association:	none
-edited:	false
+edited:	true
 status:	none
 --
 **Update on PR #512 (PROTEUS v7):**
@@ -848,6 +1050,9 @@ The original submission had mismatched TTT configs across seeds (seed 42 used ep
 Regarding TTT compliance: our approach is backward-looking per-chunk, per-document — the same pattern as merged PR #77. Multi-epoch repeats the same sequential score-then-train process over each document. No bulk pre-eval training on the validation set.
 
 PR, README, logs, and submission.json have all been updated.
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
 --
 author:	notapplica
 association:	contributor
@@ -919,7 +1124,7 @@ Hope this helps someone grab the #1 spot! 🚀
 --
 author:	MatoTeziTanka
 association:	none
-edited:	false
+edited:	true
 status:	none
 --
 Hey @PlyMxt — solid research, don't sell yourself short calling it slop. The papers are real and the synthesis is reasonable.
@@ -935,10 +1140,13 @@ I've been deep in the trenches on this competition and can share some data point
 **On GPTQ** — agreed, Hessian-aware quantization beats naive int6. We've found that per-tensor-role allocation (different precision for attention vs MLP weights) is Pareto-optimal. Worth looking into if you haven't.
 
 We'll test the orthogonal residuals idea and share results. Good contribution — the community benefits when people share what they find regardless of whether they can run it themselves.
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
 --
 author:	MatoTeziTanka
 association:	none
-edited:	false
+edited:	true
 status:	none
 --
 Follow-up on the orthogonal residuals test we promised @PlyMxt.
@@ -959,6 +1167,9 @@ For anyone else exploring this direction: the technique works as described in ar
 Thanks for the suggestion @PlyMxt — negative results are still results and save others the compute.
 
 — PROTEUS by Light Speed Up
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
 --
 author:	JoeProAI
 association:	none
@@ -969,7 +1180,7 @@ PlyMxt -- the ARO paper synthesis was solid, don't undersell it. MatoTeziTanka -
 --
 author:	MatoTeziTanka
 association:	none
-edited:	false
+edited:	true
 status:	none
 --
 # Compliance-Safe Stack After Issue #677 — What's Still Legal
@@ -1051,12 +1262,16 @@ Before submitting, verify:
 
 *We ran the orthogonal residuals ablation that saved people compute ([Issue #140 comment](https://github.com/openai/parameter-golf/issues/140)). Our multi-epoch TTT submissions (#512, #548, #568) were among those ruled invalid in #677 — we learned from it. We're sharing this so nobody else burns GPU time on something that gets closed. Community over competition.*
 
-— @MatoTeziTanka (LightSpeedUp / PROTEUS)
+*Edit: Added RunPod template and Light Speed Up links for reproducibility.*
 
+— @MatoTeziTanka ([Light Speed Up](https://lightspeedup.com) / PROTEUS) · [RunPod Template](https://console.runpod.io/deploy?template=t7iu9ugzpi&ref=lj8cl7h5)
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
 --
 author:	MatoTeziTanka
 association:	none
-edited:	false
+edited:	true
 status:	none
 --
 ## LeakyReLU² Slope Sweep: 0.5 Is Not Optimal — Monotonic Trend to 0.9+
@@ -1115,6 +1330,337 @@ If someone has 8×H100 time, multi-seed validation at 0.9 and testing 1.0 would 
 
 *Same team that posted the orthogonal residuals ablation and the compliance guide. Sharing results so the community can build on them. Pod's dead now — somebody else's turn to push past 0.9.*
 
-— @MatoTeziTanka (LightSpeedUp / PROTEUS)
+*Edit: Added RunPod template and Light Speed Up links for reproducibility.*
 
+— @MatoTeziTanka ([Light Speed Up](https://lightspeedup.com) / PROTEUS) · [RunPod Template](https://console.runpod.io/deploy?template=t7iu9ugzpi&ref=lj8cl7h5)
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
+--
+author:	MatoTeziTanka
+association:	none
+edited:	true
+status:	none
+--
+## N-gram Eval Cache: 0.85 BPB — We Didn't Believe It Either
+
+Following our [compliance guide](https://github.com/openai/parameter-golf/issues/140#issuecomment-4124720432) and [slope sweep](https://github.com/openai/parameter-golf/issues/140#issuecomment-4127322055), here's an eval-time technique that dwarfs both.
+
+### The Short Version
+
+A backward-looking 5-gram hash cache with fixed-alpha blending drops our sliding window BPB from 1.13 to **0.85** — a 0.28 BPB improvement for zero training cost.
+
+We didn't believe it at first. We built the cache expecting 0.02–0.07 BPB from genuine text repetition (per PR #659/#674 results). When it came back at 0.85, we assumed it was broken and spent GPU time trying to disprove it. Here's what we found.
+
+### How It Works
+
+1. Maintain a numpy hash table (4M buckets) during sliding window eval
+2. After scoring each window (stride=64, seq=2048), update the hash table with all token 5-grams from that window
+3. For each token in the next window, look up its 4-token context in the hash table
+4. If found (≥2 observations), blend: `p_final = 0.8 * p_model + 0.2 * p_cache`
+5. No safety gate, no target-aware selection, no training data access
+
+### Results (3 seeds + verification)
+
+| Config | Sliding Window BPB | Cache Hit Rate | Seed |
+|--------|-------------------|----------------|------|
+| Baseline (slope 0.9, no cache) | 1.1314 | — | 42 |
+| + N-gram cache | 0.8513 | 98.2% | 42 |
+| + N-gram cache | 0.8502 | 98.2% | 1337 |
+| + N-gram cache | 0.8510 | 98.2% | 2024 |
+| **Mean** | **0.8508** | **98.2%** | **std: 0.0006** |
+
+### We Didn't Believe It — So We Verified
+
+98.2% hit rate looked wrong. Sliding window with stride=64 and seq_len=2048 means 97% overlap between windows — the cache sees most tokens from the previous window. Was the 0.85 just the cache memorizing overlap?
+
+We ran stride=2048 (zero overlap) to find out:
+
+| Stride | BPB | Hit Rate | Overlap |
+|--------|-----|----------|---------|
+| 64 (standard) | 0.8513 | 98.2% | 97% |
+| **2048 (zero overlap)** | **0.8709** | **97.9%** | **0%** |
+| No cache | 1.1314 | — | — |
+
+**At zero overlap, the cache still gets 97.9% hits and 0.87 BPB.** The 0.02 BPB gap between stride=64 and stride=2048 is the overlap contribution — small. The remaining 0.26 BPB improvement over baseline is genuine: FineWeb validation data has massive n-gram repetition that the neural model doesn't fully exploit.
+
+The cache is real. It's not an overlap artifact.
+
+### Implementation
+
+Based on PR #674's approach (numpy hash tables, not Python dicts):
+
+```python
+# Hash table: 4M buckets, uint32
+ctx_table = np.zeros(4_194_304, dtype=np.uint32)
+full_table = np.zeros(4_194_304, dtype=np.uint32)
+
+# Per-token scoring (after model forward pass):
+for j in range(scored_start, scored_end):
+    ctx_hash = hash_context(tokens[j-4:j])  # 4-token context
+    full_hash = hash_with_target(tokens[j-4:j], tokens[j])
+
+    if ctx_table[ctx_hash] >= 2:
+        p_ngram = min(full_table[full_hash], ctx_table[ctx_hash]) / ctx_table[ctx_hash]
+        p_final = 0.8 * p_model[j] + 0.2 * p_ngram
+
+# After scoring window, update tables:
+for j in range(window_start, window_end - 4):
+    ctx_table[hash_context(tokens[j:j+4])] += 1
+    full_table[hash_with_target(tokens[j:j+4], tokens[j+4])] += 1
+```
+
+### Reproducibility
+
+- **Docker image:** `matotezitanka/proteus-pytorch:2.11.0-cuda12.8` (8×H100 ready, all deps pre-installed)
+- **RunPod template:** [Deploy PROTEUS+STYX](https://console.runpod.io/deploy?template=t7iu9ugzpi&ref=lj8cl7h5) — one-click launch with data pre-loaded
+- **Training script:** `train_gpt_proteus_styx_ngram_v2.py` in our [private repo](https://github.com/MatoTeziTanka/parameter-golf-private) — will be open-sourced with the PR submission
+- **Eval time:** 134s (stride=64), 24s (stride=2048) — well within the 600s eval budget
+
+### What's Next
+
+- Multi-order backoff (5→4→3→2-gram) — catches patterns the flat 5-gram misses
+- Entropy-adaptive alpha — blend more when model is uncertain
+- Integration with our slope 0.9 + STYX gate stack for a combined submission
+
+---
+
+*Third post today from the same team. We share everything — including the parts where we thought our own results were broken. Community over competition.*
+
+*Edit: Added RunPod template link and Docker image reference for reproducibility.*
+
+— @MatoTeziTanka ([Light Speed Up](https://lightspeedup.com) / PROTEUS)
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
+--
+author:	MatoTeziTanka
+association:	none
+edited:	true
+status:	none
+--
+## Community Toolkit Drop: Docker Image, RunPod Template, Scripts, and Peer Review Findings
+
+We've been heads-down on this competition for a week now. After getting our submission ([PR #769](https://github.com/openai/parameter-golf/pull/769), 0.8495 BPB) to a stable place, we took a step back to focus on things that help everyone — not just us.
+
+### Public Docker Image + RunPod Template
+
+**Docker:** `matotezitanka/proteus-pytorch:2.11.0-cuda12.8`
+- PyTorch 2.11.0, CUDA 12.8, FlashAttention 3 (Hopper), all competition deps pre-installed
+- No more dependency hell on pod startup
+
+> ### **[>>> One-Click RunPod Template — Deploy PROTEUS+STYX <<<](https://console.runpod.io/deploy?template=t7iu9ugzpi&ref=lj8cl7h5)**
+> 50GB container disk, env vars pre-configured. Works on 1×H100 for testing, 8×H100 SXM for record runs. Data pre-loaded — no download wait.
+
+### Community Scripts (in the Docker image)
+
+| Script | What it does |
+|--------|-------------|
+| `setup_data.sh` | One-command FineWeb dataset download |
+| `setup_volume.sh` | Full volume setup with README + run helper |
+| `swap_pytorch.sh` | Hot-swap across 20 H100-compatible PyTorch versions |
+| `cpu_test.py` | Pre-flight validation before burning GPU hours |
+| `run_training.sh` | One-liner to run any seed on any GPU count |
+
+### QUICKSTART.md
+
+Step-by-step guide for first-time RunPod users: account creation → SSH setup → deploy → train → results → **STOP YOUR POD** (that last part is important — we've all burned credits on idle pods).
+
+### Bug Fixes (benefits everyone on the PR #549 stack)
+
+| Fix | Impact |
+|-----|--------|
+| `inference_mode` → `no_grad` | Prevents crash on PyTorch 2.11+ |
+| Double `torch.compile` removed from `eval_val_sliding` | Sliding window eval actually completes now |
+| `NGRAM_CACHE=1` default | N-gram cache enabled without manual env var |
+
+### Peer Review Activity
+
+We spent today reviewing 8 competing PRs for rule compliance. Summary:
+
+- **4 submissions** notified about missing 3-seed validation (#828, #764, #806, #808)
+- **1 submission** flagged for artifact size violation on 2/3 seeds (#825) — same issue we caught on our own seed 42
+- **1 submission** flagged for potential forward-looking cache leak (#779) — author acknowledged and pushed a fix within 30 minutes
+- **1 submission** questioned on two-pass rescoring compliance (#846) — productive discussion ongoing
+- **1 submission** tested locally and found to crash on first forward pass due to undefined `skip_norm` (#852)
+
+None of this was adversarial — every comment recognized the author's work first and raised issues constructively. We hit the same size bug ourselves and disclosed it publicly before anyone else caught it.
+
+### Previous Contributions on This Thread
+
+For anyone catching up, our earlier posts:
+1. [Compliance guide post-Issue #677](https://github.com/openai/parameter-golf/issues/140#issuecomment-4124720432) — what's legal after the rules clarification
+2. [LeakyReLU² slope sweep](https://github.com/openai/parameter-golf/issues/140#issuecomment-4127322055) — 0.9 beats 0.5, monotonic trend (now cited by multiple PRs)
+3. [N-gram eval cache analysis](https://github.com/openai/parameter-golf/issues/140#issuecomment-4129882814) — the technique that's now everywhere
+
+This competition has been genuinely collaborative. Happy to answer questions on any of the above.
+
+---
+*Built with [PROTEUS+STYX](https://lightspeedup.com) by Light Speed Up · [**Deploy on RunPod**](https://console.runpod.io/deploy?template=t7iu9ugzpi&ref=lj8cl7h5)*
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
+--
+author:	sunnypatneedi
+association:	none
+edited:	true
+status:	none
+--
+@notapplica PR #771 currently shows 0 seeds in the leaderboard — this was due to a submission.json bug fixed in commit 318b9cc. The correct seed count is 3 (seeds: 42, 1337, 2025). Could you update the entry? Thanks!
+
+@notapplica  could you reindex #771 ? Thanks!
+--
+author:	KumarChad
+association:	none
+edited:	false
+status:	none
+--
+sorry i had a question regarding the gpu credits is openai not handing them out anymore? i sent the form yesterday and one again today as well to test my solution, basically a mixture of the two score ngram with some other features but since they havent sent the credits, i cant really test it. are there any other alternatives? is anybody else having an issue? 
+--
+author:	aryanbhosale
+association:	none
+edited:	false
+status:	none
+--
+**Update: PR #893 — Two-Pass Order-12 N-gram Backoff — 0.1310 BPB** (3-seed mean, std 0.0001)
+
+Upgraded from single-pass order-9 (0.2841, PR #865) to two-pass order-12 with 256K chunks and alpha_max=0.70. Pass 1 builds the full cache at 0.279 BPB, pass 2 rescores the first 50 cold-cache chunks with the complete cache, dropping to 0.131. The two-pass idea is from @quietsmile's PR #843/#846 — extending it to our Parallel Muon base with a slightly better pre-quant model (EMA 1.119) got us just under their 0.1315.
+
+Training: 600s on 8xH100 (~89ms/step, 6770 steps). Eval: ~435s (pass 1 + pass 2). Artifact ~15.85 MB.
+--
+author:	MatoTeziTanka
+association:	none
+edited:	true
+status:	none
+--
+@KumarChad You're not alone — this is a common frustration.
+
+We received $25 in RunPod credits from our grant application. That's about one hour of 8×H100 time — and we burned most of it just learning how RunPod works, not even training. Everything else has been self-funded.
+
+For context, there are 518 unique contributors and 893 PRs in this competition. The README commits $1,000,000 in compute credits, ($1,930 /each at the time of this writing) but there's no public information on:
+- How many grants have been approved
+- Total credits disbursed so far
+- What "appropriate level" means on the application
+- Processing timeline
+- Whether the pool is still active
+
+Multiple participants are in the same boat — Issue #138 has someone who burned $550 in personal Modal credits waiting for RunPod credits. PR #764 mentions $339 in personal compute. Issue #821 documents $8.65 charged for pods that never ran. Several PRs (#291, #235, #277) are sitting as drafts marked "pending compute."
+
+We're not complaining — we shipped our submission, built a public Docker image and RunPod template, and self-funded the gap. But for an open-source competition on a public repo, some transparency on grant allocation would go a long way. Even a simple dashboard showing total applications received, grants approved, and credits disbursed would help people plan.
+
+In the meantime, practical suggestions:
+- **Start on 1×H100** (~$2.50/hr) for iteration, only move to 8×H100 (~$21.50/hr) for final 3-seed runs
+- **Our RunPod template** has everything pre-configured: [**Deploy PROTEUS+STYX**](https://console.runpod.io/deploy?template=t7iu9ugzpi&ref=lj8cl7h5) — saves you setup time and wasted billing
+- **cpu_test.py** in the Docker image validates your changes before burning GPU hours
+- **STOP YOUR POD** when you're not running — idle pods still bill
+
+@valerio-oai @notapplica — any visibility into the grant program status would be appreciated by the community.
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
+--
+author:	aryanbhosale
+association:	none
+edited:	false
+status:	none
+--
+Following the discussion in #677 about n-gram hash collision inflation and two-pass causality violations, I'm keeping PR #893 (0.1310 two-pass) open for transparency but want to highlight my purely neural submission that avoids all contested techniques:
+
+**PR #838 — 1.1215 BPB** (3-seed mean, std 0.0002) — no n-gram cache, no two-pass, no training data at eval. Just legal score-first TTT on a Parallel Muon base.
+
+| Seed | EMA bpb | Quantized bpb | TTT bpb |
+|------|---------|---------------|---------|
+| 1337 | 1.1161 | 1.1238 | **1.1217** |
+| 42 | 1.1158 | 1.1234 | **1.1213** |
+| 2024 | 1.1160 | 1.1234 | **1.1215** |
+
+The EMA pre-quant (1.116) actually beats the merged SOTA's pre-TTT (1.122), but our quantization gap (+0.008) eats most of that advantage. The TTT recovers 0.002, landing at 1.1215 — just above the SOTA's 1.1194.
+
+Unquestionably legal regardless of how the n-gram and two-pass rulings shake out.
+--
+author:	MatoTeziTanka
+association:	none
+edited:	true
+status:	none
+--
+## OLYMPUS: The Agora — Community Companion for Parameter Golf
+
+We built a public transparency hub for the competition: **[matotezitanka.github.io/parameter-golf](https://matotezitanka.github.io/parameter-golf/)**
+
+**What's live now:**
+- Plain-English submission checklist (legal / banned / grey area, updated post-March 27 ruling)
+- Rule change history with dates, affected PRs, and ruling sources
+- Dual leaderboard — compliant submissions vs full archive (ALIVE / DEAD / AT-RISK)
+- Funding transparency tracker — who's spending what, grants vs self-funded (7 entries so far)
+- Blocked on compute board — researchers with ideas but no GPU
+- Compute survival guide — serverless > pods, tested by us
+- H100 SXM vs PCIe breakdown, CPU smoke tests, free compute options
+
+**What's coming:**
+- Auto-updating leaderboard from GitHub API (every 30 min)
+- Compliance engine that auto-flags banned techniques
+- Technique map (what's been tried, what works, untried combinations)
+- BPB timeline (SOTA over time with key events)
+- Collaboration finder (who's working on what)
+- Cited research tracker (papers → PRs → BPB results)
+
+**Contribute:**
+The site is community-driven. You can [report your spending](https://github.com/MatoTeziTanka/parameter-golf/issues/new?template=funding-report.yml), [dispute a classification](https://github.com/MatoTeziTanka/parameter-golf/issues/new?template=correction.yml), [suggest a technique](https://github.com/MatoTeziTanka/parameter-golf/issues/new?template=technique-suggestion.yml), [report a blocked experiment](https://github.com/MatoTeziTanka/parameter-golf/issues/new?template=blocked-on-compute.yml), or [give feedback](https://github.com/MatoTeziTanka/parameter-golf/issues/new?template=general-feedback.yml).
+
+**Why we built this:** The competition has 1000+ PRs and no clear source of truth. Issue #140 does great technique analysis (and we source data from it — credit where it's due), but there's no simple checklist, no visual status board, no funding transparency, and no way to see at a glance which submissions survived the March 27 ruling. We're trying to fill that gap.
+
+**Disclosure:** We're active participants. Our [PR #769](https://github.com/openai/parameter-golf/pull/769) was closed in the March 27 ruling. We include ourselves in the data — including the embarrassing parts. All classifications are from public GitHub data and [disputable via Issues](https://github.com/MatoTeziTanka/parameter-golf/issues).
+
+Built by [@MatoTeziTanka](https://github.com/MatoTeziTanka) ([Light Speed Up](https://lightspeedup.com)) with [@ddeturk24](https://github.com/ddeturk24).
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
+--
+author:	MatoTeziTanka
+association:	none
+edited:	true
+status:	none
+--
+## AGORA Update: All Phases Live
+
+Quick update on [The Agora](https://matotezitanka.github.io/parameter-golf/) — all planned phases are now shipped:
+
+- **v0.2.0** — Live leaderboard: 996 PRs auto-classified (142 ALIVE, 291 DEAD, 88 AT-RISK, 475 INCOMPLETE)
+- **v0.3.0** — Technique map (24 techniques tracked), BPB timeline with March 27 cliff, collaboration finder
+- **v0.4.0** — Community input: 6 issue templates for funding reports, corrections, technique suggestions, blocked experiments, resources, and feedback
+- **v0.5.0** — Auto-updates every 30 minutes via GitHub Actions
+
+The compliance engine flags n-gram caches, two-pass rescoring, and other banned techniques automatically. Every classification is disputable via [Issues](https://github.com/MatoTeziTanka/parameter-golf/issues).
+
+Technique data sourced from this thread — credit where it's due.
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
+--
+author:	MatoTeziTanka
+association:	none
+edited:	true
+status:	none
+--
+## AGORA v0.5.1 — UX Overhaul + Apology
+
+Pushed a round of fixes to [The Agora](https://matotezitanka.github.io/parameter-golf/) based on our own review:
+
+**v0.5.1 changes:**
+- Scrollable leaderboard tables with sticky headers (no more endless scrolling)
+- Neural-only leaderboard cleaned — removed 4 PRs with impossibly low BPB (<0.5)
+- Archive leaderboard now sorts ALIVE submissions first
+- Navigation updated — all sections properly linked
+- Technique card text centering fixed
+- BPB floor gate added to classifier
+
+**Important fix:** We discovered that **Issues and Discussions were disabled** on our fork. If anyone tried to leave feedback, report a correction, or dispute a classification and couldn't — we sincerely apologize. Both are now enabled:
+
+- [Submit feedback or corrections](https://github.com/MatoTeziTanka/parameter-golf/issues/new/choose) (6 structured templates)
+- [Open discussion](https://github.com/MatoTeziTanka/parameter-golf/discussions)
+
+We want this to be community-driven. Your input makes it better.
+
+---
+*Disclosure: I use Claude Code CLI, Codex CLI, and Gemini Pro as tools in my workflow. Human first, AI-assisted.*
 --

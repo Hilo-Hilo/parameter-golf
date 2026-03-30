@@ -279,7 +279,7 @@ log_event --event "pod_selected" --job-id "$JOB_ID" --pod-id "$INSTANCE_ID" \
 # Poll for active status + IP
 # ---------------------------------------------------------------------------
 if [ -z "$INSTANCE_IP" ]; then
-  for i in $(seq 1 36); do
+  for i in $(seq 1 72); do
     INFO="$(sf_get_instance "$INSTANCE_ID")"
     STATUS="$(echo "$INFO" | jq -r '.status // "unknown"')"
     INSTANCE_IP="$(echo "$INFO" | jq -r '.ip // empty')"
@@ -298,7 +298,7 @@ if [ -z "$INSTANCE_IP" ]; then
 fi
 
 if [ -z "$INSTANCE_IP" ] || [ "$INSTANCE_IP" = "null" ]; then
-  announce "Error: instance did not become active within 6 min." >&2
+  announce "Error: instance did not become active within 12 min." >&2
   exit 1
 fi
 
