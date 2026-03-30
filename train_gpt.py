@@ -109,6 +109,10 @@ class Hyperparameters:
     ttt_momentum = float(os.environ.get("TTT_MOMENTUM", 0.9))
     ttt_batch_seqs = int(os.environ.get("TTT_BATCH_SEQS", 32))
     ttt_grad_clip = float(os.environ.get("TTT_GRAD_CLIP", 1.0))
+    ttt_optimizer = os.environ.get("TTT_OPTIMIZER", "sgd")
+    ttt_per_layer_lr = bool(int(os.environ.get("TTT_PER_LAYER_LR", "0")))
+    vnorm_enabled = bool(int(os.environ.get("VNORM_ENABLED", "0")))
+    skip_norm_enabled = bool(int(os.environ.get("SKIP_NORM_ENABLED", "0")))
 
 # --- Batched Newton-Schulz orthogonalization ---
 
@@ -645,6 +649,7 @@ class CausalSelfAttention(nn.Module):
         self.value_residual = value_residual
         if value_residual:
             self.vr_lambda = nn.Parameter(torch.tensor([0.5, 0.5], dtype=torch.float32))
+        self.value_norm = False  # set by GPT.__init__ if VNORM_ENABLED
     def _xsa_efficient(self, y: Tensor, v: Tensor) -> Tensor:
         """Efficient XSA: subtract self-value projection via GQA-aware reshape (no repeat_interleave).
         y: [B, T, H, D], v: [B, T, Hkv, D]. H must be divisible by Hkv."""
@@ -663,6 +668,8 @@ class CausalSelfAttention(nn.Module):
         if v_embed is not None:
             v = v + v_embed
         v = v.reshape(bsz, seqlen, self.num_kv_heads, self.head_dim)
+        if self.value_norm:
+            v = F.rms_norm(v, (v.size(-1),))
         raw_v = v if self.value_residual else None
         if self.value_residual and v0 is not None:
             lam = self.vr_lambda.to(dtype=v.dtype)
@@ -765,6 +772,7 @@ class Block(nn.Module):
         self.mlp_scale = nn.Parameter(torch.ones(dim, dtype=torch.float32))
         self.resid_mix = nn.Parameter(torch.stack((torch.ones(dim), torch.zeros(dim))).float())
         self.ln_scale_factor = 1.0 / math.sqrt(layer_idx + 1) if ln_scale else 1.0
+        self.skip_norm = False  # set by GPT.__init__ if SKIP_NORM_ENABLED
         if dtg:
             self.dtg_gate = nn.Linear(dim, 1, bias=True)
             nn.init.zeros_(self.dtg_gate.weight)
@@ -773,7 +781,8 @@ class Block(nn.Module):
             self.dtg_gate = None
     def forward(self, x: Tensor, x0: Tensor, q_w: Tensor, k_w: Tensor, v_w: Tensor, out_w: Tensor, up_w: Tensor, down_w: Tensor, v_embed: Tensor | None = None, v0: Tensor | None = None) -> tuple[Tensor, Tensor | None]:
         mix = self.resid_mix.to(dtype=x.dtype)
-        x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0
+        x0_for_mix = F.rms_norm(x0, (x0.size(-1),)) if self.skip_norm else x0
+        x_in = mix[0][None, None, :] * x + mix[1][None, None, :] * x0_for_mix
         attn_out, raw_v = self.attn(self.attn_norm(x_in) * self.ln_scale_factor, q_w, k_w, v_w, out_w, v_embed=v_embed, v0=v0)
         x_out = x_in + self.attn_scale.to(dtype=x_in.dtype)[None, None, :] * attn_out
         x_out = x_out + self.mlp_scale.to(dtype=x_out.dtype)[None, None, :] * self.mlp(self.mlp_norm(x_out) * self.ln_scale_factor, up_w, down_w)
@@ -809,8 +818,12 @@ class GPT(nn.Module):
         ve_layers: str = "9,10",
         gated_attention: bool = False,
         value_residual: bool = False,
+        vnorm_enabled: bool = False,
+        skip_norm_enabled: bool = False,
     ):
         super().__init__()
+        self._vnorm_enabled = vnorm_enabled
+        self._skip_norm_enabled = skip_norm_enabled
         self._ve_target_dim = num_kv_heads * (model_dim // num_heads)  # kv_dim for value projection
         if logit_softcap <= 0.0:
             raise ValueError(f"logit_softcap must be positive, got {logit_softcap}")
@@ -859,6 +872,12 @@ class GPT(nn.Module):
             for block in self.blocks:
                 block.attn.rope_dims = rope_dims
                 block.attn.rotary = Rotary(head_dim, base=rope_base, train_seq_len=1024, rope_dims=rope_dims)
+        if getattr(self, '_vnorm_enabled', False):
+            for block in self.blocks:
+                block.attn.value_norm = True
+        if getattr(self, '_skip_norm_enabled', False):
+            for block in self.blocks:
+                block.skip_norm = True
         self.ve_layer_indices = [int(x) for x in ve_layers.split(",") if x.strip()] if ve_enabled else []
         kv_dim_ve = self._ve_target_dim
         if self.ve_layer_indices:
@@ -1136,7 +1155,19 @@ def eval_val_sliding_ttt(
     log0(f"ttt_sliding:params unfrozen={sum(p.numel() for p in ttt_params)} "
          f"frozen={sum(p.numel() for p in base_model.parameters() if not p.requires_grad)}")
 
-    optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
+    if args.ttt_optimizer == "adamw":
+        if args.ttt_per_layer_lr:
+            mlp_set = {id(p) for n, p in base_model.named_parameters() if p.requires_grad and ("mlp_up" in n or "mlp_down" in n or ".mlp." in n)}
+            other_params = [p for p in ttt_params if id(p) not in mlp_set]
+            mlp_params = [p for p in ttt_params if id(p) in mlp_set]
+            optimizer = torch.optim.AdamW(
+                [{"params": other_params, "lr": args.ttt_lr, "_base_lr": args.ttt_lr},
+                 {"params": mlp_params, "lr": args.ttt_lr * 3.0, "_base_lr": args.ttt_lr * 3.0}],
+                weight_decay=0.0, betas=(0.9, 0.95), eps=1e-8)
+        else:
+            optimizer = torch.optim.AdamW(ttt_params, lr=args.ttt_lr, weight_decay=0.0, betas=(0.9, 0.95), eps=1e-8)
+    else:
+        optimizer = torch.optim.SGD(ttt_params, lr=args.ttt_lr, momentum=args.ttt_momentum)
     t0 = time.perf_counter()
 
     for ci in range(num_chunks):
@@ -1189,9 +1220,10 @@ def eval_val_sliding_ttt(
             base_model.train()
             chunk_seqs = (chunk_end - chunk_start) // seq_len
             if chunk_seqs > 0:
-                cos_lr = args.ttt_lr * 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
+                cos_scale = 0.5 * (1.0 + math.cos(math.pi * ci / max(num_chunks - 1, 1)))
                 for pg in optimizer.param_groups:
-                    pg['lr'] = cos_lr
+                    base = pg.get('_base_lr', args.ttt_lr)
+                    pg['lr'] = base * cos_scale
                 my_seq_s = (chunk_seqs * rank) // world_size
                 my_seq_e = (chunk_seqs * (rank + 1)) // world_size
                 my_chunk_seqs = my_seq_e - my_seq_s
@@ -1490,6 +1522,8 @@ def main() -> None:
         ve_layers=args.ve_layers,
         gated_attention=args.gated_attention,
         value_residual=args.value_residual,
+        vnorm_enabled=args.vnorm_enabled,
+        skip_norm_enabled=args.skip_norm_enabled,
     ).to(device).bfloat16()
     # Banks stay FP32 (like CastedLinear weights), cast to BF16 in forward
     base_model.qo_bank.data = base_model.qo_bank.data.float()
@@ -1833,6 +1867,7 @@ def main() -> None:
         rope_dims=args.rope_dims, ln_scale=args.ln_scale, dtg=args.dtg_enabled,
         ve_enabled=args.ve_enabled, ve_dim=args.ve_dim, ve_layers=args.ve_layers,
         gated_attention=args.gated_attention, value_residual=args.value_residual,
+        vnorm_enabled=args.vnorm_enabled, skip_norm_enabled=args.skip_norm_enabled,
     ).to(device).bfloat16()
     eval_model.qo_bank.data = eval_model.qo_bank.data.float()
     eval_model.kv_bank.data = eval_model.kv_bank.data.float()
